@@ -1,0 +1,99 @@
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Build directories
+build/
+build-*/
+debug/
+release/
+
+# Qt
+*.pro.user
+*.pro.user.*
+*.qmlc
+*.qmlc.json
+*.jsc
+*.autosave
+.qmake.stash
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qm
+.qmlcache/
+
+# Compiled Object files
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+qsnapper
+qsnapper-dbus-service
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.qtcreator/
+*.user
+*.includes
+*.config
+*.creator
+*.files
+*.creator.user*
+.clangd/
+.cache/
+compile_commands.json
+
+# macOS
+.DS_Store
+
+# Debug and Testing
+core
+core.*
+vgcore.*
+*.log
+*.gcov
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Package Building
+*.rpm
+*.deb
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+packaging/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swn
+.*.kate-swp

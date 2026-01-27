@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=com.presire.qsnapper.Operations
+Exec=@CMAKE_INSTALL_FULL_LIBEXECDIR@/qsnapper-dbus-service
+User=root

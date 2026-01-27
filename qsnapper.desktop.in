@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=qSnapper
+GenericName=Snapshot management tool
+GenericName[ja]=スナップショット管理ツール
+Comment[=GUI application for managing Btrfs/Snapper filesystem snapshots
+Comment[ja]=Btrf/Snapperファイルシステムのスナップショットを管理するGUIアプリケーション
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/qsnapper %F
+Icon=@CMAKE_INSTALL_FULL_DATADIR@/icons/hicolor/128x128/apps/qSnapper.png
+Categories=System;FileTools;Utility;Qt;
+Keywords=qsnapper;snapper;snapshot;filesystem;btrfs;backup;restore;
+Terminal=false
+StartupNotify=true

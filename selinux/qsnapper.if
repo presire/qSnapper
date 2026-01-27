@@ -1,0 +1,296 @@
+## <summary>qSnapper - Qt6/QML GUI for Btrfs/Snapper snapshot management</summary>
+
+########################################
+## <summary>
+##	Execute qsnapper in the qsnapper domain.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed to transition.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_domtrans',`
+	gen_require(`
+		type qsnapper_t, qsnapper_exec_t;
+	')
+
+	corecmd_search_bin($1)
+	domtrans_pattern($1, qsnapper_exec_t, qsnapper_t)
+')
+
+########################################
+## <summary>
+##	Execute qsnapper in the qsnapper domain,
+##	and allow the specified role the qsnapper domain.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed to transition.
+##	</summary>
+## </param>
+## <param name="role">
+##	<summary>
+##	Role allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_run',`
+	gen_require(`
+		type qsnapper_t;
+		attribute_role qsnapper_roles;
+	')
+
+	qsnapper_domtrans($1)
+	roleattribute $2 qsnapper_roles;
+')
+
+########################################
+## <summary>
+##	Send and receive D-Bus messages with qsnapper.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed to chat.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_dbus_chat',`
+	gen_require(`
+		type qsnapper_t;
+		class dbus send_msg;
+	')
+
+	allow $1 qsnapper_t:dbus send_msg;
+	allow qsnapper_t $1:dbus send_msg;
+')
+
+########################################
+## <summary>
+##	Read qsnapper configuration files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_read_config',`
+	gen_require(`
+		type qsnapper_conf_t;
+	')
+
+	files_search_etc($1)
+	read_files_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+	read_lnk_files_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+	list_dirs_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+')
+
+########################################
+## <summary>
+##	Manage qsnapper configuration files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_manage_config',`
+	gen_require(`
+		type qsnapper_conf_t;
+	')
+
+	files_search_etc($1)
+	manage_files_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+	manage_dirs_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+	manage_lnk_files_pattern($1, qsnapper_conf_t, qsnapper_conf_t)
+')
+
+########################################
+## <summary>
+##	Read qsnapper snapshot files and directories.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_read_snapshots',`
+	gen_require(`
+		type qsnapper_snapshot_t;
+	')
+
+	files_search_var($1)
+	read_files_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+	read_lnk_files_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+	list_dirs_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+')
+
+########################################
+## <summary>
+##	Manage qsnapper snapshot files and directories.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_manage_snapshots',`
+	gen_require(`
+		type qsnapper_snapshot_t;
+	')
+
+	files_search_var($1)
+	manage_files_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+	manage_dirs_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+	manage_lnk_files_pattern($1, qsnapper_snapshot_t, qsnapper_snapshot_t)
+')
+
+########################################
+## <summary>
+##	Execute qsnapper D-Bus service in the qsnapper_dbus domain.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed to transition.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_dbus_domtrans',`
+	gen_require(`
+		type qsnapper_dbus_t, qsnapper_dbus_exec_t;
+	')
+
+	corecmd_search_bin($1)
+	domtrans_pattern($1, qsnapper_dbus_exec_t, qsnapper_dbus_t)
+')
+
+########################################
+## <summary>
+##	Send and receive D-Bus messages with qsnapper D-Bus service.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed to chat.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_dbus_service_chat',`
+	gen_require(`
+		type qsnapper_dbus_t;
+		class dbus send_msg;
+	')
+
+	allow $1 qsnapper_dbus_t:dbus send_msg;
+	allow qsnapper_dbus_t $1:dbus send_msg;
+')
+
+########################################
+## <summary>
+##	Read qsnapper log files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_read_log',`
+	gen_require(`
+		type qsnapper_log_t;
+	')
+
+	logging_search_logs($1)
+	read_files_pattern($1, qsnapper_log_t, qsnapper_log_t)
+')
+
+########################################
+## <summary>
+##	Append to qsnapper log files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_append_log',`
+	gen_require(`
+		type qsnapper_log_t;
+	')
+
+	logging_search_logs($1)
+	append_files_pattern($1, qsnapper_log_t, qsnapper_log_t)
+')
+
+########################################
+## <summary>
+##	Manage qsnapper log files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`qsnapper_manage_log',`
+	gen_require(`
+		type qsnapper_log_t;
+	')
+
+	logging_search_logs($1)
+	manage_files_pattern($1, qsnapper_log_t, qsnapper_log_t)
+	manage_dirs_pattern($1, qsnapper_log_t, qsnapper_log_t)
+')
+
+########################################
+## <summary>
+##	All of the rules required to administrate
+##	a qsnapper environment.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+## <param name="role">
+##	<summary>
+##	Role allowed access.
+##	</summary>
+## </param>
+## <rolecap/>
+#
+interface(`qsnapper_admin',`
+	gen_require(`
+		type qsnapper_t, qsnapper_dbus_t;
+		type qsnapper_conf_t, qsnapper_snapshot_t;
+		type qsnapper_log_t, qsnapper_var_run_t;
+		type qsnapper_tmp_t;
+	')
+
+	allow $1 qsnapper_t:process { ptrace signal_perms };
+	ps_process_pattern($1, qsnapper_t)
+
+	allow $1 qsnapper_dbus_t:process { ptrace signal_perms };
+	ps_process_pattern($1, qsnapper_dbus_t)
+
+	files_search_etc($1)
+	admin_pattern($1, qsnapper_conf_t)
+
+	files_search_var($1)
+	admin_pattern($1, qsnapper_snapshot_t)
+
+	logging_search_logs($1)
+	admin_pattern($1, qsnapper_log_t)
+
+	files_search_pids($1)
+	admin_pattern($1, qsnapper_var_run_t)
+
+	files_search_tmp($1)
+	admin_pattern($1, qsnapper_tmp_t)
+
+	qsnapper_run($1, $2)
+')

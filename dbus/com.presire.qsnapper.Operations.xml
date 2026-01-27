@@ -1,0 +1,47 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="com.presire.qsnapper.Operations">
+    <method name="ListSnapshots">
+      <arg name="snapshots" type="s" direction="out"/>
+    </method>
+    <method name="CreateSnapshot">
+      <arg name="type" type="s" direction="in"/>
+      <arg name="description" type="s" direction="in"/>
+      <arg name="preNumber" type="i" direction="in"/>
+      <arg name="cleanup" type="s" direction="in"/>
+      <arg name="important" type="b" direction="in"/>
+      <arg name="snapshotData" type="s" direction="out"/>
+    </method>
+    <method name="DeleteSnapshot">
+      <arg name="number" type="i" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="RollbackSnapshot">
+      <arg name="number" type="i" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="GetFileChanges">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="snapshotNumber" type="i" direction="in"/>
+      <arg name="changes" type="s" direction="out"/>
+    </method>
+    <method name="GetFileDiff">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="snapshotNumber" type="i" direction="in"/>
+      <arg name="filePath" type="s" direction="in"/>
+      <arg name="diff" type="s" direction="out"/>
+    </method>
+    <method name="RestoreFiles">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="snapshotNumber" type="i" direction="in"/>
+      <arg name="filePaths" type="as" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <signal name="restoreProgress">
+      <arg name="current" type="i"/>
+      <arg name="total" type="i"/>
+      <arg name="filePath" type="s"/>
+    </signal>
+  </interface>
+</node>

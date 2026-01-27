@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>SUSE</vendor>
+  <vendor_url>https://www.presire.com</vendor_url>
+
+  <action id="com.presire.qsnapper.list-snapshots">
+    <description>List system snapshots</description>
+    <description xml:lang="ja">システムスナップショットを一覧表示</description>
+    <message>Authentication is required to list system snapshots</message>
+    <message xml:lang="ja">システムスナップショットを一覧表示するには認証が必要です</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.create-snapshot">
+    <description>Create a system snapshot</description>
+    <description xml:lang="ja">システムスナップショットを作成</description>
+    <message>Authentication is required to create a system snapshot</message>
+    <message xml:lang="ja">システムスナップショットを作成するには認証が必要です</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.delete-snapshot">
+    <description>Delete a system snapshot</description>
+    <description xml:lang="ja">システムスナップショットを削除</description>
+    <message>Authentication is required to delete a system snapshot</message>
+    <message xml:lang="ja">システムスナップショットを削除するには認証が必要です</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.rollback-snapshot">
+    <description>Rollback to a system snapshot</description>
+    <description xml:lang="ja">システムスナップショットに復元</description>
+    <message>Authentication is required to rollback to a system snapshot</message>
+    <message xml:lang="ja">システムスナップショットに復元するには認証が必要です</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

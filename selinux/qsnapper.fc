@@ -1,0 +1,90 @@
+########################################
+# qSnapper File Contexts
+#
+# This file defines SELinux security contexts for qSnapper files and directories.
+# Each line maps a file path (or pattern) to a security context label.
+#
+# Syntax: <path_regex> <file_type_flag> <security_context>
+#   File type flags:
+#     --  Regular file
+#     -d  Directory
+#     -c  Character device
+#     -b  Block device
+#     -s  Socket
+#     -p  Named pipe (FIFO)
+#     -l  Symbolic link
+#     (no flag) = any file type
+########################################
+
+########################################
+# Executable files
+########################################
+
+# Main GUI application (unprivileged)
+/usr/bin/qsnapper						--	gen_context(system_u:object_r:qsnapper_exec_t,s0)
+
+# D-Bus service daemon (privileged, auto-started by D-Bus)
+/usr/libexec/qsnapper-dbus-service			--	gen_context(system_u:object_r:qsnapper_dbus_exec_t,s0)
+
+########################################
+# D-Bus configuration files
+########################################
+
+# D-Bus system service activation file
+/usr/share/dbus-1/system-services/com\.presire\.qsnapper\.Operations\.service	--	gen_context(system_u:object_r:dbusd_etc_t,s0)
+
+# D-Bus security policy configuration
+/usr/share/dbus-1/system\.d/com\.presire\.qsnapper\.Operations\.conf		--	gen_context(system_u:object_r:dbusd_etc_t,s0)
+
+########################################
+# PolicyKit configuration
+########################################
+
+# PolicyKit action definitions
+/usr/share/polkit-1/actions/com\.presire\.qsnapper\.policy			--	gen_context(system_u:object_r:usr_t,s0)
+
+########################################
+# Snapper configuration files
+########################################
+
+# System-wide Snapper configuration
+/etc/snapper(/.*)?						gen_context(system_u:object_r:qsnapper_conf_t,s0)
+
+# Snapper state and metadata
+/var/lib/snapper(/.*)?					gen_context(system_u:object_r:qsnapper_conf_t,s0)
+
+########################################
+# Snapshot storage
+########################################
+
+# Btrfs snapshot directory (standard location)
+/\.snapshots(/.*)?						gen_context(system_u:object_r:qsnapper_snapshot_t,s0)
+
+# Alternative snapshot locations (if needed, uncomment and customize)
+# /mnt/snapshots(/.*)?					gen_context(system_u:object_r:qsnapper_snapshot_t,s0)
+# /home/\.snapshots(/.*)?					gen_context(system_u:object_r:qsnapper_snapshot_t,s0)
+
+########################################
+# Log files
+########################################
+
+# Snapper log directory and files
+/var/log/snapper(/.*)?					gen_context(system_u:object_r:qsnapper_log_t,s0)
+
+########################################
+# Runtime data
+########################################
+
+# PID files and runtime state
+/var/run/qsnapper(/.*)?					gen_context(system_u:object_r:qsnapper_var_run_t,s0)
+/run/qsnapper(/.*)?						gen_context(system_u:object_r:qsnapper_var_run_t,s0)
+
+########################################
+# Desktop integration (optional)
+########################################
+
+# Desktop entry file (uses default usr_t context, no special labeling needed)
+# /usr/share/applications/com\.presire\.qsnapper\.desktop	--	gen_context(system_u:object_r:usr_t,s0)
+
+# Application icon (uses default usr_t context)
+# /usr/share/icons/hicolor/128x128/apps/qsnapper\.png		--	gen_context(system_u:object_r:usr_t,s0)

@@ -1,0 +1,281 @@
+policy_module(qsnapper, 1.0.0)
+
+########################################
+# qSnapper SELinux Policy Module
+#
+# This module provides Mandatory Access Control (MAC) for qSnapper,
+# a Qt6/QML GUI application for managing Btrfs/Snapper filesystem snapshots.
+#
+# Architecture:
+#   - qsnapper_t: GUI application domain (unprivileged user)
+#   - qsnapper_dbus_t: D-Bus service domain (root privileges)
+#
+# Communication flow:
+#   QML UI -> SnapperService -> D-Bus (system bus) -> SnapshotOperations -> libsnapper
+#                                  |
+#                               PolicyKit authorization
+########################################
+
+########################################
+# Declarations
+########################################
+
+## <desc>
+## <p>
+## Allow qsnapper D-Bus service to manage all files for snapshot restoration.
+## When enabled, the service can restore files from any snapshot to any location.
+## Disable this if you want to restrict restoration to specific paths only.
+## </p>
+## </desc>
+gen_tunable(qsnapper_manage_all_snapshots, true)
+
+## <desc>
+## <p>
+## Allow regular users to run qsnapper GUI application.
+## When disabled, only administrative users can launch the application.
+## </p>
+## </desc>
+gen_tunable(qsnapper_user_access, true)
+
+# GUI application domain (unprivileged)
+type qsnapper_t;
+type qsnapper_exec_t;
+application_domain(qsnapper_t, qsnapper_exec_t)
+
+# D-Bus service domain (privileged)
+type qsnapper_dbus_t;
+type qsnapper_dbus_exec_t;
+init_daemon_domain(qsnapper_dbus_t, qsnapper_dbus_exec_t)
+
+# Configuration files (/etc/snapper, /var/lib/snapper)
+type qsnapper_conf_t;
+files_config_file(qsnapper_conf_t)
+
+# Snapshot storage (/.snapshots)
+type qsnapper_snapshot_t;
+files_type(qsnapper_snapshot_t)
+
+# Log files (/var/log/snapper)
+type qsnapper_log_t;
+logging_log_file(qsnapper_log_t)
+
+# Temporary files
+type qsnapper_tmp_t;
+files_tmp_file(qsnapper_tmp_t)
+
+# Runtime data (/var/run/qsnapper)
+type qsnapper_var_run_t;
+files_pid_file(qsnapper_var_run_t)
+
+########################################
+# qsnapper_t (GUI application) domain policy
+########################################
+
+# Basic process capabilities
+allow qsnapper_t self:process { signal_perms getsched setsched };
+allow qsnapper_t self:fifo_file rw_fifo_file_perms;
+allow qsnapper_t self:unix_stream_socket create_stream_socket_perms;
+
+# Qt6 Quick/QML requirements
+require_qt_quick(qsnapper_t)
+xdg_read_data_files(qsnapper_t)
+xdg_read_config_files(qsnapper_t)
+
+# Font access for Qt GUI
+optional_policy(`
+    fonts_read_fonts(qsnapper_t)
+')
+
+# X11/Wayland display access
+optional_policy(`
+    xserver_user_x_domain_template(qsnapper, qsnapper_t, qsnapper_tmpfs_t)
+')
+
+# D-Bus system bus connection (client)
+dbus_system_bus_client(qsnapper_t)
+dbus_connect_system_bus(qsnapper_t)
+
+# Communication with qsnapper D-Bus service
+allow qsnapper_t qsnapper_dbus_t:dbus send_msg;
+allow qsnapper_dbus_t qsnapper_t:dbus send_msg;
+
+# PolicyKit authentication dialog
+optional_policy(`
+    policykit_dbus_chat(qsnapper_t)
+    policykit_domtrans_auth(qsnapper_t)
+')
+
+# Read Snapper configuration files (read-only)
+read_files_pattern(qsnapper_t, qsnapper_conf_t, qsnapper_conf_t)
+read_lnk_files_pattern(qsnapper_t, qsnapper_conf_t, qsnapper_conf_t)
+list_dirs_pattern(qsnapper_t, qsnapper_conf_t, qsnapper_conf_t)
+
+# Browse snapshots directory (read-only, no write/delete)
+list_dirs_pattern(qsnapper_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+read_files_pattern(qsnapper_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+read_lnk_files_pattern(qsnapper_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+
+# User home directory configuration (~/.config/Presire/)
+userdom_manage_user_home_content_dirs(qsnapper_t)
+userdom_manage_user_home_content_files(qsnapper_t)
+
+# Temporary files
+files_tmp_filetrans(qsnapper_t, qsnapper_tmp_t, { file dir })
+manage_files_pattern(qsnapper_t, qsnapper_tmp_t, qsnapper_tmp_t)
+manage_dirs_pattern(qsnapper_t, qsnapper_tmp_t, qsnapper_tmp_t)
+
+# Logging
+logging_send_syslog_msg(qsnapper_t)
+
+# Localization
+miscfiles_read_localization(qsnapper_t)
+
+# Memory and shared memory
+allow qsnapper_t self:shm create_shm_perms;
+allow qsnapper_t self:sem create_sem_perms;
+
+########################################
+# qsnapper_dbus_t (D-Bus service) domain policy
+########################################
+
+# Basic process capabilities needed for snapshot operations
+allow qsnapper_dbus_t self:capability { sys_admin dac_override dac_read_search fowner chown fsetid sys_resource };
+allow qsnapper_dbus_t self:process { signal_perms fork getsched setsched };
+allow qsnapper_dbus_t self:fifo_file rw_fifo_file_perms;
+allow qsnapper_dbus_t self:unix_stream_socket create_stream_socket_perms;
+allow qsnapper_dbus_t self:netlink_route_socket r_netlink_socket_perms;
+
+# D-Bus system bus service
+dbus_system_bus_client(qsnapper_dbus_t)
+dbus_connect_system_bus(qsnapper_dbus_t)
+
+# PolicyKit authorization check (CRITICAL for security)
+optional_policy(`
+    policykit_dbus_chat(qsnapper_dbus_t)
+    policykit_domtrans_auth(qsnapper_dbus_t)
+    policykit_read_lib(qsnapper_dbus_t)
+    policykit_read_reload(qsnapper_dbus_t)
+')
+
+# Snapper configuration files (read/write)
+manage_dirs_pattern(qsnapper_dbus_t, qsnapper_conf_t, qsnapper_conf_t)
+manage_files_pattern(qsnapper_dbus_t, qsnapper_conf_t, qsnapper_conf_t)
+manage_lnk_files_pattern(qsnapper_dbus_t, qsnapper_conf_t, qsnapper_conf_t)
+
+# Snapshot directory management (/.snapshots)
+manage_dirs_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_lnk_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_fifo_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_sock_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_blk_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+manage_chr_files_pattern(qsnapper_dbus_t, qsnapper_snapshot_t, qsnapper_snapshot_t)
+
+# Btrfs ioctl operations (snapshot creation, deletion, default subvolume)
+allow qsnapper_dbus_t qsnapper_snapshot_t:dir { ioctl mounton };
+allowxperm qsnapper_dbus_t qsnapper_snapshot_t:dir ioctl {
+    0x9400-0x94ff  # BTRFS_IOC_* range (includes SNAP_CREATE_V2, SNAP_DESTROY, DEFAULT_SUBVOL)
+};
+
+# Access Btrfs filesystem for ioctl operations
+fs_getattr_xattr_fs(qsnapper_dbus_t)
+fs_mount_xattr_fs(qsnapper_dbus_t)
+fs_unmount_xattr_fs(qsnapper_dbus_t)
+allow qsnapper_dbus_t fs_t:filesystem { getattr };
+
+# libsnapper library access
+libs_use_ld_so(qsnapper_dbus_t)
+libs_use_shared_libs(qsnapper_dbus_t)
+
+# File comparison for diff operations (read all files)
+files_read_all_files(qsnapper_dbus_t)
+files_read_all_symlinks(qsnapper_dbus_t)
+
+# File restoration (write to any location, controlled by tunable)
+tunable_policy(`qsnapper_manage_all_snapshots',`
+    files_manage_all_files(qsnapper_dbus_t)
+',`
+    # If disabled, only allow restoration to user home directories
+    userdom_manage_user_home_content_files(qsnapper_dbus_t)
+    userdom_manage_user_home_content_dirs(qsnapper_dbus_t)
+')
+
+# Execute external commands (diff, snapper CLI)
+corecmd_exec_bin(qsnapper_dbus_t)
+corecmd_exec_shell(qsnapper_dbus_t)
+
+# Temporary files
+files_tmp_filetrans(qsnapper_dbus_t, qsnapper_tmp_t, { file dir })
+manage_files_pattern(qsnapper_dbus_t, qsnapper_tmp_t, qsnapper_tmp_t)
+manage_dirs_pattern(qsnapper_dbus_t, qsnapper_tmp_t, qsnapper_tmp_t)
+
+# Runtime data (/var/run/qsnapper)
+files_pid_filetrans(qsnapper_dbus_t, qsnapper_var_run_t, { file dir })
+manage_files_pattern(qsnapper_dbus_t, qsnapper_var_run_t, qsnapper_var_run_t)
+manage_dirs_pattern(qsnapper_dbus_t, qsnapper_var_run_t, qsnapper_var_run_t)
+
+# Log files
+manage_files_pattern(qsnapper_dbus_t, qsnapper_log_t, qsnapper_log_t)
+manage_dirs_pattern(qsnapper_dbus_t, qsnapper_log_t, qsnapper_log_t)
+logging_log_filetrans(qsnapper_dbus_t, qsnapper_log_t, { file dir })
+logging_send_syslog_msg(qsnapper_dbus_t)
+
+# Localization
+miscfiles_read_localization(qsnapper_dbus_t)
+
+# System information
+kernel_read_system_state(qsnapper_dbus_t)
+kernel_read_kernel_sysctls(qsnapper_dbus_t)
+
+# Device access (block devices for Btrfs operations)
+dev_read_sysfs(qsnapper_dbus_t)
+storage_raw_read_fixed_disk(qsnapper_dbus_t)
+storage_raw_write_fixed_disk(qsnapper_dbus_t)
+
+# Network (for hostname resolution in some libsnapper operations)
+sysnet_read_config(qsnapper_dbus_t)
+
+########################################
+# Domain transitions
+########################################
+
+# User domain -> qsnapper_t (GUI application)
+tunable_policy(`qsnapper_user_access',`
+    userdom_use_user_terminals(qsnapper_t)
+    domtrans_pattern(unconfined_t, qsnapper_exec_t, qsnapper_t)
+')
+
+# system_dbusd_t -> qsnapper_dbus_t (D-Bus auto-start)
+init_dbus_chat(qsnapper_dbus_t)
+dbus_system_domain(qsnapper_dbus_t, qsnapper_dbus_exec_t)
+
+# Allow D-Bus daemon to execute qsnapper D-Bus service
+domtrans_pattern(system_dbusd_t, qsnapper_dbus_exec_t, qsnapper_dbus_t)
+
+########################################
+# Type transitions
+########################################
+
+# Temporary files created in /tmp get qsnapper_tmp_t label
+filetrans_pattern(qsnapper_t, tmp_t, qsnapper_tmp_t, { file dir })
+filetrans_pattern(qsnapper_dbus_t, tmp_t, qsnapper_tmp_t, { file dir })
+
+# Runtime files created in /var/run get qsnapper_var_run_t label
+filetrans_pattern(qsnapper_dbus_t, var_run_t, qsnapper_var_run_t, { file dir })
+
+########################################
+# Optional policy integrations
+########################################
+
+# Integration with existing snapper policy (if available)
+optional_policy(`
+    snapper_domtrans(qsnapper_dbus_t)
+    snapper_read_config(qsnapper_t)
+    snapper_read_config(qsnapper_dbus_t)
+')
+
+# Integration with systemd (if D-Bus service is managed by systemd)
+optional_policy(`
+    systemd_dbus_chat_logind(qsnapper_t)
+    systemd_dbus_chat_logind(qsnapper_dbus_t)
+')

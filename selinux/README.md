@@ -102,11 +102,13 @@ sestatus
 SELinuxポリシー開発ツールをインストール:  
 
 **openSUSE / SUSE Linux Enterprise:**  
+
 ```bash
 sudo zypper install selinux-policy-devel policycoreutils
 ```
 
 **RHEL/Fedora:**  
+
 ```bash
 sudo dnf install selinux-policy-devel policycoreutils-python-utils
 ```
@@ -128,7 +130,8 @@ sudo make install
 - `semodule -i`によるモジュールの登録
 - `restorecon`によるファイルラベルの適用
 
-**SELinuxサポートを無効化する場合:**
+**SELinuxサポートを無効化する場合:**  
+
 ```bash
 cmake -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_SELINUX=OFF ..
 ```
@@ -160,11 +163,13 @@ qSnapperポリシーは、動作をカスタマイズするための2つのブ�
 D-Busサービスがスナップショットから任意のファイルを復元できるかを制御します。  
 
 **有効化(デフォルト):**  
+
 ```bash
 sudo setsebool -P qsnapper_manage_all_snapshots on
 ```
 
 **無効化(ユーザーホームディレクトリのみ復元可能):**  
+
 ```bash
 sudo setsebool -P qsnapper_manage_all_snapshots off
 ```
@@ -174,16 +179,19 @@ sudo setsebool -P qsnapper_manage_all_snapshots off
 一般ユーザーがqSnapper GUIアプリケーションを起動できるかを制御します。  
 
 **有効化(デフォルト):**  
+
 ```bash
 sudo setsebool -P qsnapper_user_access on
 ```
 
 **無効化(管理者のみ起動可能):**  
+
 ```bash
 sudo setsebool -P qsnapper_user_access off
 ```
 
 **現在の設定を確認:**  
+
 ```bash
 getsebool qsnapper_manage_all_snapshots
 getsebool qsnapper_user_access

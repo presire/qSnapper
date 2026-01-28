@@ -95,15 +95,17 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 
 #### 1. Install Dependencies
 
-**openSUSE Leap 16 / SUSE Linux Enterprise**
+**openSUSE Leap 16 / SUSE Linux Enterprise 16**  
+
 ```bash
 sudo zypper install cmake gcc-c++ \
                     qt6-base-devel qt6-declarative-devel qt6-linguist-devel \
                     polkit-devel libpolkit-qt6-1-devel \
-                    snapper-devel
+                    libsnapper-devel
 ```
 
-**Fedora**
+**RHEL 10**  
+
 ```bash
 sudo dnf install cmake gcc-c++ \
                  qt6-qtbase-devel qt6-qtdeclarative-devel qt6-linguist-devel \
@@ -111,7 +113,8 @@ sudo dnf install cmake gcc-c++ \
                  snapper-devel
 ```
 
-**Debian**
+**Debian**  
+
 ```bash
 sudo apt install cmake g++ \
                  qt6-base-dev qt6-declarative-dev qt6-l10n-tools \
@@ -131,7 +134,7 @@ make -j$(nproc)
 sudo make install
 ```
 
-**Build Options:**
+**Build Options:**  
 
 - **SELinux Support** (Optional, disabled by default):
   ```bash
@@ -162,6 +165,7 @@ The installation process automatically installs:
 - Application icon to `/usr/share/icons/hicolor/128x128/apps/`
 
 Reload D-Bus and PolicyKit:  
+
 ```bash
 sudo systemctl reload dbus
 ```
@@ -218,7 +222,8 @@ To configure Snapper for your root filesystem:
 sudo snapper -c root create-config /
 ```
 
-For other filesystems:
+For other filesystems:  
+
 ```bash
 sudo snapper -c <config-name> create-config <mount-point>
 ```
@@ -251,16 +256,19 @@ The theme setting is automatically persisted in the application configuration an
 If you see D-Bus connection errors:  
 
 1. Check if the D-Bus service file is installed:  
+   
    ```bash
    ls /usr/share/dbus-1/system-services/com.presire.qsnapper.Operations.service
    ```
 
 2. Verify D-Bus configuration:  
+   
    ```bash
    ls /usr/share/dbus-1/system.d/com.presire.qsnapper.Operations.conf
    ```
 
 3. Check D-Bus service status:  
+   
    ```bash
    systemctl status dbus
    ```
@@ -270,6 +278,7 @@ If you see D-Bus connection errors:
 If operations fail with permission errors:  
 
 1. Verify PolicyKit policy is installed:  
+   
    ```bash
    ls /usr/share/polkit-1/actions/com.presire.qsnapper.policy
    ```
@@ -279,6 +288,7 @@ If operations fail with permission errors:
 ### Snapper Not Configured
 
 If Snapper is not configured:  
+s
 ```bash
 sudo snapper list-configs
 ```

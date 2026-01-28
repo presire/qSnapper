@@ -95,15 +95,17 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 
 #### 1. 依存関係のインストール
 
-**openSUSE Leap 16 / SUSE Linux Enterprise**
+**openSUSE Leap 16 / SUSE Linux Enterprise 16**  
+
 ```bash
 sudo zypper install cmake gcc-c++ \
                     qt6-base-devel qt6-declarative-devel qt6-linguist-devel \
                     polkit-devel libpolkit-qt6-1-devel \
-                    snapper-devel
+                    libsnapper-devel
 ```
 
-**Fedora**
+**RHEL 10**  
+
 ```bash
 sudo dnf install cmake gcc-c++ \
                  qt6-qtbase-devel qt6-qtdeclarative-devel qt6-linguist-devel \
@@ -111,7 +113,8 @@ sudo dnf install cmake gcc-c++ \
                  snapper-devel
 ```
 
-**Debian**
+**Debian**  
+
 ```bash
 sudo apt install cmake g++ \
                  qt6-base-dev qt6-declarative-dev qt6-l10n-tools \
@@ -134,6 +137,7 @@ sudo make install
 **ビルドオプション:**  
 
 - **SELinuxサポート** (オプション、デフォルト: 無効):  
+  
   ```bash
   cmake -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_SELINUX=ON ..
   ```
@@ -142,10 +146,13 @@ sudo make install
 
   **SELinuxの要件:**  
   - openSUSE / SUSE Linux Enterprise:
+
     ```bash
     sudo zypper install selinux-policy-devel policycoreutils
     ```
+
   - RHEL / Fedora:
+
     ```bash
     sudo dnf install selinux-policy-devel policycoreutils-python-utils
     ```
@@ -206,13 +213,15 @@ qSnapperは以下の方法で起動できます：
 4. 復元を確認
 
 **警告**  
-スナップショットの復元は現在のデータを上書きする可能性があります。確認する前に必ず変更を確認してください。  
+スナップショットの復元は現在のデータを上書きする可能性があります。  
+確認する前に必ず変更を確認してください。  
 
 ## 設定
 
 ### Snapperの設定
 
-qSnapperは既存のSnapper設定を使用します。ルートファイルシステムのSnapper設定を行うには：  
+qSnapperは既存のSnapper設定を使用します。  
+ルートファイルシステムのSnapper設定を行うには：  
 
 ```bash
 sudo snapper -c root create-config /
@@ -251,16 +260,19 @@ qSnapperは、組み込みのThemeManagerを通じてテーマ切り替えをサ
 D-Bus接続エラーが表示される場合：  
 
 1. D-Busサービスファイルがインストールされているか確認：  
+   
    ```bash
    ls /usr/share/dbus-1/system-services/com.presire.qsnapper.Operations.service
    ```
 
 2. D-Bus設定を確認：  
+   
    ```bash
    ls /usr/share/dbus-1/system.d/com.presire.qsnapper.Operations.conf
    ```
 
 3. D-Busサービスのステータスを確認：  
+   
    ```bash
    systemctl status dbus
    ```
@@ -270,6 +282,7 @@ D-Bus接続エラーが表示される場合：
 権限エラーで操作が失敗する場合：  
 
 1. PolicyKitポリシーがインストールされているか確認：  
+   
    ```bash
    ls /usr/share/polkit-1/actions/com.presire.qsnapper.policy
    ```
@@ -279,6 +292,7 @@ D-Bus接続エラーが表示される場合：
 ### Snapperが設定されていない
 
 Snapperが設定されていない場合：  
+
 ```bash
 sudo snapper list-configs
 ```
@@ -330,7 +344,8 @@ qSnapper/
 
 ## コントリビューション
 
-コントリビューションを歓迎します！イシューやプルリクエストを自由に提出してください。  
+コントリビューションを歓迎します！  
+イシューやプルリクエストを自由に提出してください。  
 
 ### ガイドライン
 

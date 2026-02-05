@@ -10,6 +10,7 @@
 #include <PolkitQt1/Subject>
 #include <snapper/Snapper.h>
 #include <snapper/Snapshot.h>
+#include <snapper/Plugins.h>
 #include <snapper/Comparison.h>
 #include <snapper/File.h>
 #include <snapper/Exception.h>
@@ -234,18 +235,22 @@ QString SnapshotOperations::CreateSnapshot(const QString &type, const QString &d
 
         snapper::Snapshots::iterator newSnapshot;
         snapper::SnapshotType snapType = static_cast<snapper::SnapshotType>(stringToSnapshotType(type));
+        snapper::Plugins::Report report;
 
         if (snapType == snapper::PRE) {
-            newSnapshot = snapper->createPreSnapshot(scd);
+            newSnapshot = snapper->createPreSnapshot(scd, report);
+            // TO DO: Check the report for errors
         } else if (snapType == snapper::POST && preNumber > 0) {
             snapper::Snapshots::const_iterator preSnap = snapper->getSnapshots().find(preNumber);
             if (preSnap == snapper->getSnapshots().end()) {
                 sendErrorReply(QDBusError::Failed, "Pre-snapshot not found");
                 return QString();
             }
-            newSnapshot = snapper->createPostSnapshot(preSnap, scd);
+            newSnapshot = snapper->createPostSnapshot(preSnap, scd, report);
+            // TO DO: Check the report for errors
         } else {
-            newSnapshot = snapper->createSingleSnapshot(scd);
+            newSnapshot = snapper->createSingleSnapshot(scd, report);
+            // TO DO: Check the report for errors
         }
 
         // 新しく作成されたスナップショットのCSV情報を返す
@@ -306,7 +311,9 @@ bool SnapshotOperations::DeleteSnapshot(int number)
             return false;
         }
 
-        snapper->deleteSnapshot(snapshot);
+        snapper::Plugins::Report report;
+        snapper->deleteSnapshot(snapshot, report);
+        // TO DO: Check the report for errors
         return true;
 
     } catch (const snapper::Exception &e) {
@@ -345,7 +352,9 @@ bool SnapshotOperations::RollbackSnapshot(int number)
         }
 
         // スナップショットをデフォルトに設定 (次回起動時に適用される)
-        snapshot->setDefault();
+        snapper::Plugins::Report report;
+        snapshot->setDefault(report);
+        // TO DO: Check the report for errors
         return true;
 
     } catch (const snapper::Exception &e) {

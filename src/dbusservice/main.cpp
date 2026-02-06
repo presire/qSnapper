@@ -3,13 +3,66 @@
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
+
+static const QString &logDir()
+{
+    static const QString dir = QStringLiteral(QSNAPPER_LOG_DIR);
+    return dir;
+}
+
+static const QString &logFile()
+{
+    static const QString file = logDir() + QStringLiteral("/qsnapper-dbus.log");
+    return file;
+}
+
+static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
+{
+    Q_UNUSED(context)
+
+    QDir().mkpath(logDir());
+
+    QFile file(logFile());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+        return;
+
+    const char *level = nullptr;
+    switch (type) {
+        case QtDebugMsg:
+            level = "DEBUG";
+            break;
+        case QtInfoMsg:
+            level = "INFO";
+            break;
+        case QtWarningMsg:
+            level = "WARNING";
+            break;
+        case QtCriticalMsg:
+            level = "CRITICAL";
+            break;
+        case QtFatalMsg:
+            level = "FATAL";
+            break;
+    }
+
+    QTextStream stream(&file);
+    stream << QDateTime::currentDateTime().toString(Qt::ISODate)
+           << " [" << level << "] "
+           << msg << "\n";
+}
 
 int main(int argc, char *argv[])
 {
+    qInstallMessageHandler(fileMessageHandler);
+
     QCoreApplication app(argc, argv);
     app.setOrganizationName("Presire");
     app.setApplicationName("qSnapper D-Bus Service");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationVersion("1.0.1");
 
     // D-Busシステムバスに接続
     QDBusConnection connection = QDBusConnection::systemBus();

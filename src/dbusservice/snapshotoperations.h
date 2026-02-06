@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QDBusContext>
+#include <QTimer>
 #include <memory>
 
 namespace snapper {
@@ -17,8 +18,12 @@ class SnapshotOperations : public QObject, protected QDBusContext
     Q_CLASSINFO("D-Bus Interface", "com.presire.qsnapper.Operations")
 
 private:
+    static constexpr int IdleTimeoutMs = 5 * 60 * 1000; // 5分
     std::unique_ptr<snapper::Snapper> m_snapper;    // Snapperインスタンス
     QString m_currentConfig;                        // 現在の設定名
+    QTimer m_idleTimer;                             // アイドルタイムアウト用タイマー
+
+    void resetIdleTimer();
 
 public:
     explicit SnapshotOperations(QObject *parent = nullptr);
@@ -33,6 +38,7 @@ public slots:
     QString GetFileChanges(const QString &configName, int snapshotNumber);
     QString GetFileDiff(const QString &configName, int snapshotNumber, const QString &filePath);
     bool RestoreFiles(const QString &configName, int snapshotNumber, const QStringList &filePaths);
+    void Quit();
 
 signals:
     void restoreProgress(int current, int total, const QString &filePath);

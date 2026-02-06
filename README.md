@@ -104,22 +104,13 @@ sudo zypper install cmake gcc-c++ \
                     libsnapper-devel
 ```
 
-**RHEL 10**  
+**RHEL 9 / 10**
 
 ```bash
 sudo dnf install cmake gcc-c++ \
                  qt6-qtbase-devel qt6-qtdeclarative-devel qt6-linguist-devel \
                  polkit-devel polkit-qt6-1-devel \
                  snapper-devel
-```
-
-**Debian**  
-
-```bash
-sudo apt install cmake g++ \
-                 qt6-base-dev qt6-declarative-dev qt6-l10n-tools \
-                 libpolkit-gobject-1-dev libpolkit-qt6-1-dev \
-                 libsnapper-dev
 ```
 
 #### 2. Build and Install
@@ -148,12 +139,21 @@ sudo make install
     ```bash
     sudo zypper install selinux-policy-devel policycoreutils
     ```
-  - RHEL / Fedora:
+  - RHEL 9 / 10:
     ```bash
     sudo dnf install selinux-policy-devel policycoreutils-python-utils
     ```
 
   See [selinux/README.md](selinux/README.md) for detailed SELinux configuration.
+
+- **Log Directory** (Optional, default: `/var/log/qsnapper`):
+  ```bash
+  cmake -DCMAKE_INSTALL_PREFIX=/usr -DQSNAPPER_LOG_DIR=/path/to/log/dir ..
+  ```
+
+  Changes the directory where the D-Bus service writes log files.
+  The log filename (`qsnapper-dbus.log`) cannot be changed.
+  If not specified, logs are written to `/var/log/qsnapper`.
 
 #### 3. Post-Installation Steps
 

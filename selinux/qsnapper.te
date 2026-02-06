@@ -1,4 +1,4 @@
-policy_module(qsnapper, 1.0.0)
+module qsnapper 1.0.0;
 
 ########################################
 # qSnapper SELinux Policy Module
@@ -370,7 +370,6 @@ allow qsnapper_dbus_t fixed_disk_device_t:blk_file { getattr open read write ioc
 allow qsnapper_dbus_t net_conf_t:file { getattr open read };
 
 # File descriptor inheritance
-allow qsnapper_dbus_t init_t:fd use;
 allow qsnapper_dbus_t system_dbusd_t:fd use;
 
 ########################################
@@ -378,19 +377,14 @@ allow qsnapper_dbus_t system_dbusd_t:fd use;
 ########################################
 
 # unconfined_t -> qsnapper_t
-allow unconfined_t qsnapper_exec_t:file { getattr open read execute };
+allow unconfined_t qsnapper_exec_t:file { getattr open read execute map };
 allow unconfined_t qsnapper_t:process transition;
 type_transition unconfined_t qsnapper_exec_t:process qsnapper_t;
 
 # system_dbusd_t -> qsnapper_dbus_t
-allow system_dbusd_t qsnapper_dbus_exec_t:file { getattr open read execute };
+allow system_dbusd_t qsnapper_dbus_exec_t:file { getattr open read execute map };
 allow system_dbusd_t qsnapper_dbus_t:process transition;
 type_transition system_dbusd_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
-
-# init_t -> qsnapper_dbus_t (for systemd activation)
-allow init_t qsnapper_dbus_exec_t:file { getattr open read execute };
-allow init_t qsnapper_dbus_t:process transition;
-type_transition init_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
 
 ########################################
 # Type transitions for files

@@ -1,0 +1,19 @@
+# qSnapper File Contexts
+#
+# This file defines SELinux security contexts for qSnapper executable files.
+#
+# Note: System directories (/etc/snapper, /.snapshots, /var/lib/snapper, etc.)
+# use existing system labels (etc_t, unlabeled_t, fs_t, var_lib_t).
+# Access to these directories is granted in the .te policy file.
+#
+# This approach avoids conflicts with openSUSE's existing file context rules.
+#
+# This is a CMake template file (.fc.in). The actual .fc file is generated
+# by configure_file() during the build, replacing @VARIABLES@ with the
+# actual install paths from CMAKE_INSTALL_PREFIX + GNUInstallDirs.
+
+# Main GUI application (unprivileged user context)
+@CMAKE_INSTALL_FULL_BINDIR@/qsnapper	--	system_u:object_r:qsnapper_exec_t:s0
+
+# D-Bus service daemon (privileged, auto-started by D-Bus or systemd)
+@CMAKE_INSTALL_FULL_LIBEXECDIR@/qsnapper-dbus-service	--	system_u:object_r:qsnapper_dbus_exec_t:s0

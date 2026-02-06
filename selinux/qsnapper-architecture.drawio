@@ -1,0 +1,108 @@
+<mxfile host="65bd71144e">
+    <diagram name="Two-Process Model" id="two-process-model">
+        <mxGraphModel dx="1394" dy="1017" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="user-space" value="&lt;b style=&quot;border-color: rgb(218, 220, 224); color: rgb(26, 58, 92); font-size: 14px;&quot;&gt;User Space (non-privileged)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;arcSize=6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;dashed=0;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="40" width="800" height="260" as="geometry"/>
+                </mxCell>
+                <mxCell id="gui-process" value="&lt;b style=&quot;font-size:14px;&quot;&gt;qsnapper&lt;/b&gt;&lt;br&gt;(Qt6 / QML GUI Application)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;arcSize=10;verticalAlign=middle;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="160" y="100" width="200" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="gui-info" value="&lt;b style=&quot;font-size: 11px;&quot;&gt;Domain:&lt;/b&gt; qsnapper_t&lt;br style=&quot;font-size: 11px;&quot;&gt;&lt;b style=&quot;font-size: 11px;&quot;&gt;User:&lt;/b&gt; &amp;lt;regular user&amp;gt;&lt;br style=&quot;font-size: 11px;&quot;&gt;&lt;b style=&quot;font-size: 11px;&quot;&gt;Capabilities:&lt;/b&gt; (none)" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#333333;" parent="1" vertex="1">
+                    <mxGeometry x="420" y="50" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="dbus-arrow" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#0050ef;entryX=0.223;entryY=-0.006;exitX=0.5;exitY=1;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="gui-process" target="system-space" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="dbus-label" value="&lt;b&gt;D-Bus system bus&lt;/b&gt;" style="edgeLabel;html=1;align=left;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontColor=#0050ef;labelBackgroundColor=none;" parent="dbus-arrow" vertex="1" connectable="0">
+                    <mxGeometry x="0.1" relative="1" as="geometry">
+                        <mxPoint x="10" as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="polkit-label" value="&lt;b&gt;PolicyKit&lt;br&gt;authorization check&lt;/b&gt;" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;size=0.15;" parent="1" vertex="1">
+                    <mxGeometry x="390" y="225" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="polkit-arrow-in" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1.5;strokeColor=#7c4dff;exitX=0.5;exitY=1;entryX=0;entryY=0.5;curved=1;" parent="1" source="gui-process" target="polkit-label" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="system-space" value="&lt;b style=&quot;border-color: rgb(218, 220, 224); color: rgb(124, 26, 26); font-size: 14px;&quot;&gt;System Space (privileged)&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;arcSize=6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;dashed=0;" parent="1" vertex="1">
+                    <mxGeometry x="80" y="370" width="800" height="390" as="geometry"/>
+                </mxCell>
+                <mxCell id="dbus-service" value="&lt;b style=&quot;font-size:14px;&quot;&gt;qsnapper-dbus-service&lt;/b&gt;&lt;br&gt;(D-Bus daemon)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;arcSize=10;verticalAlign=middle;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="220" y="430" width="200" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="dbus-info" value="&lt;b&gt;Domain:&lt;/b&gt; qsnapper_dbus_t&lt;br&gt;&lt;b&gt;User:&lt;/b&gt; root&lt;br&gt;&lt;b&gt;Capabilities:&lt;/b&gt; sys_admin,&lt;br&gt;  dac_override, dac_read_search,&lt;br&gt;  fowner, chown, fsetid,&lt;br&gt;  setuid, setgid, sys_resource" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontColor=#333333;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="380" width="240" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="libsnapper-arrow" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#ae4132;" parent="1" source="dbus-service" target="btrfs-fs" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="libsnapper-label" value="&lt;b&gt;libsnapper C++ API&lt;/b&gt;" style="edgeLabel;html=1;align=left;verticalAlign=middle;resizable=0;points=[];fontSize=11;fontColor=#ae4132;labelBackgroundColor=none;" parent="libsnapper-arrow" vertex="1" connectable="0">
+                    <mxGeometry x="0.1" relative="1" as="geometry">
+                        <mxPoint x="10" as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="btrfs-fs" value="&lt;b style=&quot;font-size:14px;&quot;&gt;Btrfs filesystem&lt;/b&gt;&lt;br&gt;(/.snapshots)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=middle;fontSize=12;" parent="1" vertex="1">
+                    <mxGeometry x="230" y="590" width="180" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="etc-snapper" value="&lt;b&gt;/etc/snapper&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(etc_t - R/W)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="480" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="var-lib" value="&lt;b&gt;/var/lib/snapper&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(var_lib_t - R/W)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="550" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="var-log" value="&lt;b&gt;/var/log/qsnapper&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(var_log_t - W)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="620" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="user-home" value="&lt;b&gt;User home dirs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(user_home_t - restore)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="690" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-etc" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#666666;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;" parent="1" source="dbus-service" target="etc-snapper" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-var-lib" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#666666;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;" parent="1" source="dbus-service" target="var-lib" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-var-log" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#666666;entryX=0;entryY=0.5;curved=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="dbus-service" target="var-log" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="490" y="530" as="sourcePoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow-user-home" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#666666;entryX=0;entryY=0.5;curved=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" target="user-home" edge="1" source="dbus-service">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="410" y="490" as="sourcePoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="gui-etc" value="&lt;b&gt;/etc/snapper&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(etc_t - R/O)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#6c8ebf;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="90" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="gui-snapshots" value="&lt;b&gt;/.snapshots&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(unlabeled_t/fs_t - R/O)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#6c8ebf;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="160" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="gui-home" value="&lt;b&gt;~/.config/Presire/&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;(user_home_t - R/W)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#6c8ebf;fontSize=11;fontColor=#333333;arcSize=15;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="230" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-gui-etc" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#6c8ebf;exitX=1;exitY=0.25;entryX=0;entryY=0.5;" parent="1" source="gui-process" target="gui-etc" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-gui-snapshots" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#6c8ebf;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="gui-process" target="gui-snapshots" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow-gui-home" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1;strokeColor=#6c8ebf;exitX=1;exitY=0.75;entryX=0;entryY=0.5;" parent="1" source="gui-process" target="gui-home" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="dt-gui" value="&lt;font style=&quot;font-size: 11px;&quot;&gt;Domain Transition:&lt;br style=&quot;font-size: 11px;&quot;&gt;unconfined_t → qsnapper_t&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontColor=#0050ef;fontStyle=2;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="105" y="180" width="160" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="dt-dbus" value="&lt;font style=&quot;font-size: 11px;&quot;&gt;Domain Transition:&lt;br style=&quot;font-size: 11px;&quot;&gt;system_dbusd_t → qsnapper_dbus_t&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontColor=#ae4132;fontStyle=2;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="95" y="510" width="210" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="2" value="&lt;span style=&quot;font-size: 10px; font-style: italic; text-align: left;&quot;&gt;Btrfs ioctl: 0x9400-0x94ff&lt;/span&gt;&lt;br style=&quot;border-color: rgb(218, 220, 224); font-size: 10px; font-style: italic; text-align: left;&quot;&gt;&lt;span style=&quot;font-size: 10px; font-style: italic; text-align: left;&quot;&gt;(allowxperm on unlabeled_t:dir, fs_t:dir)&lt;/span&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#1F1F1F;" vertex="1" parent="1">
+                    <mxGeometry x="430" y="630" width="190" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

@@ -7,6 +7,8 @@
 #include <QLibraryInfo>
 #include <QDebug>
 #include <QDir>
+#include <QDBusInterface>
+#include <QDBusConnection>
 #include "fssnapshot.h"
 #include "snapperservice.h"
 #include "snapshotlistmodel.h"
@@ -20,7 +22,7 @@ int main(int argc, char *argv[])
     app.setOrganizationName("Presire");
     app.setOrganizationDomain("https://github.com/presire");
     app.setApplicationName("qSnapper");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationVersion("1.0.1");
     app.setWindowIcon(QIcon(":QSnapper/icons/qSnapper.png"));
 
     // 翻訳システムの設定
@@ -34,7 +36,7 @@ int main(int argc, char *argv[])
                      << "/usr/share/qsnapper/translations";                         // 絶対インストールパス
 
     bool translationLoaded = false;
-    for (const QString &path : translationPaths) {
+    for (const QString &path : std::as_const(translationPaths)) {
         QString translationFile = QString("qsnapper_%1").arg(locale);
         if (translator.load(translationFile, path)) {
             app.installTranslator(&translator);
@@ -90,6 +92,19 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty()) {
         return -1;
     }
+
+    // アプリケーション終了時にD-Busサービスも終了させる
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, []() {
+        QDBusInterface iface(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            QDBusConnection::systemBus()
+        );
+        if (iface.isValid()) {
+            iface.call(QDBus::NoBlock, "Quit");
+        }
+    });
 
     return app.exec();
 }

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.0.0 LANGUAGES CXX)
+project(qsnapper VERSION 1.0.1 LANGUAGES CXX)
 
 # Linux専用プロジェクト - 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -17,7 +17,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml DBus LinguistTools)
 find_package(PolkitQt6-1 REQUIRED)
 
-qt_standard_project_setup()
+qt6_standard_project_setup()
 
 set(SOURCES
     src/main.cpp
@@ -38,13 +38,13 @@ set(HEADERS
     include/thememanager.h
 )
 
-qt_add_executable(qsnapper ${SOURCES} ${HEADERS})
+qt6_add_executable(qsnapper ${SOURCES} ${HEADERS})
 
 target_include_directories(qsnapper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-qt_add_qml_module(qsnapper
+qt6_add_qml_module(qsnapper
     URI QSnapper
     VERSION 1.0
     RESOURCE_PREFIX "/qt/qml"
@@ -71,7 +71,7 @@ qt6_add_resources(qsnapper "icons"
 )
 
 # 翻訳ファイルの設定
-qt_add_translations(qsnapper
+qt6_add_translations(qsnapper
     TS_FILES translations/qsnapper_ja.ts
     RESOURCE_PREFIX /i18n
 )
@@ -105,7 +105,7 @@ set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
 )
 
-qt_add_executable(qsnapper-dbus-service
+qt6_add_executable(qsnapper-dbus-service
     ${DBUS_SERVICE_SOURCES}
     ${DBUS_SERVICE_HEADERS}
 )
@@ -115,6 +115,32 @@ target_link_libraries(qsnapper-dbus-service PRIVATE
     Qt6::DBus
     PolkitQt6-1::Core
     snapper
+)
+
+# libsnapperバージョン検出（Version.hから抽出）
+find_path(SNAPPER_INCLUDE_DIR snapper/Version.h)
+if(SNAPPER_INCLUDE_DIR)
+    file(STRINGS "${SNAPPER_INCLUDE_DIR}/snapper/Version.h" _ver_major
+         REGEX "#define[ \t]+LIBSNAPPER_MAJOR[= \t]+\"[0-9]+\"")
+    file(STRINGS "${SNAPPER_INCLUDE_DIR}/snapper/Version.h" _ver_minor
+         REGEX "#define[ \t]+LIBSNAPPER_MINOR[= \t]+\"[0-9]+\"")
+    string(REGEX REPLACE ".*\"([0-9]+)\".*" "\\1" SNAPPER_VERSION_MAJOR "${_ver_major}")
+    string(REGEX REPLACE ".*\"([0-9]+)\".*" "\\1" SNAPPER_VERSION_MINOR "${_ver_minor}")
+    message(STATUS "Detected libsnapper version: ${SNAPPER_VERSION_MAJOR}.${SNAPPER_VERSION_MINOR}")
+else()
+    message(WARNING "snapper/Version.h not found, assuming old libsnapper")
+    set(SNAPPER_VERSION_MAJOR 0)
+    set(SNAPPER_VERSION_MINOR 0)
+endif()
+
+# ログ出力ディレクトリ（-DQSNAPPER_LOG_DIR=/path/to/dir で変更可能）
+set(QSNAPPER_LOG_DIR "/var/log/qsnapper" CACHE PATH "Log directory for qsnapper-dbus-service")
+message(STATUS "Log directory: ${QSNAPPER_LOG_DIR}")
+
+target_compile_definitions(qsnapper-dbus-service PRIVATE
+    LIBSNAPPER_VERSION_MAJOR=${SNAPPER_VERSION_MAJOR}
+    LIBSNAPPER_VERSION_MINOR=${SNAPPER_VERSION_MINOR}
+    QSNAPPER_LOG_DIR="${QSNAPPER_LOG_DIR}"
 )
 
 install(TARGETS qsnapper-dbus-service

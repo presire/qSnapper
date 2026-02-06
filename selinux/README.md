@@ -1,196 +1,187 @@
 # qSnapper SELinux Policy Module
 
-qSnapperは、SELinux Mandatory Access Control (MAC)に対応したQt6/QMLベースのBtrfs/Snapperスナップショット管理GUIアプリケーションです。  
-このドキュメントでは、SELinuxポリシーモジュールのインストールと使用方法について説明します。  
+qSnapper is a Qt6/QML-based Btrfs/Snapper snapshot management GUI application with SELinux Mandatory Access Control (MAC) support.
+This document describes how to install and use the SELinux policy module.
 
-## 目次
+## Table of Contents
 
 - [qSnapper SELinux Policy Module](#qsnapper-selinux-policy-module)
-  - [目次](#目次)
-  - [概要](#概要)
-    - [セキュリティドメイン](#セキュリティドメイン)
-    - [通信フロー](#通信フロー)
-  - [サポート対象ディストリビューション](#サポート対象ディストリビューション)
-  - [インストール](#インストール)
-    - [前提条件](#前提条件)
-    - [CMake経由でのインストール](#cmake経由でのインストール)
-    - [スタンドアロンインストール](#スタンドアロンインストール)
-  - [設定](#設定)
-    - [ブール値の設定](#ブール値の設定)
-      - [1. `qsnapper_manage_all_snapshots` (デフォルト: ON)](#1-qsnapper_manage_all_snapshots-デフォルト-on)
-      - [2. `qsnapper_user_access` (デフォルト: ON)](#2-qsnapper_user_access-デフォルト-on)
-  - [検証](#検証)
-    - [ポリシーモジュールのインストール確認](#ポリシーモジュールのインストール確認)
-    - [ファイルコンテキストの確認](#ファイルコンテキストの確認)
-    - [ドメイン遷移の確認](#ドメイン遷移の確認)
-  - [トラブルシューティング](#トラブルシューティング)
-    - [AVC denialへの対処](#avc-denialへの対処)
-      - [1. AVC denialの確認](#1-avc-denialの確認)
-      - [2. 不足しているルールの特定](#2-不足しているルールの特定)
-      - [3. 問題報告](#3-問題報告)
-    - [ファイルコンテキストの再適用](#ファイルコンテキストの再適用)
-    - [D-Busサービスが起動しない](#d-busサービスが起動しない)
-      - [SELinuxが原因か切り分け](#selinuxが原因か切り分け)
-      - [D-Busログの確認](#d-busログの確認)
-    - [カスタムスナップショット場所の追加](#カスタムスナップショット場所の追加)
-  - [アンインストール](#アンインストール)
-    - [ポリシーモジュールの削除](#ポリシーモジュールの削除)
-    - [ファイルコンテキストのリセット(オプション)](#ファイルコンテキストのリセットオプション)
-  - [参考リソース](#参考リソース)
-  - [ライセンス](#ライセンス)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+    - [Security Domains](#security-domains)
+    - [Communication Flow](#communication-flow)
+  - [Supported Distributions](#supported-distributions)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Installation via CMake](#installation-via-cmake)
+    - [Standalone Installation](#standalone-installation)
+  - [Configuration](#configuration)
+    - [Boolean Settings](#boolean-settings)
+      - [1. `qsnapper_manage_all_snapshots` (Default: ON)](#1-qsnapper_manage_all_snapshots-default-on)
+      - [2. `qsnapper_user_access` (Default: ON)](#2-qsnapper_user_access-default-on)
+  - [Verification](#verification)
+    - [Verify Policy Module Installation](#verify-policy-module-installation)
+    - [Verify File Contexts](#verify-file-contexts)
+    - [Verify Domain Transitions](#verify-domain-transitions)
+  - [Troubleshooting](#troubleshooting)
+    - [Handling AVC Denials](#handling-avc-denials)
+      - [1. Check AVC Denials](#1-check-avc-denials)
+      - [2. Identify Missing Rules](#2-identify-missing-rules)
+      - [3. Report Issues](#3-report-issues)
+    - [Reapply File Contexts](#reapply-file-contexts)
+    - [D-Bus Service Fails to Start](#d-bus-service-fails-to-start)
+      - [Isolate Whether SELinux Is the Cause](#isolate-whether-selinux-is-the-cause)
+      - [Check D-Bus Logs](#check-d-bus-logs)
+    - [Adding Custom Snapshot Locations](#adding-custom-snapshot-locations)
+  - [Uninstallation](#uninstallation)
+    - [Remove the Policy Module](#remove-the-policy-module)
+    - [Reset File Contexts (Optional)](#reset-file-contexts-optional)
+  - [References](#references)
+  - [License](#license)
 
 ---
 
-## 概要
+## Overview
 
-qSnapperのSELinuxポリシーモジュールは、2プロセスアーキテクチャ(GUIアプリケーション + D-Busサービス)に対して最小権限原則に基づいた厳格なアクセス制御を提供します。  
+The qSnapper SELinux policy module provides strict access control based on the principle of least privilege for the two-process architecture (GUI application + D-Bus service).
 
-### セキュリティドメイン
+### Security Domains
 
-- **qsnapper_t**: GUIアプリケーションドメイン(非特権ユーザー権限)  
-  - Qt6 Quick/QML GUI実行
-  - D-Bus経由でのサービス通信(クライアント)
-  - Snapper設定ファイルの読み取り(読み取り専用)
-  - スナップショットディレクトリのブラウズ(読み取り専用)
+- **qsnapper_t**: GUI application domain (unprivileged user)
+  - Qt6 Quick/QML GUI execution
+  - Service communication via D-Bus (client)
+  - Reading Snapper configuration files (read-only)
+  - Browsing snapshot directories (read-only)
 
-- **qsnapper_dbus_t**: D-Busサービスドメイン(root権限)  
-  - PolicyKit認可チェックの実施
-  - libsnapper経由でのスナップショット操作
-  - Btrfs ioctl操作(スナップショット作成/削除)
-  - ファイル比較・復元操作
+- **qsnapper_dbus_t**: D-Bus service domain (root privileges)
+  - PolicyKit authorization checks
+  - Snapshot operations via libsnapper
+  - Btrfs ioctl operations (snapshot creation/deletion)
+  - File comparison and restore operations
 
-### 通信フロー
+### Communication Flow
 
 ```
 QML UI (qsnapper_t)
     ↓ D-Bus system bus
 SnapshotOperations (qsnapper_dbus_t)
-    ↓ PolicyKit認可
+    ↓ PolicyKit authorization
 libsnapper → Btrfs filesystem
 ```
 
 ---
 
-## サポート対象ディストリビューション
+## Supported Distributions
 
-- **openSUSE Leap 16以降** (SELinux標準採用)  
-- **openSUSE Tumbleweed** (SELinux対応)  
-- **RHEL 8/9** (SELinux標準搭載)  
-- **Fedora 35以降** (SELinux標準搭載)  
-- **CentOS Stream** (SELinux標準搭載)  
+- **openSUSE Leap 16 or later** (SELinux adopted as standard)
+- **RHEL 9 / 10** (SELinux included as standard)
 
-**ポリシータイプ**:  
-`targeted` (標準的な設定で動作)  
+**Policy type**:
+`targeted` (works with standard configuration)
 
 ---
 
-## インストール
+## Installation
 
-### 前提条件
+### Prerequisites
 
-SELinuxが有効化されていることを確認してください:  
+Verify that SELinux is enabled:
 
 ```bash
-# SELinuxステータス確認
+# Check SELinux status
 sestatus
 
-# 期待される出力:
+# Expected output:
 # SELinux status:                 enabled
 # Current mode:                   enforcing
 ```
 
-SELinuxポリシー開発ツールをインストール:  
+Install SELinux policy development tools:
 
-**openSUSE / SUSE Linux Enterprise:**  
+**openSUSE / SUSE Linux Enterprise:**
 
 ```bash
 sudo zypper install selinux-policy-devel policycoreutils
 ```
 
-**RHEL/Fedora:**  
+**RHEL 9 / 10:**
 
 ```bash
 sudo dnf install selinux-policy-devel policycoreutils-python-utils
 ```
 
-### CMake経由でのインストール
+### Installation via CMake
 
-qSnapperをビルドする際、SELinuxポリシーモジュールはデフォルトで自動的にビルド・インストールされます。  
+The SELinux policy module is **not built by default**. To enable it, specify `-DENABLE_SELINUX=ON` when running CMake:
 
 ```bash
-# プロジェクトルートディレクトリで実行
+# Run from the project root directory
 mkdir build && cd build
-cmake -DCMAKE_INSTALL_PREFIX=/usr ..
+cmake -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_SELINUX=ON ..
 make -j$(nproc)
 sudo make install
 ```
 
-インストール時に自動的に以下が実行されます:  
-- ポリシーモジュール(.pp)のビルド
-- `semodule -i`によるモジュールの登録
-- `restorecon`によるファイルラベルの適用
+The following steps are automatically performed during installation:
+- Building the policy module (.pp)
+- Registering the module via `semodule -i`
+- Applying file labels via `restorecon`
 
-**SELinuxサポートを無効化する場合:**  
+### Standalone Installation
 
-```bash
-cmake -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_SELINUX=OFF ..
-```
-
-### スタンドアロンインストール
-
-CMakeを使用せず、ポリシーモジュールのみをインストールする場合:  
+To install only the policy module without using CMake:
 
 ```bash
 cd /path/to/qSnapper/selinux
 
-# ポリシーパッケージのビルド
+# Build the policy package
 make
 
-# ポリシーのインストール(root権限必要)
+# Install the policy (root privileges required)
 sudo make install
 ```
 
 ---
 
-## 設定
+## Configuration
 
-### ブール値の設定
+### Boolean Settings
 
-qSnapperポリシーは、動作をカスタマイズするための2つのブール値を提供します。  
+The qSnapper policy provides two booleans for customizing behavior.
 
-#### 1. `qsnapper_manage_all_snapshots` (デフォルト: ON)
+#### 1. `qsnapper_manage_all_snapshots` (Default: ON)
 
-D-Busサービスがスナップショットから任意のファイルを復元できるかを制御します。  
+Controls whether the D-Bus service can restore arbitrary files from snapshots.
 
-**有効化(デフォルト):**  
+**Enable (default):**
 
 ```bash
 sudo setsebool -P qsnapper_manage_all_snapshots on
 ```
 
-**無効化(ユーザーホームディレクトリのみ復元可能):**  
+**Disable (only user home directory files can be restored):**
 
 ```bash
 sudo setsebool -P qsnapper_manage_all_snapshots off
 ```
 
-#### 2. `qsnapper_user_access` (デフォルト: ON)
+#### 2. `qsnapper_user_access` (Default: ON)
 
-一般ユーザーがqSnapper GUIアプリケーションを起動できるかを制御します。  
+Controls whether regular users can launch the qSnapper GUI application.
 
-**有効化(デフォルト):**  
+**Enable (default):**
 
 ```bash
 sudo setsebool -P qsnapper_user_access on
 ```
 
-**無効化(管理者のみ起動可能):**  
+**Disable (administrators only):**
 
 ```bash
 sudo setsebool -P qsnapper_user_access off
 ```
 
-**現在の設定を確認:**  
+**Check current settings:**
 
 ```bash
 getsebool qsnapper_manage_all_snapshots
@@ -199,179 +190,178 @@ getsebool qsnapper_user_access
 
 ---
 
-## 検証
+## Verification
 
-### ポリシーモジュールのインストール確認
+### Verify Policy Module Installation
 
 ```bash
-# モジュールが登録されているか確認
+# Check if the module is registered
 sudo semodule -l | grep qsnapper
 
-# 期待される出力:
+# Expected output:
 # qsnapper	1.0.0
 ```
 
-### ファイルコンテキストの確認
+### Verify File Contexts
 
 ```bash
-# バイナリのラベル確認
+# Check binary labels
 ls -Z /usr/bin/qsnapper
-# 期待: system_u:object_r:qsnapper_exec_t:s0
+# Expected: system_u:object_r:qsnapper_exec_t:s0
 
 ls -Z /usr/libexec/qsnapper-dbus-service
-# 期待: system_u:object_r:qsnapper_dbus_exec_t:s0
+# Expected: system_u:object_r:qsnapper_dbus_exec_t:s0
 
-# スナップショットディレクトリ
+# Snapshot directory
 ls -Z -d /.snapshots
-# 期待: system_u:object_r:qsnapper_snapshot_t:s0
+# Expected: system_u:object_r:qsnapper_snapshot_t:s0
 
-# Snapper設定
+# Snapper configuration
 ls -Z /etc/snapper/
-# 期待: qsnapper_conf_t
+# Expected: qsnapper_conf_t
 ```
 
-### ドメイン遷移の確認
+### Verify Domain Transitions
 
 ```bash
-# GUIアプリケーション起動
+# Launch the GUI application
 qsnapper &
 QSNAPPER_PID=$!
 
-# プロセスのドメイン確認
+# Check process domains
 ps -eZ | grep qsnapper
 
-# 期待される出力例:
+# Expected output example:
 # unconfined_u:unconfined_r:qsnapper_t:s0 12345 pts/0 qsnapper
 # system_u:system_r:qsnapper_dbus_t:s0   12346 ?     qsnapper-dbus-service
 ```
 
 ---
 
-## トラブルシューティング
+## Troubleshooting
 
-### AVC denialへの対処
+### Handling AVC Denials
 
-#### 1. AVC denialの確認
+#### 1. Check AVC Denials
 
 ```bash
-# 最近のAVC denialを表示
+# Display recent AVC denials
 sudo ausearch -m avc -ts recent | grep qsnapper
 
-# リアルタイム監視
+# Real-time monitoring
 sudo ausearch -m avc -ts recent | tail -f
 ```
 
-#### 2. 不足しているルールの特定
+#### 2. Identify Missing Rules
 
 ```bash
-# denialから推奨ルールを生成
+# Generate recommended rules from denials
 sudo ausearch -m avc -ts recent | grep qsnapper | audit2allow -R
 
-# ローカルポリシーモジュールとして生成(一時的な回避策)
+# Generate as a local policy module (temporary workaround)
 sudo ausearch -m avc -ts recent | audit2allow -M qsnapper-local
 sudo semodule -i qsnapper-local.pp
 ```
 
-#### 3. 問題報告
+#### 3. Report Issues
 
-audit2allowの出力を含めて、GitHubリポジトリにissueを作成してください:  
-https://github.com/presire/qSnapper/issues  
+Please create an issue on the GitHub repository including the audit2allow output:
+https://github.com/presire/qSnapper/issues
 
-### ファイルコンテキストの再適用
+### Reapply File Contexts
 
-ファイルコンテキストが不一致の場合:  
+If file contexts are inconsistent:
 
 ```bash
-# 現在のコンテキスト確認
+# Check current context
 ls -Z /usr/bin/qsnapper
 
-# 期待されるコンテキスト確認
+# Check expected context
 sudo matchpathcon /usr/bin/qsnapper
 
-# 強制再ラベル
+# Force relabeling
 sudo restorecon -F -R -v /usr/bin/qsnapper
 sudo restorecon -F -R -v /usr/libexec/qsnapper-dbus-service
 sudo restorecon -F -R -v /.snapshots
 sudo restorecon -F -R -v /etc/snapper
 ```
 
-### D-Busサービスが起動しない
+### D-Bus Service Fails to Start
 
-#### SELinuxが原因か切り分け
+#### Isolate Whether SELinux Is the Cause
 
 ```bash
-# 一時的にPermissiveモードに切り替え
+# Temporarily switch to Permissive mode
 sudo setenforce 0
 
-# 操作を再試行
+# Retry the operation
 qsnapper
 
-# Enforcingモードに戻す
+# Switch back to Enforcing mode
 sudo setenforce 1
 ```
 
-- **Permissiveで動作する**:  
-  SELinuxポリシーの問題 → AVC denialログを確認  
-- **Permissiveでも動作しない**:  
-  アプリケーション自体の問題 → D-Busログを確認  
+- **Works in Permissive**:
+  SELinux policy issue → Check AVC denial logs
+- **Does not work in Permissive either**:
+  Application issue → Check D-Bus logs
 
-#### D-Busログの確認
+#### Check D-Bus Logs
 
 ```bash
-# D-Busシステムログ
+# D-Bus system logs
 sudo journalctl -u dbus --since "10 minutes ago" | grep qsnapper
 
-# アプリケーションログ
+# Application logs
 journalctl --user -e | grep qsnapper
 ```
 
-### カスタムスナップショット場所の追加
+### Adding Custom Snapshot Locations
 
-`/.snapshots`以外の場所にスナップショットを保存する場合:  
+If you store snapshots in a location other than `/.snapshots`:
 
 ```bash
-# ファイルコンテキストルールを追加
+# Add a file context rule
 sudo semanage fcontext -a -t qsnapper_snapshot_t "/custom/snapshots(/.*)?"
 
-# ラベル適用
+# Apply labels
 sudo restorecon -R -v /custom/snapshots
 ```
 
 ---
 
-## アンインストール
+## Uninstallation
 
-### ポリシーモジュールの削除
+### Remove the Policy Module
 
 ```bash
 sudo semodule -r qsnapper
 ```
 
-### ファイルコンテキストのリセット(オプション)
+### Reset File Contexts (Optional)
 
 ```bash
-# デフォルトのコンテキストに戻す
+# Restore default contexts
 sudo restorecon -F -R -v /usr/bin/qsnapper
 sudo restorecon -F -R -v /usr/libexec/qsnapper-dbus-service
 ```
 
 ---
 
-## 参考リソース
+## References
 
-- **SELinux Project**:  
-  https://github.com/SELinuxProject  
-- **openSUSE SELinux**:  
-  https://en.opensuse.org/SDB:SELinux  
-- **Red Hat SELinux ガイド**:  
-  https://access.redhat.com/documentation/ja-jp/red_hat_enterprise_linux/9/html/using_selinux/  
+- **SELinux Project**:
+  https://github.com/SELinuxProject
+- **openSUSE SELinux**:
+  https://en.opensuse.org/SDB:SELinux
+- **Red Hat SELinux Guide**:
+  https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/9/html/using_selinux/
 
-**システム管理者向けの詳細情報**:  
-[ADMIN.md](ADMIN.md)を参照してください。  
+**For detailed information for system administrators**:
+See [ADMIN.md](ADMIN.md).
 
 ---
 
-## ライセンス
+## License
 
-このSELinuxポリシーモジュールは、qSnapperプロジェクトと同じライセンス(GPL-3.0)で配布されます。  
-
+This SELinux policy module is distributed under the same license (GPL-3.0) as the qSnapper project.

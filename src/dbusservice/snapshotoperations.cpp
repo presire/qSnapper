@@ -1,4 +1,5 @@
 #include "snapshotoperations.h"
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
@@ -13,6 +14,30 @@
 #include <snapper/Comparison.h>
 #include <snapper/File.h>
 #include <snapper/Exception.h>
+#include <snapper/Version.h>
+
+// 古いlibsnapper（7.x未満）には LIBSNAPPER_VERSION_AT_LEAST マクロが存在しない
+#ifndef LIBSNAPPER_VERSION_AT_LEAST
+#define LIBSNAPPER_VERSION_AT_LEAST(major, minor)                                            \
+    ((LIBSNAPPER_VERSION_MAJOR > (major)) ||                                                 \
+     (LIBSNAPPER_VERSION_MAJOR == (major) && LIBSNAPPER_VERSION_MINOR >= (minor)))
+#endif
+
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+#include <snapper/Plugins.h>
+#endif
+
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+static void logPluginReport(const snapper::Plugins::Report& report)
+{
+    for (const auto& entry : report.entries) {
+        if (entry.exit_status != 0) {
+            qWarning() << "Snapper plugin" << QString::fromStdString(entry.name)
+                       << "exited with status" << entry.exit_status;
+        }
+    }
+}
+#endif
 
 /**
  * @brief SnapshotOperationsクラスのコンストラクタ
@@ -26,6 +51,13 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
     , m_snapper(nullptr)
     , m_currentConfig("")
 {
+    m_idleTimer.setSingleShot(true);
+    m_idleTimer.setInterval(IdleTimeoutMs);
+    connect(&m_idleTimer, &QTimer::timeout, this, []() {
+        qInfo() << "Idle timeout reached, shutting down...";
+        QCoreApplication::quit();
+    });
+    m_idleTimer.start();
 }
 
 /**
@@ -35,6 +67,29 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
  */
 SnapshotOperations::~SnapshotOperations()
 {
+}
+
+/**
+ * @brief アイドルタイマーをリセット
+ *
+ * D-Busメソッド呼び出し時にタイマーをリセットし、
+ * アイドルタイムアウトを延長します。
+ */
+void SnapshotOperations::resetIdleTimer()
+{
+    m_idleTimer.start();
+}
+
+/**
+ * @brief D-Busサービスを終了
+ *
+ * GUIアプリケーションの終了時にD-Bus経由で呼び出され、
+ * サービスプロセスを終了させます。
+ */
+void SnapshotOperations::Quit()
+{
+    qInfo() << "Quit requested via D-Bus, shutting down...";
+    QCoreApplication::quit();
 }
 
 /**
@@ -48,6 +103,8 @@ SnapshotOperations::~SnapshotOperations()
  */
 bool SnapshotOperations::checkAuthorization(const QString &actionId)
 {
+    resetIdleTimer();
+
     PolkitQt1::UnixProcessSubject subject(QDBusConnection::systemBus().interface()->servicePid(message().service()));
     PolkitQt1::Authority::Result result = PolkitQt1::Authority::instance()->checkAuthorizationSync(
         actionId, subject, PolkitQt1::Authority::AllowUserInteraction);
@@ -235,18 +292,38 @@ QString SnapshotOperations::CreateSnapshot(const QString &type, const QString &d
         snapper::Snapshots::iterator newSnapshot;
         snapper::SnapshotType snapType = static_cast<snapper::SnapshotType>(stringToSnapshotType(type));
 
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+        snapper::Plugins::Report report;
+#endif
         if (snapType == snapper::PRE) {
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+            newSnapshot = snapper->createPreSnapshot(scd, report);
+#else
             newSnapshot = snapper->createPreSnapshot(scd);
-        } else if (snapType == snapper::POST && preNumber > 0) {
+#endif
+        }
+        else if (snapType == snapper::POST && preNumber > 0) {
             snapper::Snapshots::const_iterator preSnap = snapper->getSnapshots().find(preNumber);
             if (preSnap == snapper->getSnapshots().end()) {
                 sendErrorReply(QDBusError::Failed, "Pre-snapshot not found");
                 return QString();
             }
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+            newSnapshot = snapper->createPostSnapshot(preSnap, scd, report);
+#else
             newSnapshot = snapper->createPostSnapshot(preSnap, scd);
-        } else {
-            newSnapshot = snapper->createSingleSnapshot(scd);
+#endif
         }
+        else {
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+            newSnapshot = snapper->createSingleSnapshot(scd, report);
+#else
+            newSnapshot = snapper->createSingleSnapshot(scd);
+#endif
+        }
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+        logPluginReport(report);
+#endif
 
         // 新しく作成されたスナップショットのCSV情報を返す
         QString csv = "number,type,pre-number,date,user,cleanup,description,userdata\n";
@@ -306,10 +383,17 @@ bool SnapshotOperations::DeleteSnapshot(int number)
             return false;
         }
 
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+        snapper::Plugins::Report report;
+        snapper->deleteSnapshot(snapshot, report);
+        logPluginReport(report);
+#else
         snapper->deleteSnapshot(snapshot);
+#endif
         return true;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to delete snapshot:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to delete snapshot: %1").arg(e.what()));
         return false;
@@ -345,10 +429,17 @@ bool SnapshotOperations::RollbackSnapshot(int number)
         }
 
         // スナップショットをデフォルトに設定 (次回起動時に適用される)
+#if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
+        snapper::Plugins::Report report;
+        snapshot->setDefault(report);
+        logPluginReport(report);
+#else
         snapshot->setDefault();
+#endif
         return true;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to rollback snapshot:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to rollback snapshot: %1").arg(e.what()));
         return false;

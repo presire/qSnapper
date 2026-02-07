@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.0.1 LANGUAGES CXX)
+project(qsnapper VERSION 1.0.2 LANGUAGES CXX)
 
 # Linux専用プロジェクト - 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml DBus LinguistTools)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml QuickControls2 DBus LinguistTools)
 find_package(PolkitQt6-1 REQUIRED)
 
 qt6_standard_project_setup()
@@ -81,6 +81,7 @@ target_link_libraries(qsnapper PRIVATE
     Qt6::Gui
     Qt6::Quick
     Qt6::Qml
+    Qt6::QuickControls2
     Qt6::DBus
 )
 

@@ -104,10 +104,13 @@ Dialog {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         visible: fileChangeModel.hasChanges
+                        clip: true
+                        contentWidth: availableWidth
 
                         // ファイル変更階層ツリービュー
                         TreeView {
                             id: treeView
+                            width: parent.width
                             model: fileChangeModel
                             delegate: treeDelegate
                             clip: true
@@ -255,10 +258,13 @@ Dialog {
                     ScrollView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        clip: true
+                        contentWidth: availableWidth
 
                         // diff表示用テキストエリア
                         TextArea {
                             id: diffTextArea
+                            width: parent.width
                             readOnly: true
                             font.family: "Monospace"
                             font.pixelSize: 11

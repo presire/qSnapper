@@ -75,6 +75,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
   - Qt6 Core
   - Qt6 GUI
   - Qt6 Quick
+  - Qt6 QuickControls2
   - Qt6 Qml
   - Qt6 DBus
 - Snapper (>= 0.8.0)
@@ -99,7 +100,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 
 ```bash
 sudo zypper install cmake gcc-c++ \
-                    qt6-base-devel qt6-declarative-devel qt6-linguist-devel \
+                    qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-devel qt6-linguist-devel \
                     polkit-devel libpolkit-qt6-1-devel \
                     libsnapper-devel
 ```
@@ -108,7 +109,7 @@ sudo zypper install cmake gcc-c++ \
 
 ```bash
 sudo dnf install cmake gcc-c++ \
-                 qt6-qtbase-devel qt6-qtdeclarative-devel qt6-linguist-devel \
+                 qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel qt6-linguist-devel \
                  polkit-devel polkit-qt6-1-devel \
                  snapper-devel
 ```

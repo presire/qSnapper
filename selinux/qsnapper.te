@@ -1,4 +1,4 @@
-module qsnapper 1.0.0;
+module qsnapper 1.0.2;
 
 ########################################
 # qSnapper SELinux Policy Module
@@ -56,7 +56,12 @@ require {
     type proc_t;
     type sysctl_t;
     type sysctl_kernel_t;
+    type sysctl_dev_t;
     type unlabeled_t;
+    type root_t;
+    type default_t;
+    type mnt_t;
+    type autofs_t;
 
     # Device types
     type device_t;
@@ -67,32 +72,78 @@ require {
     type urandom_device_t;
     type fixed_disk_device_t;
     type dri_device_t;
+    type input_device_t;
+    type sound_device_t;
+    type v4l_device_t;
+    type usb_device_t;
+    type event_device_t;
 
     # User types
     type user_home_t;
     type user_home_dir_t;
     type user_devpts_t;
     type user_tty_device_t;
+    type cache_home_t;
+    type config_home_t;
+    type user_tmp_t;
+    type user_fonts_t;
+    type user_fonts_config_t;
+    type user_fonts_cache_t;
+
+    # X11/Display types
+    type xserver_t;
+    type xauth_home_t;
+    type xdm_t;
+    type xdm_var_run_t;
+    type xkb_var_lib_t;
+    type xserver_tmpfs_t;
+    type xconsole_device_t;
+    type xevent_t;
+
+    # Wayland/XDG runtime types
+    # type xdg_runtime_t;  # Moved to optional block for openSUSE compatibility
+
+    # D-Bus session types
+    type session_dbusd_tmp_t;
+    # type session_dbusd_t;  # Moved to optional block for openSUSE compatibility
+    type unconfined_dbusd_t;
+    type system_dbusd_var_lib_t;
+    type system_dbusd_var_run_t;
+
+    # Hardware and system data types
+    type hwdata_t;
+    type gconf_home_t;
+    type data_home_t;
+
+    # Boot types
+    type boot_t;
 
     # Logging types
     type devlog_t;
 
     # Network types
     type net_conf_t;
+    type node_t;
+    type netif_t;
+    type port_t;
 
     # Attribute definitions
     attribute file_type;
     attribute exec_type;
     attribute domain;
 
+    # Role definitions (required for domain transitions)
+    role unconfined_r;
+    role system_r;
+
     # Object classes
-    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit };
-    class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint };
-    class dir { getattr setattr open read write search add_name remove_name create rmdir ioctl mounton };
+    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack };
+    class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint execmod };
+    class dir { getattr setattr open read write search add_name remove_name create rmdir ioctl mounton watch watch_reads };
     class lnk_file { getattr read create unlink };
     class fifo_file { getattr open read write create unlink ioctl };
     class sock_file { getattr open read write create unlink };
-    class chr_file { getattr open read write ioctl };
+    class chr_file { getattr open read write ioctl map };
     class blk_file { getattr open read write ioctl };
     class unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
     class unix_dgram_socket { create bind connect read write sendto getattr setattr };
@@ -103,6 +154,8 @@ require {
     class capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource };
     class filesystem { getattr mount unmount };
     class netlink_route_socket { create bind getattr setattr read write nlmsg_read };
+    class tcp_socket { create bind connect listen accept read write getattr setattr shutdown name_connect node_bind };
+    class udp_socket { create bind connect read write getattr setattr };
 }
 
 ########################################
@@ -132,16 +185,30 @@ typeattribute qsnapper_tmp_t file_type;
 typeattribute qsnapper_tmpfs_t file_type;
 
 ########################################
+# Role associations
+########################################
+
+# Allow unconfined_r role to use qsnapper_t domain
+# This is REQUIRED for users to launch the GUI application
+role unconfined_r types qsnapper_t;
+
+# Allow system_r role to use qsnapper_dbus_t domain
+# This is REQUIRED for D-Bus activated service
+role system_r types qsnapper_dbus_t;
+
+########################################
 # qsnapper_t (GUI application) policy
 ########################################
 
-# Process operations
-allow qsnapper_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched };
+# Process operations (including execmem/execstack for Qt QML JIT)
+allow qsnapper_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched execmem execstack };
 allow qsnapper_t self:fifo_file { getattr open read write ioctl };
 allow qsnapper_t self:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown };
 allow qsnapper_t self:unix_dgram_socket { create bind connect read write sendto getattr setattr };
 allow qsnapper_t self:shm { create destroy getattr setattr read write associate unix_read unix_write };
 allow qsnapper_t self:sem { create destroy getattr setattr read write associate unix_read unix_write };
+allow qsnapper_t self:tcp_socket { create bind connect listen accept read write getattr setattr shutdown };
+allow qsnapper_t self:udp_socket { create bind connect read write getattr setattr };
 
 # Entry point
 allow qsnapper_t qsnapper_exec_t:file { getattr open read execute entrypoint map };
@@ -168,11 +235,17 @@ allow qsnapper_t bin_t:dir { getattr open read search };
 allow qsnapper_t bin_t:file { getattr open read execute execute_no_trans map };
 allow qsnapper_t bin_t:lnk_file { getattr read };
 
-# Fonts
+# Fonts (system and user fonts)
 allow qsnapper_t fonts_t:dir { getattr open read search };
 allow qsnapper_t fonts_t:file { getattr open read map };
 allow qsnapper_t fonts_cache_t:dir { getattr open read search };
 allow qsnapper_t fonts_cache_t:file { getattr open read map };
+allow qsnapper_t user_fonts_t:dir { getattr open read search };
+allow qsnapper_t user_fonts_t:file { getattr open read map };
+allow qsnapper_t user_fonts_config_t:dir { getattr open read search };
+allow qsnapper_t user_fonts_config_t:file { getattr open read map };
+allow qsnapper_t user_fonts_cache_t:dir { getattr open read search write add_name remove_name };
+allow qsnapper_t user_fonts_cache_t:file { getattr open read write create unlink map };
 
 # Localization
 allow qsnapper_t locale_t:dir { getattr open read search };
@@ -189,11 +262,13 @@ allow qsnapper_t sysfs_t:dir { getattr open read search };
 allow qsnapper_t sysfs_t:file { getattr open read };
 allow qsnapper_t sysfs_t:lnk_file { getattr read };
 
-# Kernel sysctls
+# Kernel sysctls (including /proc/sys/dev for device info)
 allow qsnapper_t sysctl_t:dir { getattr open read search };
 allow qsnapper_t sysctl_t:file { getattr open read };
 allow qsnapper_t sysctl_kernel_t:dir { getattr open read search };
 allow qsnapper_t sysctl_kernel_t:file { getattr open read };
+allow qsnapper_t sysctl_dev_t:dir { getattr open read search };
+allow qsnapper_t sysctl_dev_t:file { getattr open read };
 
 # Device access for Qt Quick GPU acceleration
 allow qsnapper_t device_t:dir { getattr open read search };
@@ -201,18 +276,136 @@ allow qsnapper_t null_device_t:chr_file { getattr open read write };
 allow qsnapper_t zero_device_t:chr_file { getattr open read write };
 allow qsnapper_t random_device_t:chr_file { getattr open read };
 allow qsnapper_t urandom_device_t:chr_file { getattr open read };
-allow qsnapper_t dri_device_t:chr_file { getattr open read write ioctl };
+allow qsnapper_t dri_device_t:chr_file { getattr open read write ioctl map };
 
-# tmpfs for shared memory
+# tmpfs for shared memory (including execmod for Qt QML JIT code)
 allow qsnapper_t tmpfs_t:dir { getattr open read search write add_name remove_name };
-allow qsnapper_t tmpfs_t:file { getattr open read write create unlink map };
-allow qsnapper_t qsnapper_tmpfs_t:file { getattr open read write create unlink map };
+allow qsnapper_t tmpfs_t:file { getattr open read write create unlink map execute execmod };
+allow qsnapper_t qsnapper_tmpfs_t:file { getattr open read write create unlink map execute execmod };
 
-# User home directory (read-write for app config: ~/.config/Presire/)
-allow qsnapper_t user_home_dir_t:dir { getattr open read search write add_name remove_name create };
-allow qsnapper_t user_home_t:dir { getattr open read search write add_name remove_name create rmdir };
-allow qsnapper_t user_home_t:file { getattr open read write create unlink rename };
-allow qsnapper_t user_home_t:lnk_file { getattr read };
+# User home directory - full access (/home/*)
+allow qsnapper_t user_home_dir_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t user_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t user_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_t user_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t user_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_t user_home_t:sock_file { getattr open read write create unlink };
+
+# User cache directory (~/.cache/) - full access for Qt Quick shader cache, Mesa, etc.
+allow qsnapper_t cache_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t cache_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_t cache_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t cache_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_t cache_home_t:sock_file { getattr open read write create unlink };
+
+# User config directory (~/.config/) - full access for application settings (including inotify watch for fcitx etc.)
+allow qsnapper_t config_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl watch watch_reads };
+allow qsnapper_t config_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_t config_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t config_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_t config_home_t:sock_file { getattr open read write create unlink };
+
+# X11 display server - full access
+allow qsnapper_t xserver_t:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
+allow qsnapper_t xserver_t:unix_dgram_socket { create bind connect read write sendto getattr setattr };
+allow qsnapper_t xserver_t:process { signal signull sigkill sigstop sigchld };
+allow qsnapper_t xserver_t:shm { create destroy getattr setattr read write associate unix_read unix_write };
+allow qsnapper_t xserver_t:fd use;
+allow qsnapper_t xdm_t:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
+allow qsnapper_t xdm_t:unix_dgram_socket { create bind connect read write sendto getattr setattr };
+allow qsnapper_t xdm_t:fd use;
+allow qsnapper_t xdm_t:shm { create destroy getattr setattr read write associate unix_read unix_write };
+
+# X11 session management (ICE protocol - /tmp/.ICE-unix)
+allow qsnapper_t unconfined_t:unix_stream_socket connectto;
+
+# X11 keyboard layout data
+allow qsnapper_t xkb_var_lib_t:dir { getattr open read search };
+allow qsnapper_t xkb_var_lib_t:file { getattr open read map };
+
+# X server tmpfs (shared memory segments)
+allow qsnapper_t xserver_tmpfs_t:file { getattr open read write map };
+
+# X11 authentication files (~/.Xauthority) - full access
+allow qsnapper_t xauth_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t xauth_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t xauth_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t xauth_home_t:sock_file { getattr open read write create unlink };
+
+# X Display Manager runtime (/var/run/xdm, /run/gdm, etc.) - full access
+allow qsnapper_t xdm_var_run_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t xdm_var_run_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t xdm_var_run_t:sock_file { getattr open read write create unlink };
+allow qsnapper_t xdm_var_run_t:lnk_file { getattr read create unlink };
+allow qsnapper_t xdm_var_run_t:fifo_file { getattr open read write create unlink ioctl };
+
+# Wayland/XDG runtime directory (/run/user/<uid>/) - full access for Wayland compositor
+# Wrapped in optional block for openSUSE compatibility (xdg_runtime_t may not exist)
+optional {
+    require {
+        type xdg_runtime_t;
+    }
+    allow qsnapper_t xdg_runtime_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl watch watch_reads };
+    allow qsnapper_t xdg_runtime_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+    allow qsnapper_t xdg_runtime_t:sock_file { getattr open read write create unlink };
+    allow qsnapper_t xdg_runtime_t:lnk_file { getattr read create unlink };
+    allow qsnapper_t xdg_runtime_t:fifo_file { getattr open read write create unlink ioctl };
+}
+
+# User runtime directory (/run/user/...) and X11 socket directory (/tmp/.X11-unix/) - full access
+allow qsnapper_t user_tmp_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t user_tmp_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t user_tmp_t:sock_file { getattr open read write create unlink };
+allow qsnapper_t user_tmp_t:lnk_file { getattr read create unlink };
+allow qsnapper_t user_tmp_t:fifo_file { getattr open read write create unlink ioctl };
+
+# D-Bus session bus socket (for user session D-Bus communication)
+allow qsnapper_t session_dbusd_tmp_t:dir { getattr open read search };
+allow qsnapper_t session_dbusd_tmp_t:sock_file { getattr open read write };
+
+# D-Bus session daemon connection (/run/user/UID/bus)
+allow qsnapper_t unconfined_dbusd_t:unix_stream_socket connectto;
+allow qsnapper_t unconfined_dbusd_t:dbus send_msg;
+allow unconfined_dbusd_t qsnapper_t:dbus send_msg;
+
+# D-Bus session daemon (session_dbusd_t) - for dbus-broker/dbus-daemon
+# Wrapped in optional block for openSUSE compatibility (session_dbusd_t may not exist)
+optional {
+    require {
+        type session_dbusd_t;
+    }
+    allow qsnapper_t session_dbusd_t:unix_stream_socket connectto;
+    allow qsnapper_t session_dbusd_t:dbus send_msg;
+    allow session_dbusd_t qsnapper_t:dbus send_msg;
+}
+
+# D-Bus system data (/var/lib/dbus)
+allow qsnapper_t system_dbusd_var_lib_t:dir { getattr open read search };
+allow qsnapper_t system_dbusd_var_lib_t:file { getattr open read };
+allow qsnapper_t system_dbusd_var_lib_t:lnk_file { getattr read };
+
+# Hardware data (/usr/share/hwdata) for GPU/hardware detection
+allow qsnapper_t hwdata_t:dir { getattr open read search };
+allow qsnapper_t hwdata_t:file { getattr open read map };
+
+# User local data directory (~/.local) - full access for themes, icons, etc.
+allow qsnapper_t gconf_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t gconf_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_t gconf_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t gconf_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_t gconf_home_t:sock_file { getattr open read write create unlink };
+
+# User data directory (~/.local/share) - full access for application data, icons, themes
+allow qsnapper_t data_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t data_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_t data_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_t data_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_t data_home_t:sock_file { getattr open read write create unlink };
+
+# Access to parent process info in /proc (for process communication)
+allow qsnapper_t unconfined_t:dir { getattr open read search };
+allow qsnapper_t unconfined_t:file { getattr open read };
+allow qsnapper_t unconfined_t:lnk_file { getattr read };
 
 # Terminal access
 allow qsnapper_t user_devpts_t:chr_file { getattr open read write ioctl };
@@ -223,6 +416,17 @@ allow qsnapper_t devpts_t:dir { getattr open read search };
 allow qsnapper_t system_dbusd_t:dbus send_msg;
 allow qsnapper_t system_dbusd_t:unix_stream_socket connectto;
 allow system_dbusd_t qsnapper_t:dbus send_msg;
+
+# D-Bus system bus socket (/run/dbus/system_bus_socket)
+allow qsnapper_t system_dbusd_var_run_t:dir { getattr open read search };
+allow qsnapper_t system_dbusd_var_run_t:sock_file { getattr open read write };
+
+# /run directory - full access for runtime data
+allow qsnapper_t var_run_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t var_run_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t var_run_t:sock_file { getattr open read write create unlink };
+allow qsnapper_t var_run_t:lnk_file { getattr read create unlink };
+allow qsnapper_t var_run_t:fifo_file { getattr open read write create unlink ioctl };
 
 # Communication with qsnapper D-Bus service
 allow qsnapper_t qsnapper_dbus_t:dbus send_msg;
@@ -235,6 +439,7 @@ allow qsnapper_t unlabeled_t:lnk_file { getattr read };
 allow qsnapper_t fs_t:dir { getattr open read search };
 allow qsnapper_t fs_t:file { getattr open read };
 allow qsnapper_t fs_t:lnk_file { getattr read };
+allow qsnapper_t fs_t:filesystem getattr;
 
 # /var/lib for snapper metadata
 allow qsnapper_t var_lib_t:dir { getattr open read search };
@@ -253,6 +458,10 @@ allow qsnapper_t kernel_t:unix_dgram_socket sendto;
 # File descriptor inheritance
 allow qsnapper_t init_t:fd use;
 allow qsnapper_t unconfined_t:fd use;
+
+# D-Bus communication with unconfined_t (user session processes)
+allow qsnapper_t unconfined_t:dbus send_msg;
+allow unconfined_t qsnapper_t:dbus send_msg;
 
 ########################################
 # qsnapper_dbus_t (D-Bus service) policy
@@ -309,6 +518,10 @@ allow qsnapper_dbus_t system_dbusd_t:dbus { send_msg acquire_svc };
 allow qsnapper_dbus_t system_dbusd_t:unix_stream_socket connectto;
 allow system_dbusd_t qsnapper_dbus_t:dbus send_msg;
 
+# D-Bus system bus socket (/run/dbus/system_bus_socket)
+allow qsnapper_dbus_t system_dbusd_var_run_t:dir { getattr open read search };
+allow qsnapper_dbus_t system_dbusd_var_run_t:sock_file { getattr open read write };
+
 # /var/lib/snapper - snapper metadata and state
 allow qsnapper_dbus_t var_lib_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t var_lib_t:file { getattr open read write create unlink rename };
@@ -333,26 +546,97 @@ allow qsnapper_dbus_t fs_t:lnk_file { getattr read create unlink };
 allow qsnapper_dbus_t fs_t:filesystem { getattr mount unmount };
 allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 
-# File restoration - LIMITED TO USER HOME DIRECTORIES ONLY
-# This is a security restriction: snapshots can only be restored to user homes
-allow qsnapper_dbus_t user_home_dir_t:dir { getattr open read search write add_name remove_name create rmdir };
-allow qsnapper_dbus_t user_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir };
-allow qsnapper_dbus_t user_home_t:file { getattr setattr open read write create unlink rename link };
-allow qsnapper_dbus_t user_home_t:lnk_file { getattr read create unlink };
+# File restoration - OPTIMIZED FOR SNAPPER-PROTECTED DIRECTORIES
+# Only directories that are actually covered by Btrfs/Snapper snapshots.
+# Excluded: /mnt (temp mounts), /run (runtime), /var (except /var/lib)
+# Note: /bin, /sbin, /lib, /lib64 are symlinks to /usr on RHEL9/10 and openSUSE
+#
+# Allowed directories:
+#   /etc (etc_t)      - System configuration
+#   /usr (usr_t)      - Applications (includes /bin, /sbin, /lib, /lib64 targets)
+#   /opt (usr_t)      - Optional software
+#   /home (user_home_t) - User data (when home subvolume is configured)
+#   /boot (boot_t)    - Kernel and bootloader
+#   /var/lib (var_lib_t) - Snapper metadata, RPM/Zypper DB
 
-# Execute commands (diff, snapper CLI)
+# /home - user home directories (full access including all subdirectories)
+allow qsnapper_dbus_t user_home_dir_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t user_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t user_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
+allow qsnapper_dbus_t user_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t user_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_dbus_t user_home_t:sock_file { getattr open read write create unlink };
+
+# User config directory (~/.config/) - full access
+allow qsnapper_dbus_t config_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t config_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t config_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t config_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_dbus_t config_home_t:sock_file { getattr open read write create unlink };
+
+# User cache directory (~/.cache/) - full access
+allow qsnapper_dbus_t cache_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t cache_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t cache_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t cache_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_dbus_t cache_home_t:sock_file { getattr open read write create unlink };
+
+# User local data directory (~/.local/) - full access
+allow qsnapper_dbus_t gconf_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t gconf_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t gconf_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t gconf_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_dbus_t gconf_home_t:sock_file { getattr open read write create unlink };
+
+# User data directory (~/.local/share/) - full access
+allow qsnapper_dbus_t data_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t data_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t data_home_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t data_home_t:fifo_file { getattr open read write create unlink ioctl };
+allow qsnapper_dbus_t data_home_t:sock_file { getattr open read write create unlink };
+
+# X11 authentication files (~/.Xauthority) - full access
+allow qsnapper_dbus_t xauth_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t xauth_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t xauth_home_t:lnk_file { getattr read create unlink };
+
+# /boot - boot files (kernel, initramfs, grub)
+allow qsnapper_dbus_t boot_t:dir { getattr setattr open read search write add_name remove_name create rmdir };
+allow qsnapper_dbus_t boot_t:file { getattr setattr open read write create unlink rename link };
+allow qsnapper_dbus_t boot_t:lnk_file { getattr read create unlink };
+
+# /bin, /sbin - read-only access (symlinks to /usr, restoration via usr_t)
 allow qsnapper_dbus_t bin_t:dir { getattr open read search };
 allow qsnapper_dbus_t bin_t:file { getattr open read execute execute_no_trans map };
 allow qsnapper_dbus_t bin_t:lnk_file { getattr read };
+
+# /lib, /lib64 - read-only access (symlinks to /usr, restoration via usr_t)
+# Note: lib_t read/execute already defined above for shared library loading
+
+# /usr, /opt - user programs and optional packages (primary restoration target)
+allow qsnapper_dbus_t usr_t:dir { getattr setattr open read search write add_name remove_name create rmdir };
+allow qsnapper_dbus_t usr_t:file { getattr setattr open read write create unlink rename link map };
+allow qsnapper_dbus_t usr_t:lnk_file { getattr read create unlink };
+
+# /etc - system configuration (already defined above with write access)
+# Extended permissions for full restoration capability
+allow qsnapper_dbus_t etc_t:dir { setattr create rmdir };
+allow qsnapper_dbus_t etc_t:file { setattr link };
+allow qsnapper_dbus_t etc_t:lnk_file { create unlink };
+
+# /run - read-only access (runtime data, not snapshot-restorable)
+allow qsnapper_dbus_t var_run_t:dir { getattr open read search };
+allow qsnapper_dbus_t var_run_t:file { getattr open read };
+allow qsnapper_dbus_t var_run_t:lnk_file { getattr read };
+allow qsnapper_dbus_t var_run_t:sock_file { getattr open read write };
+
+# Execute commands (diff, snapper CLI) - shell_exec_t for /bin/sh etc.
 allow qsnapper_dbus_t shell_exec_t:file { getattr open read execute execute_no_trans map };
 
 # Temporary files
 allow qsnapper_dbus_t tmp_t:dir { getattr open read search write add_name remove_name };
 allow qsnapper_dbus_t qsnapper_tmp_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t qsnapper_tmp_t:file { getattr open read write create unlink rename };
-
-# Runtime data in /var/run
-allow qsnapper_dbus_t var_run_t:dir { getattr open read search write add_name remove_name };
 
 # Log files in /var/log
 allow qsnapper_dbus_t var_log_t:dir { getattr open read search write add_name remove_name };
@@ -371,6 +655,59 @@ allow qsnapper_dbus_t net_conf_t:file { getattr open read };
 
 # File descriptor inheritance
 allow qsnapper_dbus_t system_dbusd_t:fd use;
+allow qsnapper_dbus_t init_t:fd use;
+
+# Access to qsnapper_t process info in /proc (for D-Bus authentication)
+allow qsnapper_dbus_t qsnapper_t:dir { getattr open read search };
+allow qsnapper_dbus_t qsnapper_t:file { getattr open read };
+allow qsnapper_dbus_t qsnapper_t:lnk_file { getattr read };
+
+########################################
+# Root directory and major system directories - full access
+########################################
+
+# Root directory (/) - full access
+allow qsnapper_t root_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t root_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t root_t:lnk_file { getattr read create unlink };
+
+# Default type for unlabeled files
+allow qsnapper_t default_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t default_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t default_t:lnk_file { getattr read create unlink };
+
+# /mnt - mount points
+allow qsnapper_t mnt_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t mnt_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t mnt_t:lnk_file { getattr read create unlink };
+
+# autofs mount points
+allow qsnapper_t autofs_t:dir { getattr open read search };
+
+# /var - variable data
+allow qsnapper_t var_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t var_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t var_t:lnk_file { getattr read create unlink };
+
+# /var/lib - persistent variable data
+allow qsnapper_t var_lib_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_t var_lib_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_t var_lib_t:lnk_file { getattr read create unlink };
+
+# Additional device access for input/sound/video
+allow qsnapper_t input_device_t:chr_file { getattr open read write ioctl };
+allow qsnapper_t sound_device_t:chr_file { getattr open read write ioctl map };
+allow qsnapper_t event_device_t:chr_file { getattr open read write ioctl };
+
+# D-Bus service root directory access (for qsnapper_dbus_t)
+allow qsnapper_dbus_t root_t:dir { getattr open read search };
+allow qsnapper_dbus_t root_t:lnk_file { getattr read };
+allow qsnapper_dbus_t default_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t default_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t default_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t mnt_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
+allow qsnapper_dbus_t mnt_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
+allow qsnapper_dbus_t mnt_t:lnk_file { getattr read create unlink };
 
 ########################################
 # Domain transitions
@@ -385,6 +722,12 @@ type_transition unconfined_t qsnapper_exec_t:process qsnapper_t;
 allow system_dbusd_t qsnapper_dbus_exec_t:file { getattr open read execute map };
 allow system_dbusd_t qsnapper_dbus_t:process transition;
 type_transition system_dbusd_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
+
+# init_t -> qsnapper_dbus_t (for systemd D-Bus activation)
+allow init_t qsnapper_dbus_exec_t:file { getattr setattr open read write execute execute_no_trans map ioctl };
+allow init_t qsnapper_dbus_t:process { transition signal signull sigkill sigstop sigchld fork };
+type_transition init_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
+allow qsnapper_dbus_t init_t:process sigchld;
 
 ########################################
 # Type transitions for files

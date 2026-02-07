@@ -2,6 +2,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QIcon>
+#include <QQuickStyle>
 #include <QTranslator>
 #include <QLocale>
 #include <QLibraryInfo>
@@ -22,7 +23,7 @@ int main(int argc, char *argv[])
     app.setOrganizationName("Presire");
     app.setOrganizationDomain("https://github.com/presire");
     app.setApplicationName("qSnapper");
-    app.setApplicationVersion("1.0.1");
+    app.setApplicationVersion("1.0.2");
     app.setWindowIcon(QIcon(":QSnapper/icons/qSnapper.png"));
 
     // 翻訳システムの設定
@@ -77,6 +78,10 @@ int main(int argc, char *argv[])
         "CleanupAlgorithm",
         "CleanupAlgorithm is an enum"
     );
+
+    // Fusionスタイルを強制: KDE Plasma 6の org.kde.desktop スタイルが
+    // QMLのPaletteを無視する問題を回避する
+    QQuickStyle::setStyle("Fusion");
 
     QQmlApplicationEngine engine;
 

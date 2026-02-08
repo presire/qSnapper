@@ -72,7 +72,7 @@ qt6_add_resources(qsnapper "icons"
 
 # 翻訳ファイルの設定
 qt6_add_translations(qsnapper
-    TS_FILES translations/qsnapper_ja.ts
+    TS_FILES translations/qsnapper_ja.ts translations/qsnapper_de.ts
     RESOURCE_PREFIX /i18n
 )
 

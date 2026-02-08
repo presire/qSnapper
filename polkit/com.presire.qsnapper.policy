@@ -8,8 +8,10 @@
   <action id="com.presire.qsnapper.list-snapshots">
     <description>List system snapshots</description>
     <description xml:lang="ja">システムスナップショットを一覧表示</description>
+    <description xml:lang="de">System Schnappschüsse auflisten</description>
     <message>Authentication is required to list system snapshots</message>
     <message xml:lang="ja">システムスナップショットを一覧表示するには認証が必要です</message>
+    <message xml:lang="de">Zur Auflistung von System-Snapshots ist eine Legitimierung erforderlich.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -20,8 +22,10 @@
   <action id="com.presire.qsnapper.create-snapshot">
     <description>Create a system snapshot</description>
     <description xml:lang="ja">システムスナップショットを作成</description>
+    <description xml:lang="de">System Schnappschuss erzeugen</description>
     <message>Authentication is required to create a system snapshot</message>
     <message xml:lang="ja">システムスナップショットを作成するには認証が必要です</message>
+    <message xml:lang="de">Zur Erstellung eines System-Snapshots ist eine Legitimierung erforderlich.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -32,8 +36,10 @@
   <action id="com.presire.qsnapper.delete-snapshot">
     <description>Delete a system snapshot</description>
     <description xml:lang="ja">システムスナップショットを削除</description>
+    <description xml:lang="de">System Schanppschuss löschen</description>
     <message>Authentication is required to delete a system snapshot</message>
     <message xml:lang="ja">システムスナップショットを削除するには認証が必要です</message>
+    <message xml:lang="de">Löschen eines System-Snapshots erfordert eine Legitimierung.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -44,8 +50,10 @@
   <action id="com.presire.qsnapper.rollback-snapshot">
     <description>Rollback to a system snapshot</description>
     <description xml:lang="ja">システムスナップショットに復元</description>
+    <description xml:lang="de">Zurücksetzen auf einen System-Snapshot</description>
     <message>Authentication is required to rollback to a system snapshot</message>
     <message xml:lang="ja">システムスナップショットに復元するには認証が必要です</message>
+    <message xml:lang="de">Zurücksetzen auf einen System-Snapshot erfordert eine Legitimierung.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>

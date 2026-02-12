@@ -319,6 +319,7 @@ qSnapper/
 ├── src/                       # C++ソースファイル
 │   ├── main.cpp              # アプリケーションエントリポイント
 │   ├── fssnapshot.cpp        # スナップショットデータモデル
+│   ├── fssnapshotstore.cpp   # スナップショットデータストア
 │   ├── snapperservice.cpp    # Snapperサービスインターフェース
 │   ├── snapshotlistmodel.cpp # スナップショットリストモデル
 │   ├── filechangemodel.cpp   # ファイル変更ツリーモデル
@@ -340,6 +341,16 @@ qSnapper/
 ├── icons/                   # アプリケーションアイコン
 ├── dbus/                    # D-Bus設定ファイル
 ├── polkit/                  # PolicyKitポリシーファイル
+├── selinux/                 # SELinuxポリシーモジュール
+│   ├── qsnapper.te          # Type Enforcementルール
+│   ├── qsnapper.if          # インターフェース定義
+│   └── qsnapper.fc.in       # ファイルコンテキスト定義
+├── Licenses/                # サードパーティライセンス
+│   ├── Qt.md
+│   ├── D-Bus.md
+│   ├── PolicyKit.md
+│   ├── Polkit-Qt.md
+│   └── Snapper.md
 └── translations/            # 翻訳ファイル
     └── qsnapper_ja.ts       # 日本語翻訳
 ```

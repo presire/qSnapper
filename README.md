@@ -314,6 +314,7 @@ qSnapper/
 ├── src/                       # C++ source files
 │   ├── main.cpp              # Application entry point
 │   ├── fssnapshot.cpp        # Snapshot data model
+│   ├── fssnapshotstore.cpp   # Snapshot data store
 │   ├── snapperservice.cpp    # Snapper service interface
 │   ├── snapshotlistmodel.cpp # Snapshot list model
 │   ├── filechangemodel.cpp   # File change tree model
@@ -335,8 +336,18 @@ qSnapper/
 ├── icons/                   # Application icons
 ├── dbus/                    # D-Bus configuration files
 ├── polkit/                  # PolicyKit policy files
+├── selinux/                 # SELinux policy module
+│   ├── qsnapper.te          # Type enforcement rules
+│   ├── qsnapper.if          # Interface definitions
+│   └── qsnapper.fc.in       # File context definitions
+├── Licenses/                # Third-party licenses
+│   ├── Qt.md
+│   ├── D-Bus.md
+│   ├── PolicyKit.md
+│   ├── Polkit-Qt.md
+│   └── Snapper.md
 └── translations/            # Translation files
-    └── qsnapper_ja.ts      # Japanese translation
+    └── qsnapper_ja.ts       # Japanese translation
 ```
 
 ## Contributing

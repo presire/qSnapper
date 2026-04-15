@@ -484,15 +484,9 @@ void FileChangeModel::restoreSingleFile(const QString &filePath)
     m_totalFilesCount = 1;
     m_processedFilesCount = 0;
 
-    // 事前認証: 復元操作前に1回だけPolkit認証を実行
-    QDBusReply<bool> authReply = m_dbusInterface->call("Authenticate",
-        QStringLiteral("com.presire.qsnapper.rollback-snapshot"));
-    if (!authReply.isValid() || !authReply.value()) {
-        qWarning() << "Authentication failed:" << authReply.error().message();
-        emit errorOccurred(tr("Authentication failed."));
-        emit restoreCompleted(false);
-        return;
-    }
+    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)。
+    // Polkit 認証は RestoreFiles / RestoreFilesDirect 呼び出し時に都度行われ、
+    // `auth_admin_keep` により短時間の連続操作では UX 的にも1回プロンプトと同等になる。
 
     QStringList filePaths;
     filePaths << filePath;
@@ -1179,15 +1173,9 @@ bool FileChangeModel::restoreCheckedItems()
         }
     }
 
-    // 事前認証: バッチ処理開始前に1回だけPolkit認証を実行
-    QDBusReply<bool> authReply = m_dbusInterface->call("Authenticate",
-        QStringLiteral("com.presire.qsnapper.rollback-snapshot"));
-    if (!authReply.isValid() || !authReply.value()) {
-        qWarning() << "Authentication failed:" << authReply.error().message();
-        emit errorOccurred(tr("Authentication failed."));
-        emit restoreCompleted(false);
-        return false;
-    }
+    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)。
+    // バッチの最初の RestoreFiles / RestoreFilesDirect 呼び出しで Polkit が
+    // プロンプトを出し、以降は `auth_admin_keep` の cookie により抑止される。
 
     // D-Busシグナルを接続して進捗を受信
     bool connected = QDBusConnection::systemBus().connect(

@@ -66,10 +66,10 @@ private:
     SnapshotType m_snapshotType;         // スナップショットタイプ (Single/Pre/Post)
     int m_previousNumber;                // 前のスナップショット番号 (Postの場合のみ有効)
     QDateTime m_timestamp;               // スナップショット作成日時
-    QString m_user;                      // スナップショット作成ユーザー名
+    QString m_user;                      // スナップショット作成ユーザ名
     CleanupAlgorithm m_cleanupAlgo;      // クリーンアップアルゴリズム (None/Number/Timeline)
     QString m_description;               // スナップショットの説明文
-    QVariantMap m_userdata;              // カスタムユーザーデータマップ
+    QVariantMap m_userdata;              // カスタムユーザデータマップ
 };
 
 #endif // FSSNAPSHOT_H

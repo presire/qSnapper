@@ -10,10 +10,10 @@
  * @param snapshotType スナップショットタイプ (Single/Pre/Post)
  * @param previousNumber 前のスナップショット番号 (Postスナップショットの場合)
  * @param timestamp スナップショット作成日時
- * @param user スナップショット作成ユーザー名
+ * @param user スナップショット作成ユーザ名
  * @param cleanupAlgo クリーンアップアルゴリズム (None/Number/Timeline)
  * @param description スナップショットの説明文
- * @param userdata カスタムユーザーデータマップ
+ * @param userdata カスタムユーザデータマップ
  * @param parent 親QObjectポインタ
  */
 FsSnapshot::FsSnapshot(int number,
@@ -66,7 +66,7 @@ QString FsSnapshot::cleanupAlgoString() const
 /**
  * @brief スナップショットが重要とマークされているかチェック
  *
- * ユーザーデータマップ内の"important"キーの値が"yes"かどうかを判定する。
+ * ユーザデータマップ内の"important"キーの値が"yes"かどうかを判定する。
  * 重要なスナップショットはUI上で特別な表示がされる。
  *
  * @return 重要なスナップショットの場合true、それ以外はfalse

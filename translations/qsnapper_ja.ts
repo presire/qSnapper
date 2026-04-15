@@ -196,7 +196,7 @@ reason=manual-test</translation>
     </message>
     <message>
         <source>User:</source>
-        <translation>ユーザー:</translation>
+        <translation>ユーザ:</translation>
     </message>
     <message>
         <source>Unknown</source>
@@ -263,7 +263,7 @@ reason=manual-test</translation>
     </message>
     <message>
         <source>User:</source>
-        <translation>ユーザー:</translation>
+        <translation>ユーザ:</translation>
     </message>
     <message>
         <source>Unknown</source>
@@ -552,7 +552,7 @@ reason=manual-test</translation>
     </message>
     <message>
         <source>File user ownership was changed from &apos;%1&apos; to &apos;%2&apos;.</source>
-        <translation>ファイルのユーザー所有者が &apos;%1&apos; から &apos;%2&apos; に変更されました。</translation>
+        <translation>ファイルのユーザ所有者が &apos;%1&apos; から &apos;%2&apos; に変更されました。</translation>
     </message>
     <message>
         <source>File group ownership was changed from &apos;%1&apos; to &apos;%2&apos;.</source>

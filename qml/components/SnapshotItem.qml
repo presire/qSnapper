@@ -14,12 +14,12 @@ ItemDelegate {
     required property int snapshotType                  // スナップショットタイプ (列挙型)
     required property int previousNumber                // 前のスナップショット番号 (Postの場合)
     required property date timestamp                    // 作成日時
-    required property string user                       // 作成ユーザー
+    required property string user                       // 作成ユーザ
     required property int cleanupAlgo                   // クリーンアップアルゴリズム
     required property string description                // 説明
     required property string snapshotTypeString         // スナップショットタイプ文字列
     required property string cleanupAlgoString          // クリーンアップアルゴリズム文字列
-    required property var userdata                      // ユーザーデータマップ
+    required property var userdata                      // ユーザデータマップ
 
     property var listModel: null                        // リストモデルへの参照
     property var detailDialog: null                     // 詳細ダイアログへの参照
@@ -103,7 +103,7 @@ ItemDelegate {
                 }
             }
 
-            // メタ情報行 (タイプ、ユーザー、前スナップショット)
+            // メタ情報行 (タイプ、ユーザ、前スナップショット)
             RowLayout {
                 spacing: 10
 
@@ -190,7 +190,7 @@ ItemDelegate {
                 color: Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.7)
             }
 
-            // ユーザーデータタグ表示
+            // ユーザデータタグ表示
             Flow {
                 visible: userdata && Object.keys(userdata).length > 0
                 Layout.fillWidth: true

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.2 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.3 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -24,7 +24,7 @@ find_package(PolkitQt6-1 REQUIRED)
 qt6_standard_project_setup()
 
 # QTP0004: サブディレクトリ (qml/pages, qml/components) のqmldir要求を抑制
-# NO_PLUGIN指定でリソース埋め込みのため qmldir は不要
+# NO_PLUGIN指定でリソース埋め込みのためqmldirは不要
 qt6_policy(SET QTP0004 OLD)
 
 set(SOURCES
@@ -124,10 +124,12 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/translations
 set(DBUS_SERVICE_SOURCES
     src/dbusservice/main.cpp
     src/dbusservice/snapshotoperations.cpp
+    src/dbusservice/inputvalidator.cpp
 )
 
 set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
+    src/dbusservice/inputvalidator.h
 )
 
 qt6_add_executable(qsnapper-dbus-service
@@ -219,10 +221,25 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
 )
 
-# 注: qt_import_qml_plugins / qt_finalize_executable は静的 Qt ビルド用。
-# 共有ライブラリ Qt では qt6_standard_project_setup() + qt6_add_executable() が
-# 自動で finalize するため明示呼び出しは不要 (呼ぶと存在しないプラグインターゲットの
-# リンク警告が発生する)。
+# 注意:
+# qt_import_qml_plugins / qt_finalize_executableは静的Qtビルド向け
+# 共有ライブラリのQtでは、qt6_standard_project_setup() + qt6_add_executable()が
+# 自動でfinalizeするため明示呼び出しは不要 (呼ぶと存在しないプラグインターゲットのリンク警告が発生する)
+
+########################################
+# Unit tests (optional)
+########################################
+
+option(QSNAPPER_BUILD_TESTS "Build unit tests (Qt Test based)" OFF)
+option(QSNAPPER_TEST_SANITIZE "Enable ASan/UBSan for unit tests" OFF)
+
+if(QSNAPPER_BUILD_TESTS)
+    message(STATUS "Unit tests: ENABLED (sanitizers=${QSNAPPER_TEST_SANITIZE})")
+    enable_testing()
+    add_subdirectory(tests/unit)
+else()
+    message(STATUS "Unit tests: DISABLED (enable with -DQSNAPPER_BUILD_TESTS=ON)")
+endif()
 
 ########################################
 # SELinux support (optional)

@@ -226,19 +226,6 @@ void SnapshotListModel::rollbackSnapshot(int number)
 }
 
 /**
- * @brief 削除操作の事前認証を実行
- *
- * 複数削除の前にPolkit認証を1回だけ実行する。
- * 認証成功後、各DeleteSnapshot呼び出しでは再認証をスキップする。
- *
- * @return 認証成功時true、失敗時false
- */
-bool SnapshotListModel::authenticateForDelete()
-{
-    return m_snapperService->authenticateForDelete();
-}
-
-/**
  * @brief 指定されたスナップショットを削除
  *
  * スナップショット番号を指定して単一のスナップショットを削除する。

@@ -77,10 +77,6 @@
       <arg name="changeTypes" type="as" direction="in"/>
       <arg name="success" type="b" direction="out"/>
     </method>
-    <method name="Authenticate">
-      <arg name="actionId" type="s" direction="in"/>
-      <arg name="success" type="b" direction="out"/>
-    </method>
     <method name="IsConfigured">
       <arg name="configured" type="b" direction="out"/>
     </method>

@@ -1,4 +1,4 @@
-// スナップショットテーブルのヘッダー行
+// スナップショットテーブルのヘッダ行
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts

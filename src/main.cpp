@@ -6,12 +6,12 @@
 #include <QTranslator>
 #include <QLocale>
 #include <QLibraryInfo>
-#include <QDebug>
 #include <QDir>
 #include <QDBusInterface>
 #include <QDBusConnection>
 #include <QDBusMetaType>
 #include <QMap>
+#include <QDebug>
 #include "fssnapshot.h"
 #include "snapperservice.h"
 #include "snapshotlistmodel.h"

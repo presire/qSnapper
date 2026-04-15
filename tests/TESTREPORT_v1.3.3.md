@@ -241,3 +241,4 @@ Reviewed by (SUSE liaison, if applicable): ____________________   Date: YYYY-MM-
 | 5a | —              | P0-4 | A-2, B-3, C-5 |
 | 5b | —              | P1-6 | B-1-6, C-6 |
 | 5c | —              | P1-7 | B-5, C-7 |
+| —  | —              | P2-8 (D-Bus per-member ACL) | B-4-1〜4 |

@@ -90,7 +90,6 @@
       <arg name="configName" type="s" direction="in"/>
       <arg name="success" type="b" direction="out"/>
     </method>
-    <method name="Quit"/>
     <signal name="restoreProgress">
       <arg name="current" type="i"/>
       <arg name="total" type="i"/>

@@ -26,11 +26,27 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context
 {
     Q_UNUSED(context)
 
+    // ログディレクトリを作成し、パーミッション 0700にする
+    // 所有者はsystemdにより、root:rootで起動されるためrootに固定される
+    // 恒久的なmode設定はsystemd-tmpfiles (tmpfiles.d/qsnapper.conf) 側で担保するが、
+    // パッケージ導入前の初回起動でも安全側に倒すため本関数でも設定する
+    const bool dirExistedBefore = QFile::exists(logDir());
     QDir().mkpath(logDir());
+    if (!dirExistedBefore) {
+        QFile::setPermissions(logDir(),
+                              QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    }
 
+    const bool fileExistedBefore = QFile::exists(logFile());
     QFile file(logFile());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return;
+    }
+
+    if (!fileExistedBefore) {
+        // ログファイルを 0600 (owner rw のみ) にする
+        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    }
 
     const char *level = nullptr;
     switch (type) {

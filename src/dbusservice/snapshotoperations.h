@@ -246,11 +246,6 @@ public slots:
      */
     bool SetupQuota(const QString &configName);
 
-    /**
-     * @brief D-Busサービスを即時終了させる
-     */
-    void Quit();
-
 signals:
     /**
      * @brief 復元処理の進捗通知

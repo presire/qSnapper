@@ -407,12 +407,6 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     }
 }
 
-void SnapshotOperations::Quit()
-{
-    qInfo() << "Quit requested via D-Bus, shutting down...";
-    QCoreApplication::quit();
-}
-
 /**
  * @brief configNameを検証し、不正ならD-Busエラー応答を送信する
  *
@@ -1018,7 +1012,7 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
     if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
         return QString();
     }
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
@@ -1091,7 +1085,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
     if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
         return QString();
     }
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
@@ -1156,7 +1150,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
@@ -1263,7 +1257,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 

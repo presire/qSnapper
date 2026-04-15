@@ -197,6 +197,11 @@ install(FILES polkit/com.presire.qsnapper.policy
     DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions
 )
 
+# systemd-tmpfiles設定 (ログディレクトリを0700に恒久設定)
+install(FILES systemd/tmpfiles.d/qsnapper.conf
+    DESTINATION lib/tmpfiles.d
+)
+
 # アプリケーションアイコン (hicolor theme, 複数解像度)
 install(FILES icons/qSnapper@64.png
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/64x64/apps
@@ -223,13 +228,12 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.desktop
 
 # 注意:
 # qt_import_qml_plugins / qt_finalize_executableは静的Qtビルド向け
-# 共有ライブラリのQtでは、qt6_standard_project_setup() + qt6_add_executable()が
-# 自動でfinalizeするため明示呼び出しは不要 (呼ぶと存在しないプラグインターゲットのリンク警告が発生する)
+# 共有ライブラリのQtでは、qt6_standard_project_setup() + qt6_add_executable() が自動でfinalizeするため明示呼び出しは不要
+# (呼ぶと存在しないプラグインターゲットのリンク警告が発生する)
 
 ########################################
 # Unit tests (optional)
 ########################################
-
 option(QSNAPPER_BUILD_TESTS "Build unit tests (Qt Test based)" OFF)
 option(QSNAPPER_TEST_SANITIZE "Enable ASan/UBSan for unit tests" OFF)
 
@@ -244,7 +248,6 @@ endif()
 ########################################
 # SELinux support (optional)
 ########################################
-
 option(ENABLE_SELINUX "Build and install SELinux policy module" OFF)
 
 if(ENABLE_SELINUX)
@@ -258,5 +261,4 @@ endif()
 ########################################
 # Packaging (CPack)
 ########################################
-
 include(cmake/packaging.cmake)

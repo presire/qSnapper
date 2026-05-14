@@ -30,15 +30,21 @@ const QRegularExpression &configNameRegex()
 }
 
 /**
- * @brief NUL / 改行 / キャリッジリターンを含むかを判定する補助関数
+ * @brief 制御文字 (非印字文字) を含むかを判定する補助関数
+ *
+ * 拒否対象は以下の Unicode 範囲:
+ *   - C0 制御文字  : U+0000 .. U+001F (NUL/HT/LF/CR/ESC 等を含む)
+ *   - DEL          : U+007F
+ *   - C1 制御文字  : U+0080 .. U+009F
  *
  * QStringが内部でUTF-16を保持しているため、制御文字の埋め込みは正規表現よりQChar比較で確実に検出できる。
+ * ファイルパスやconfig名にこれらが正当に含まれることはない。
  */
 bool containsDangerousChar(const QString &s)
 {
     for (const QChar &c : s) {
         const ushort u = c.unicode();
-        if (u == 0 || u == '\n' || u == '\r') {
+        if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)) {
             return true;
         }
     }
@@ -54,8 +60,10 @@ bool containsDangerousChar(const QString &s)
  *   1. 空文字 / 長さ >255 を棄却
  *   2. "." / ".." を棄却 (regexでは弾けない)
  *   3. 先頭 '-' を棄却 (CLIオプション誤認防止)
- *   4. NUL / 改行チェック (belt and suspenders)
- *   5. allowlist正規表現
+ *   4. allowlist正規表現 (制御文字も自然に拒否される)
+ *
+ * 注: 制御文字 (containsDangerousChar 相当) は allowlist 正規表現 ^[A-Za-z0-9_.-]+$ で
+ *     既に拒否されるため、明示チェックは不要。
  */
 bool validateConfigName(const QString &name)
 {
@@ -71,9 +79,6 @@ bool validateConfigName(const QString &name)
     if (name.startsWith(QLatin1Char('-'))) {
         return false;
     }
-    if (containsDangerousChar(name)) {
-        return false;
-    }
     const QRegularExpressionMatch m = configNameRegex().match(name);
     return m.hasMatch();
 }
@@ -81,12 +86,13 @@ bool validateConfigName(const QString &name)
 /**
  * @brief inputvalidator.h の isPathWithinSnapshotRoot 実装
  *
- * weakly_canonicalを使わずに、lexically_normal + lexically_relativeで判定する。
+ * weakly_canonicalを使わずに、lexically_normal で正規化した上で
+ * 文字列プレフィクス比較＋パス区切り境界チェックで判定する。
  * weakly_canonical は FS にタッチし存在しないパスで挙動がぶれる。
  * シンボリックリンク解決は契約どおり呼び出し側 (openat+O_NOFOLLOW) の責務。
  *
- * sibling root trick ("/a/root" vs "/a/root-evil") は
- * lexically_relativeが "../root-evil/..." を返すため先頭 ".." チェックで自然に弾ける。
+ * 単純な find()==0 では sibling root trick ("/a/root" vs "/a/root-evil") を許容してしまうため、
+ * プレフィクス一致後に「完全一致」または「直後が '/' 」を要求する。
  */
 bool isPathWithinSnapshotRoot(const QString &filePath, const QString &snapshotRoot)
 {
@@ -111,7 +117,7 @@ bool isPathWithinSnapshotRoot(const QString &filePath, const QString &snapshotRo
         namespace fs = std::filesystem;
 
         // 末尾の余分な '/' を落としてから正規化
-        // (lexically_normalは末尾スラッシュを残すことがあり、lexically_relativeの結果がぶれるため)
+        // (lexically_normalは末尾スラッシュを残すことがあり、文字列比較の結果がぶれるため)
         QString rootTrim = snapshotRoot;
         while (rootTrim.size() > 1 && rootTrim.endsWith(QLatin1Char('/'))) {
             rootTrim.chop(1);
@@ -120,17 +126,20 @@ bool isPathWithinSnapshotRoot(const QString &filePath, const QString &snapshotRo
         const fs::path p    = fs::path(filePath.toStdString()).lexically_normal();
         const fs::path root = fs::path(rootTrim.toStdString()).lexically_normal();
 
-        const fs::path rel = p.lexically_relative(root);
-        if (rel.empty()) {
-            return false;
-        }
+        const std::string ps = p.string();
+        const std::string rs = root.string();
 
-        // 先頭コンポーネントが ".." ならrootを脱出している
-        const auto it = rel.begin();
-        if (it != rel.end() && *it == "..") {
+        // (a) 長さが root 未満ならプレフィクス成立不可
+        if (ps.size() < rs.size()) {
             return false;
         }
-        return true;
+        // (b) 先頭がroot と一致しなければ拒否
+        if (ps.compare(0, rs.size(), rs) != 0) {
+            return false;
+        }
+        // (c) 完全一致 (=root自体)、または root 直後がパス区切り '/' (= 子要素) のみ許可
+        //     これがないと "/a/root" と "/a/root-evil" を取り違える
+        return ps.size() == rs.size() || ps[rs.size()] == '/';
     }
     catch (const std::exception &) {
         return false;

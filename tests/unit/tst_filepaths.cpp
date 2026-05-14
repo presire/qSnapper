@@ -1,17 +1,19 @@
 // tst_filepaths.cpp
 // レイヤA-2: RestoreFiles パス正規化の単体テスト (テスト計画 §2 A-2)
 //
-// 前提となる実装インタフェース (P0-4 で src/dbusservice 配下に新設予定):
+// 検査対象インタフェース (src/dbusservice/inputvalidator.h):
 //
-//   // include/dbusservice/inputvalidator.h
 //   namespace qsnapper::security {
 //       // filePath (絶対パス) が snapshotRoot 配下に収まっているか検証する。
 //       // 仕様:
-//       //   - filePath は絶対パスでなければ拒否
-//       //   - '..' を含むパスは、weakly_canonical 展開後に
-//       //     snapshotRoot で始まることを要求 (そうでなければ拒否)
-//       //   - 末尾NUL/改行混入は拒否
+//       //   - filePath / snapshotRoot は絶対パスでなければ拒否
+//       //   - filePath / snapshotRoot に制御文字 (C0 / DEL / C1) を含む場合は拒否
 //       //   - PATH_MAX 超過は拒否
+//       //   - std::filesystem::path::lexically_normal() で正規化した上で、
+//       //     filePath が snapshotRoot を完全プレフィクスとして持ち、
+//       //     かつ境界が「完全一致」または「直後がパス区切り '/'」であることを要求する
+//       //     (sibling root trick "/a/b/snap" vs "/a/b/snap-evil" を弾くため、
+//       //      単純な find()==0 ではなく境界チェックを必須としている)
 //       //   - シンボリックリンク検証は呼び出し側で openat(O_NOFOLLOW) によって
 //       //     行う (純粋関数のこのレイヤでは扱わない)
 //       bool isPathWithinSnapshotRoot(const QString &filePath,
@@ -125,6 +127,28 @@ void TestFilePaths::reject_data()
         << QStringLiteral("/.snapshots/42/snapshot/etc/hosts")
         << QString()
         << QStringLiteral("empty root must not act as universal match");
+
+    // Round 2 review: 文字列プレフィクス境界の確認 (Comment 3 で新実装に変更)
+    QTest::newRow("trailing char no separator")
+        << QStringLiteral("/.snapshots/42/snapshotX")
+        << QStringLiteral("/.snapshots/42/snapshot")
+        << QStringLiteral("root suffix without '/' boundary must reject");
+
+    // Round 2 review: 制御文字検査が filePath / snapshotRoot 双方に効くこと
+    QTest::newRow("ctrl SOH in filePath")
+        << (QStringLiteral("/.snapshots/42/snapshot/etc/host") + QChar(0x01) + QStringLiteral("s"))
+        << QStringLiteral("/.snapshots/42/snapshot")
+        << QStringLiteral("C0 control char in tail must reject");
+
+    QTest::newRow("DEL in filePath")
+        << (QStringLiteral("/.snapshots/42/snapshot/etc/host") + QChar(0x7F) + QStringLiteral("s"))
+        << QStringLiteral("/.snapshots/42/snapshot")
+        << QStringLiteral("DEL in tail must reject");
+
+    QTest::newRow("C1 PAD in snapshotRoot")
+        << QStringLiteral("/.snapshots/42/snapshot/etc/hosts")
+        << (QStringLiteral("/.snapshots/42/snap") + QChar(0x80) + QStringLiteral("shot"))
+        << QStringLiteral("C1 control char in root must reject");
 }
 
 void TestFilePaths::reject()

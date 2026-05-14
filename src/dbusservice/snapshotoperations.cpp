@@ -342,7 +342,8 @@ bool SnapshotOperations::IsConfigured()
 bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
                                             const QMap<QString, QString> &settings)
 {
-    if (!validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
 
@@ -351,7 +352,7 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -383,7 +384,8 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
  */
 bool SnapshotOperations::SetupQuota(const QString &configName)
 {
-    if (!validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
     if (!checkAuthorization("com.presire.qsnapper.configure")) {
@@ -391,7 +393,7 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -408,23 +410,30 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
 }
 
 /**
- * @brief configNameを検証し、不正ならD-Busエラー応答を送信する
+ * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を送信する
  *
- * qsnapper::security::validateConfigNameのラッパー。
- * 無効な場合はQDBusError::InvalidArgsを送信し、falseを返す。
+ * 空文字列入力を "root" に正規化した上で qsnapper::security::validateConfigName で検証する。
+ * 無効な場合はQDBusError::InvalidArgsを送信し、std::nulloptを返す。
  * Polkitプロンプトを出す前に呼び出して、攻撃者が任意configNameでpolkitを浪費するのを防ぐ。
  *
- * @param configName 検査する設定名
- * @return 有効: true、無効でエラー送信済み: false
+ * 旧 validateConfigOrFail のリプレースメント。
+ * 「空 → "root"」のデフォルト割当をここに集約することで、呼び出し側の
+ * `configName.isEmpty() ? "root" : configName` パターンを排除する。
+ *
+ * @param configName 検査する設定名 (空文字列は "root" として扱う)
+ * @return 正規化後の設定名 (有効時)、無効でエラー送信済み (std::nullopt)
  */
-bool SnapshotOperations::validateConfigOrFail(const QString &configName)
+std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &configName)
 {
-    if (!qsnapper::security::validateConfigName(configName)) {
+    const QString effective = configName.isEmpty()
+                                 ? QStringLiteral("root")
+                                 : configName;
+    if (!qsnapper::security::validateConfigName(effective)) {
         sendErrorReply(QDBusError::InvalidArgs,
                        QStringLiteral("Invalid configName"));
-        return false;
+        return std::nullopt;
     }
-    return true;
+    return effective;
 }
 
 /**
@@ -608,8 +617,10 @@ QStringList SnapshotOperations::ListConfigs()
  */
 QString SnapshotOperations::ListSnapshots(const QString &configName)
 {
-    // 空文字列は"root"と解釈するため、空なら検証スキップ
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    // resolveConfigOrFail が空文字列を "root" に正規化した上で検証する。
+    // 失敗時はD-Busエラー応答が送出済み。
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
 
@@ -619,9 +630,7 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
 
     try {
         // 一覧取得時は必ず再構築して外部で作成された最新スナップショットを反映する
-        snapper::Snapper *snapper = getSnapper(
-            configName.isEmpty() ? QStringLiteral("root") : configName,
-            /*forceReload=*/true);
+        snapper::Snapper *snapper = getSnapper(*cfg, /*forceReload=*/true);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -653,7 +662,8 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
                                            int preNumber, const QString &cleanup,
                                            const QMap<QString, QString> &userdata, bool important)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
     if (!checkAuthorization("com.presire.qsnapper.create-snapshot")) {
@@ -661,7 +671,7 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -767,7 +777,8 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
                                         const QString &description, const QString &cleanup,
                                         const QMap<QString, QString> &userdata)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
 
@@ -776,7 +787,7 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -824,7 +835,8 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
  */
 bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
 
@@ -835,7 +847,7 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
     resetIdleTimer();
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -876,7 +888,8 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
  */
 bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
 
@@ -885,7 +898,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -1009,7 +1022,8 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
  */
 QString SnapshotOperations::GetFileChanges(const QString &configName, int snapshotNumber)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
     if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
@@ -1017,7 +1031,7 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1082,7 +1096,8 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
  */
 QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int number1, int number2)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
     if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
@@ -1090,7 +1105,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1146,7 +1161,8 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
  */
 QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int number1, int number2, const QString &filePath)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
 
@@ -1155,7 +1171,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1253,7 +1269,8 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
  */
 QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int snapshotNumber, const QString &filePath)
 {
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return QString();
     }
 
@@ -1262,7 +1279,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1399,7 +1416,7 @@ bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snaps
  *   - removeOnTypechanged: typechanged時に既存ファイルを先にrmするか (ディレクトリ --> ファイル変化対策)
  *
  * セキュリティ要件:
- *   - configNameはvalidateConfigOrFailで検証済みであること (呼び出し側の責務でないため本関数でも検証)
+ *   - configNameはresolveConfigOrFailで検証済みであること (呼び出し側の責務でないため本関数でも検証)
  *   - filePathsの各要素は絶対パスで、かつ snapshotDir配下を指すこと
  *     (snapshotFilePath = snapshotDir + filePathがsnapshotDir内に収まることをisPathWithinSnapshotRootで検証)
  *   - "/.snapshots/" 直下への書き込み (systemFilePath側) は書き込み対象として棄却する
@@ -1413,7 +1430,8 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
 {
     resetIdleTimer();
 
-    if (!configName.isEmpty() && !validateConfigOrFail(configName)) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
 
@@ -1431,13 +1449,13 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         return false;
     }
 
-    qWarning() << logTag << ": Starting restore for" << filePaths.size()
-               << "files from snapshot" << snapshotNumber
-               << "(useReflink=" << useReflink
-               << ", removeOnTypechanged=" << removeOnTypechanged << ")";
+    qInfo() << logTag << ": Starting restore for" << filePaths.size()
+            << "files from snapshot" << snapshotNumber
+            << "(useReflink=" << useReflink
+            << ", removeOnTypechanged=" << removeOnTypechanged << ")";
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -1455,7 +1473,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         // スナップショットディレクトリのパスを取得
         QString snapshotDir = QString::fromStdString(snapshot1->snapshotDir());
 
-        qWarning() << logTag << ": Snapshot mounted at" << snapshotDir;
+        qInfo() << logTag << ": Snapshot mounted at" << snapshotDir;
 
         bool allSuccess = true;
         int total = filePaths.size();
@@ -1466,10 +1484,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
             const QString &filePath = filePaths[i];
             const QString &changeType = changeTypes[i];
 
-            // 進捗を通知
-            emit restoreProgress(i + 1, total, filePath);
-
-            // 入力検証
+            // 入力検証 (進捗 emit より前に行い、未検証パスをD-Busシグナルへ漏出させない)
             // (1) 絶対パスでなければ拒否
             if (!filePath.startsWith(QLatin1Char('/'))) {
                 qWarning() << logTag << ": Rejecting non-absolute path:" << filePath;
@@ -1492,6 +1507,9 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                 skippedCount++;
                 continue;
             }
+
+            // 検証通過後にのみ進捗を通知 (D-Busシグナルが運ぶのは受理済みパスのみ)
+            emit restoreProgress(i + 1, total, filePath);
 
             // システム上のファイルパス (ルートからの絶対パス)
             const QString systemFilePath = filePath;
@@ -1601,8 +1619,8 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         if (skippedCount > 0) {
             qWarning() << logTag << ": Skipped" << skippedCount << "dangerous paths";
         }
-        qWarning() << logTag << ": Completed. Successful:" << successCount
-                   << "Failed:" << (total - successCount - skippedCount);
+        qInfo() << logTag << ": Completed. Successful:" << successCount
+                << "Failed:" << (total - successCount - skippedCount);
 
         if (!allSuccess) {
             QString errorMsg = QString("Failed to restore %1 out of %2 files")

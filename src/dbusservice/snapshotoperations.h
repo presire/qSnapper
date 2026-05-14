@@ -8,6 +8,7 @@
 #include <QDBusContext>
 #include <QTimer>
 #include <memory>
+#include <optional>
 
 namespace snapper {
     class Snapper;
@@ -38,16 +39,20 @@ private:
     void resetIdleTimer();
 
     /**
-     * @brief configNameを検証し、不正ならD-Busエラー応答を返す
+     * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を返す
      *
-     * qsnapper::security::validateConfigNameのラッパー
+     * 旧 validateConfigOrFail のリプレースメント。
+     * 空文字列の入力は "root" に正規化した上で qsnapper::security::validateConfigName で検証する。
+     * これにより呼び出し側の "空なら root" デフォルト割当パターンが不要になり、
+     * 空入力に対する一貫した扱い (常に "root" として受理) を保証する。
+     *
      * 各D-Busスロットの先頭 (checkAuthorization より前) で呼び出すこと。
      * Polkitプロンプトが出てから "invalid config name" で蹴られるUXを避けるため順序が重要。
      *
-     * @param configName 検査対象の設定名
-     * @return 有効な場合 true、無効でエラー応答済みなら false
+     * @param configName 検査対象の設定名 (空文字列は "root" として扱う)
+     * @return 正規化後の設定名 (有効な場合)、無効でエラー応答済みなら std::nullopt
      */
-    bool validateConfigOrFail(const QString &configName);
+    std::optional<QString> resolveConfigOrFail(const QString &configName);
 
     /**
      * @brief Polkit認証を実行する

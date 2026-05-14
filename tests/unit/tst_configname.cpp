@@ -1,23 +1,21 @@
 // tst_configname.cpp
 // レイヤA-1: validateConfigName() の単体テスト (テスト計画 §2 A-1)
 //
-// 前提となる実装インタフェース (P0-3 で src/dbusservice 配下に新設予定):
+// 検査対象インタフェース (src/dbusservice/inputvalidator.h):
 //
-//   // include/dbusservice/inputvalidator.h
 //   namespace qsnapper::security {
 //       // configName が安全か判定する。
 //       // 仕様:
-//       //   - 許容文字: [A-Za-z0-9_.-]
+//       //   - 許容文字: [A-Za-z0-9_.-] (ASCII allowlist)
 //       //   - 空文字列は拒否
 //       //   - 先頭が '-' は拒否 (snapperのCLIオプション誤解釈防止)
-//       //   - '/' '..' (完全一致) は明示的に拒否される (正規表現で自然にはじかれるが、
-//       //     可読性のため個別チェックも推奨)
-//       //   - NUL混入は拒否
+//       //   - "." / ".." (完全一致) は明示的に拒否
+//       //   - 制御文字 (Unicode C0 / DEL / C1) と非ASCII文字は allowlist から自然に除外
 //       //   - 長さ上限 255 (NAME_MAX準拠)
 //       bool validateConfigName(const QString &name);
 //   }
 //
-// テスト計画 §2 A-1 の13ケースに対応。
+// テスト計画 §2 A-1 の13ケース + Round 2 レビュー追加分 (C0/DEL/C1境界の7ケース) に対応。
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -81,6 +79,15 @@ void TestConfigName::reject_data()
     QTest::newRow("backslash")          << QStringLiteral("root\\other")       << QStringLiteral("backslash not in allowlist");
     QTest::newRow("newline")            << QStringLiteral("root\ninject")      << QStringLiteral("newline");
     QTest::newRow("semicolon")          << QStringLiteral("root;evil")         << QStringLiteral("shell metachar");
+
+    // Round 2 review: 制御文字 (C0 + DEL + C1) 全範囲を allowlist 正規表現 + containsDangerousChar 拡張で拒否
+    QTest::newRow("ctrl SOH (0x01)")    << (QStringLiteral("ro") + QChar(0x01) + QStringLiteral("ot"))  << QStringLiteral("C0 control low");
+    QTest::newRow("ctrl TAB (0x09)")    << (QStringLiteral("ro") + QChar(0x09) + QStringLiteral("ot"))  << QStringLiteral("HT");
+    QTest::newRow("ctrl ESC (0x1B)")    << (QStringLiteral("ro") + QChar(0x1B) + QStringLiteral("ot"))  << QStringLiteral("ESC sequence prefix");
+    QTest::newRow("ctrl FS (0x1F)")     << (QStringLiteral("ro") + QChar(0x1F) + QStringLiteral("ot"))  << QStringLiteral("C0 boundary high");
+    QTest::newRow("DEL (0x7F)")         << (QStringLiteral("ro") + QChar(0x7F) + QStringLiteral("ot"))  << QStringLiteral("DEL char");
+    QTest::newRow("C1 PAD (0x80)")      << (QStringLiteral("ro") + QChar(0x80) + QStringLiteral("ot"))  << QStringLiteral("C1 boundary low");
+    QTest::newRow("C1 APC (0x9F)")      << (QStringLiteral("ro") + QChar(0x9F) + QStringLiteral("ot"))  << QStringLiteral("C1 boundary high");
 }
 
 void TestConfigName::reject()

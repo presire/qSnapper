@@ -2,7 +2,7 @@
 
 Linux向けのBtrfs/Snapperファイルシステムスナップショットを管理するモダンなQt6/QML GUIアプリケーションです。  
 
-![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)  
+![License](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)  
 ![Qt Version](https://img.shields.io/badge/Qt-6.2+-green.svg)  
 ![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)  
 

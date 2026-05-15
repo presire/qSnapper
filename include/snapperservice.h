@@ -55,7 +55,6 @@ public:
     Q_INVOKABLE QList<FsSnapshot*> all();
     Q_INVOKABLE FsSnapshot* find(int number);
     Q_INVOKABLE bool rollback(int number);
-    Q_INVOKABLE bool authenticateForDelete();
     Q_INVOKABLE bool deleteSnapshot(int number);
     Q_INVOKABLE bool modifySnapshot(int number,
                                     const QString &description,

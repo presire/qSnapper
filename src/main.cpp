@@ -6,12 +6,10 @@
 #include <QTranslator>
 #include <QLocale>
 #include <QLibraryInfo>
-#include <QDebug>
 #include <QDir>
-#include <QDBusInterface>
-#include <QDBusConnection>
 #include <QDBusMetaType>
 #include <QMap>
+#include <QDebug>
 #include "fssnapshot.h"
 #include "snapperservice.h"
 #include "snapshotlistmodel.h"
@@ -109,18 +107,9 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // アプリケーション終了時にD-Busサービスも終了させる
-    QObject::connect(&app, &QGuiApplication::aboutToQuit, []() {
-        QDBusInterface iface(
-            "com.presire.qsnapper.Operations",
-            "/com/presire/qsnapper/Operations",
-            "com.presire.qsnapper.Operations",
-            QDBusConnection::systemBus()
-        );
-        if (iface.isValid()) {
-            iface.call(QDBus::NoBlock, "Quit");
-        }
-    });
+    // D-Busサービスはアイドルタイマ (5分) により自律的に終了する。
+    // 以前は aboutToQuit 時に Quit() D-Busメソッドを呼んでいたが、
+    // 無認証DoSの脆弱性 (SUSE Security Review 2026-04, issue 5b) を回避するため削除した。
 
     return app.exec();
 }

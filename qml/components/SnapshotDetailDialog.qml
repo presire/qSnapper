@@ -56,7 +56,7 @@ Dialog {
                 spacing: 10
 
                 // 基本情報グループ
-                // スナップショット番号、タイプ、日時、ユーザー等を表示
+                // スナップショット番号、タイプ、日時、ユーザ等を表示
                 GroupBox {
                     title: qsTr("Basic Information")
                     Layout.fillWidth: true
@@ -163,7 +163,7 @@ Dialog {
                     }
                 }
 
-                // ユーザーデータグループ
+                // ユーザデータグループ
                 // Snapperに保存されたカスタムメタデータを表示
                 GroupBox {
                     title: qsTr("User Data")

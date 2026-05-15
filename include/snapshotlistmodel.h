@@ -44,7 +44,6 @@ public:
     Q_INVOKABLE void createPostSnapshot(const QString &description, int previousNumber,
                                         const QVariantMap &userdata = QVariantMap());
     Q_INVOKABLE void rollbackSnapshot(int number);
-    Q_INVOKABLE bool authenticateForDelete();
     Q_INVOKABLE void deleteSnapshot(int number);
     Q_INVOKABLE void deleteSnapshots(const QVariantList &numbers);
     Q_INVOKABLE void modifySnapshot(int number,

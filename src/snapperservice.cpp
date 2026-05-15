@@ -415,34 +415,6 @@ bool SnapperService::rollback(int number)
 }
 
 /**
- * @brief 削除操作の事前認証を実行
- *
- * D-Bus経由でPolkit認証を事前に実行します。
- * 認証成功時、以降のDeleteSnapshot呼び出しでは再認証をスキップします。
- *
- * @return 認証成功時true、失敗時false
- */
-bool SnapperService::authenticateForDelete()
-{
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            return false;
-        }
-    }
-
-    QDBusReply<bool> reply = m_dbusInterface->call("Authenticate",
-        QStringLiteral("com.presire.qsnapper.delete-snapshot"));
-    if (!reply.isValid() || !reply.value()) {
-        qCWarning(snapperLog) << "Authentication for delete failed:"
-                              << reply.error().message();
-        return false;
-    }
-
-    return true;
-}
-
-/**
  * @brief 指定されたスナップショットを削除
  *
  * D-Bus経由でスナップショットの削除を実行します。

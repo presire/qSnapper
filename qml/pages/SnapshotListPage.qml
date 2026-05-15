@@ -98,7 +98,7 @@ Page {
         property int userdataWidth: 150
     }
 
-    // ツールバーヘッダー
+    // ツールバーヘッダ
     // アプリケーションタイトル、操作ボタン、テーマ切り替えを配置
     header: ToolBar {
         RowLayout {
@@ -259,7 +259,7 @@ Page {
             font.bold: true
         }
 
-        // テーブルヘッダー
+        // テーブルヘッダ
         SnapshotTableHeader {
             Layout.fillWidth: true
             columnWidths: columnWidths
@@ -343,7 +343,7 @@ Page {
             onClicked: aboutQtDialog.open()
         }
 
-        // ステータスメッセージ自動クリアタイマー
+        // ステータスメッセージ自動クリアタイマ
         Timer {
             id: statusTimer
             interval: 3000
@@ -541,13 +541,10 @@ Page {
         }
 
         // 削除実行
-        // 先にPolkit認証を実行し、成功した場合のみBusyダイアログを表示して削除を開始する
+        // Polkit 認証は D-Bus サービス側 DeleteSnapshot 呼び出し時に
+        // 都度実行される (P0-2 で事前認証 API を撤廃)。
+        // 連続削除のプロンプト抑止は polkit の auth_admin_keep に委ねる。
         onAccepted: {
-            if (!snapshotListModel.authenticateForDelete()) {
-                errorDialog.text = qsTr("Authentication failed.")
-                errorDialog.open()
-                return
-            }
             deletingBusyDialog.open()
         }
     }
@@ -566,7 +563,7 @@ Page {
             return Math.min(Math.max(calculated, 400), 600)
         }
 
-        // ダイアログが完全に表示された後にタイマーを起動
+        // ダイアログが完全に表示された後にタイマを起動
         onOpened: {
             deletionDelayTimer.start()
         }
@@ -590,7 +587,7 @@ Page {
         }
     }
 
-    // ダイアログ描画完了後に削除処理を開始するためのタイマー
+    // ダイアログ描画完了後に削除処理を開始するためのタイマ
     Timer {
         id: deletionDelayTimer
         interval: 200

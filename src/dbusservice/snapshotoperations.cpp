@@ -1,5 +1,4 @@
 #include <QCoreApplication>
-#include <QDebug>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
@@ -7,7 +6,7 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QFile>
-#include <algorithm>
+#include <QDebug>
 #include <PolkitQt1/Authority>
 #include <PolkitQt1/Subject>
 #include <snapper/Snapper.h>
@@ -17,6 +16,7 @@
 #include <snapper/Exception.h>
 #include <snapper/Version.h>
 #include <btrfsutil.h>
+#include <algorithm>
 #include <filesystem>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <utime.h>
 #include "snapshotoperations.h"
+#include "inputvalidator.h"
 
 // 古いlibsnapper (7.x未満) には LIBSNAPPER_VERSION_AT_LEAST マクロが存在しない
 #ifndef LIBSNAPPER_VERSION_AT_LEAST
@@ -52,7 +53,7 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 
 // ============================================================================
 // In-process unified diff (Myers diff algorithm)
-// QProcess `diff -u` の置き換え
+// "diff -u"コマンドの置き換え
 // ============================================================================
 
 namespace {
@@ -168,7 +169,7 @@ done:
 
 /**
  * 2つのファイルを読み込み、unified diff形式の文字列を生成する。
- * `diff -u` と互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能。
+ * "diff -u"コマンドと互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能。
  *
  * @param oldPath 旧ファイルパス (--- ヘッダに使用)
  * @param newPath 新ファイルパス (+++ ヘッダに使用)
@@ -206,7 +207,7 @@ static QString generateUnifiedDiff(const QString &oldPath, const QString &newPat
         if (ops[i].type != DiffOp::Equal) changes.append(i);
     }
 
-    // hunkにグループ化 (距離が 2*context 以内の変更をマージ)
+    // hunkにグループ化 (距離が2*context以内の変更をマージ)
     struct Hunk { int start, end; };
     QVector<Hunk> hunks;
     int hs = changes[0], he = changes[0];
@@ -279,7 +280,6 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
     : QObject(parent)
     , m_snapper(nullptr)
     , m_currentConfig("")
-    , m_authenticated(false)
 {
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(IdleTimeoutMs);
@@ -300,10 +300,9 @@ SnapshotOperations::~SnapshotOperations()
 }
 
 /**
- * @brief アイドルタイマーをリセット
+ * @brief アイドルタイマをリセット
  *
- * D-Busメソッド呼び出し時にタイマーをリセットし、
- * アイドルタイムアウトを延長します。
+ * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長します。
  */
 void SnapshotOperations::resetIdleTimer()
 {
@@ -311,18 +310,12 @@ void SnapshotOperations::resetIdleTimer()
 }
 
 /**
- * @brief D-Busサービスを終了
- *
- * GUIアプリケーションの終了時にD-Bus経由で呼び出され、
- * サービスプロセスを終了させます。
- */
-/**
  * @brief Snapperが設定されているか確認
  *
  * Snapper設定が1つ以上存在するかを確認します。
- * 認証は不要 (list-snapshotsと同じアクションでactiveユーザーは自動許可)。
+ * 認証は不要 (list-snapshotsと同じアクションでactiveユーザは自動許可)
  *
- * @return Snapper設定が存在する場合true
+ * @return Snapper設定が存在する場合: true
  */
 bool SnapshotOperations::IsConfigured()
 {
@@ -344,17 +337,22 @@ bool SnapshotOperations::IsConfigured()
  *
  * @param configName Snapper設定名
  * @param settings 設定のキー/バリューマップ
- * @return 成功時true、失敗時false
+ * @return 成功時: true、失敗時: false
  */
 bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
                                             const QMap<QString, QString> &settings)
 {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return false;
+    }
+
     if (!checkAuthorization("com.presire.qsnapper.configure")) {
         return false;
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -382,16 +380,20 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
  * PolicyKit認証を必要とします。
  *
  * @param configName Snapper設定名
- * @return 成功時true、失敗時false
+ * @return 成功時: true、失敗時: false
  */
 bool SnapshotOperations::SetupQuota(const QString &configName)
 {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return false;
+    }
     if (!checkAuthorization("com.presire.qsnapper.configure")) {
         return false;
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -407,30 +409,31 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     }
 }
 
-void SnapshotOperations::Quit()
-{
-    qInfo() << "Quit requested via D-Bus, shutting down...";
-    QCoreApplication::quit();
-}
-
 /**
- * @brief 事前認証を実行
+ * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を送信する
  *
- * バッチ復元などの連続操作の前に1回だけ呼び出し、Polkit認証を実行します。
- * 認証成功時にm_authenticatedフラグをセットし、以降のRestoreFiles/RestoreFilesDirect呼び出しでは再認証をスキップします。
- * フラグはD-Busサービスプロセスの生存期間中有効です。 (アイドルタイムアウト5分で自動クリア)
+ * 空文字列入力を "root" に正規化した上で qsnapper::security::validateConfigName で検証する。
+ * 無効な場合はQDBusError::InvalidArgsを送信し、std::nulloptを返す。
+ * Polkitプロンプトを出す前に呼び出して、攻撃者が任意configNameでpolkitを浪費するのを防ぐ。
  *
- * @param actionId チェックするPolkitアクションID
- * @return 認証成功時true、失敗時false
+ * 旧 validateConfigOrFail のリプレースメント。
+ * 「空 → "root"」のデフォルト割当をここに集約することで、呼び出し側の
+ * `configName.isEmpty() ? "root" : configName` パターンを排除する。
+ *
+ * @param configName 検査する設定名 (空文字列は "root" として扱う)
+ * @return 正規化後の設定名 (有効時)、無効でエラー送信済み (std::nullopt)
  */
-bool SnapshotOperations::Authenticate(const QString &actionId)
+std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &configName)
 {
-    m_authenticated = false;
-    bool result = checkAuthorization(actionId);
-    if (result) {
-        m_authenticated = true;
+    const QString effective = configName.isEmpty()
+                                 ? QStringLiteral("root")
+                                 : configName;
+    if (!qsnapper::security::validateConfigName(effective)) {
+        sendErrorReply(QDBusError::InvalidArgs,
+                       QStringLiteral("Invalid configName"));
+        return std::nullopt;
     }
-    return result;
+    return effective;
 }
 
 /**
@@ -439,14 +442,18 @@ bool SnapshotOperations::Authenticate(const QString &actionId)
  * 指定されたアクションIDに対してユーザが権限を持っているかを確認します。
  * 権限がない場合はD-Busエラー応答を送信します。
  *
+ * SubjectはSystemBusNameSubjectを用いる。
+ * UnixProcessSubject (PIDベース) はPIDがレース中に再割り当てされるTOCTOU脆弱性 (CVE-2013-4288) があり、polkit自身も非推奨としている。
+ * SystemBusNameSubjectはカーネルのD-Bus name-owner情報をpolkitdが参照するため、呼び出し元の取り違えが起きない。
+ *
  * @param actionId チェックするアクションID
- * @return 認証成功時true、失敗時false
+ * @return 認証成功時: true、失敗時: false
  */
 bool SnapshotOperations::checkAuthorization(const QString &actionId)
 {
     resetIdleTimer();
 
-    PolkitQt1::UnixProcessSubject subject(QDBusConnection::systemBus().interface()->servicePid(message().service()));
+    PolkitQt1::SystemBusNameSubject subject(message().service());
     PolkitQt1::Authority::Result result = PolkitQt1::Authority::instance()->checkAuthorizationSync(
         actionId, subject, PolkitQt1::Authority::AllowUserInteraction);
 
@@ -470,10 +477,9 @@ bool SnapshotOperations::checkAuthorization(const QString &actionId)
 snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool forceReload)
 {
     try {
-        // 設定変更時・初回・強制リロード指定時に新しいSnapperインスタンスを作成。
-        // libsnapper の Snapper オブジェクトは構築時にスナップショット一覧を
-        // 読み込み、外部で作成された新規スナップショットを自動で取り込まないため、
-        // 一覧更新時には forceReload でインスタンスを作り直す必要がある。
+        // 設定変更時・初回・強制リロード指定時に新しいSnapperインスタンスを作成する
+        // libsnapperのSnapperオブジェクトは構築時にスナップショット一覧を読み込み、
+        // 外部で作成された新規スナップショットを自動で取り込まないため、一覧更新時にはforceReloadでインスタンスを作り直す必要がある
         if (!m_snapper || m_currentConfig != configName || forceReload) {
             m_snapper.reset(new snapper::Snapper(configName.toStdString(), "/"));
             m_currentConfig = configName;
@@ -567,18 +573,13 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
 }
 
 /**
- * @brief スナップショット一覧を取得
+ * @brief 利用可能なSnapper設定名のリストを返す
  *
- * システム上の全スナップショットをCSV形式で取得します。
- * PolicyKit認証を必要とします。
+ * libsnapperのgetConfigs()を呼び出し、存在する全Snapper設定 (例: "root", "home") の設定名を抽出して配列で返す。
+ * スナップショット本体は返さない。
+ * PolicyKit認証 (list-snapshots) を必要とする。
  *
- * @return CSV形式のスナップショット一覧、失敗時は空文字列
- */
-/**
- * @brief 利用可能な Snapper 設定名のリストを返す
- *
- * "snapper --no-dbus --csvout list-configs --columns config"を呼び出し、
- * 設定名のみを抜き出して配列で返します。
+ * @return 設定名の配列、失敗時は空配列
  */
 QStringList SnapshotOperations::ListConfigs()
 {
@@ -604,17 +605,32 @@ QStringList SnapshotOperations::ListConfigs()
     }
 }
 
+/**
+ * @brief 指定設定のスナップショット一覧をCSVで取得する
+ *
+ * 空文字列のconfigNameは"root"と解釈される。
+ * 呼び出し毎にSnapperインスタンスを強制再構築し、外部 (snapperd/snapper CLI等) で作成された新規スナップショットを確実に反映する。
+ * PolicyKit認証 (list-snapshots) を必要とする。
+ *
+ * @param configName Snapper設定名 (空文字列時は"root")
+ * @return CSV形式のスナップショット一覧、失敗時は空文字列
+ */
 QString SnapshotOperations::ListSnapshots(const QString &configName)
 {
+    // resolveConfigOrFail が空文字列を "root" に正規化した上で検証する。
+    // 失敗時はD-Busエラー応答が送出済み。
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
+
     if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
         return QString();
     }
 
     try {
         // 一覧取得時は必ず再構築して外部で作成された最新スナップショットを反映する
-        snapper::Snapper *snapper = getSnapper(
-            configName.isEmpty() ? QStringLiteral("root") : configName,
-            /*forceReload=*/true);
+        snapper::Snapper *snapper = getSnapper(*cfg, /*forceReload=*/true);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -643,15 +659,19 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
  * @return 作成されたスナップショットのCSV情報、失敗時は空文字列
  */
 QString SnapshotOperations::CreateSnapshot(const QString &configName, const QString &type, const QString &description,
-                                          int preNumber, const QString &cleanup,
-                                          const QMap<QString, QString> &userdata, bool important)
+                                           int preNumber, const QString &cleanup,
+                                           const QMap<QString, QString> &userdata, bool important)
 {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
     if (!checkAuthorization("com.presire.qsnapper.create-snapshot")) {
         return QString();
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -724,13 +744,14 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
         QStringList userdataPairs;
         for (const auto &pair : userdata) {
             userdataPairs.append(QString::fromStdString(pair.first) + "=" +
-                               QString::fromStdString(pair.second));
+                                 QString::fromStdString(pair.second));
         }
         csv += userdataPairs.join(",");
 
         return csv;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to create snapshot:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to create snapshot: %1").arg(e.what()));
         return QString();
@@ -738,31 +759,35 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
 }
 
 /**
- * @brief スナップショットを削除
- *
- * 指定された番号のスナップショットを削除します。
- * PolicyKit認証を必要とします。
- *
- * @param number 削除するスナップショット番号
- * @return 削除成功時true、失敗時false
- */
-/**
  * @brief 既存スナップショットのメタデータを編集
  *
  * description / cleanup algorithm / userdata を差し替えます。
  * 空文字列("")のdescriptionはそのまま空文字列で上書きされます。
  * userdataは渡されたマップで完全に置き換わります。(差分ではない)
+ * PolicyKit認証を必要とします。
+ *
+ * @param configName Snapper設定名
+ * @param number 編集対象のスナップショット番号
+ * @param description 新しい説明文 (空文字列も可)
+ * @param cleanup 新しいcleanupアルゴリズム名
+ * @param userdata 新しいuserdataマップ (置換)
+ * @return 成功時true、失敗時false
  */
 bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
                                         const QString &description, const QString &cleanup,
                                         const QMap<QString, QString> &userdata)
 {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return false;
+    }
+
     if (!checkAuthorization("com.presire.qsnapper.modify-snapshot")) {
         return false;
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -790,23 +815,39 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
 #endif
         return true;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to modify snapshot:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to modify snapshot: %1").arg(e.what()));
         return false;
     }
 }
 
+/**
+ * @brief スナップショットを削除する (D-Busスロット)
+ *
+ * Polkit認証は毎回 checkAuthorization()に委ねる。
+ * 連続削除時の再入力はpolkitのauth_admin_keep設定により、short-lived cookieで抑止される。
+ *
+ * @param configName 設定名
+ * @param number 削除対象スナップショット番号
+ * @return 成功時true
+ */
 bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
 {
-    // 事前認証済み(Authenticate呼び出し済み)の場合はスキップ、未認証なら従来通り認証
-    if (!m_authenticated && !checkAuthorization("com.presire.qsnapper.delete-snapshot")) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
         return false;
     }
+
+    if (!checkAuthorization("com.presire.qsnapper.delete-snapshot")) {
+        return false;
+    }
+
     resetIdleTimer();
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -825,14 +866,14 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
 #else
         snapper->deleteSnapshot(snapshot);
 #endif
-        resetIdleTimer();   // 長時間削除後もタイマーリセット
+        resetIdleTimer();   // 長時間削除後もタイマリセット
         return true;
 
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to delete snapshot:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to delete snapshot: %1").arg(e.what()));
-        resetIdleTimer();   // 例外時もタイマーリセット
+        resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
 }
@@ -843,16 +884,21 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
  * 指定されたスナップショットをデフォルトに設定し、次回起動時にそのスナップショットの状態で起動するようにします。
  *
  * @param number ロールバック先のスナップショット番号
- * @return 設定成功時true、失敗時false
+ * @return 設定成功時: true、失敗時: false
  */
 bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
 {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return false;
+    }
+
     if (!checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
         return false;
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -865,7 +911,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
             return false;
         }
 
-        // 'snapper rollback N' と同等の挙動を再現する。
+        // "sudo snapper rollback N"と同等の挙動を再現する。
         //
         // CLI (client/snapper/cmd-rollback.cc) はambitを以下で判定する:
         //   - previous_defaultがread-only --> TRANSACTIONAL
@@ -884,15 +930,16 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
 #endif
 
         if (transactional) {
-            // TRANSACTIONAL: 対象スナップショットをそのままdefaultに
+            // TRANSACTIONAL: 対象スナップショットをそのままdefaultにする
 #if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
             target->setDefault(report);
             logPluginReport(report);
 #else
             target->setDefault();
 #endif
-        } else {
-            // CLASSIC: backup + writable copyを作ってwritable copyをdefaultに
+        }
+        else {
+            // CLASSIC: backup + writable copyを作成して、writable copyをdefaultにする
 
             const int prevNum =
                 (previousDefault != snapshots.end()) ? static_cast<int>(previousDefault->getNum()) : -1;
@@ -975,12 +1022,16 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
  */
 QString SnapshotOperations::GetFileChanges(const QString &configName, int snapshotNumber)
 {
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1045,12 +1096,16 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
  */
 QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int number1, int number2)
 {
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1090,7 +1145,8 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
 
         return output;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file changes between snapshots:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
         return QString();
@@ -1098,19 +1154,24 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
 }
 
 /**
- * @brief 2つのスナップショット間の個別ファイルの詳細 + diff を取得
+ * @brief 2つのスナップショット間の個別ファイルの詳細 + diffを取得
  *
  * GetFileDiffAndDetailsの任意2つのsnapshot間版
  * snapshot1側のパーミッションとsnapshot2側のパーミッションを返し、diff部も両snapshot上のファイルを比較します。
  */
 QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int number1, int number2, const QString &filePath)
 {
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
+
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1187,7 +1248,8 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
 
         return detailsPart + "---DIFF_SEPARATOR---\n" + diffPart;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file diff between snapshots:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to get file diff: %1").arg(e.what()));
         return QString();
@@ -1207,12 +1269,17 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
  */
 QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int snapshotNumber, const QString &filePath)
 {
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return QString();
+    }
+
+    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1300,22 +1367,75 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
 }
 
 /**
- * @brief ファイルをスナップショットから復元
+ * @brief ファイルをスナップショットから復元する (YaST 互換経路)
  *
- * 指定されたファイルリストを指定されたスナップショットの状態に復元します。
- * 復元の進捗はrestoreProgressシグナルで通知されます。
+ * 内部で restoreFilesImpl を呼び出すだけのラッパ。
+ * reflink は使用せず typechanged の事前削除も行わない。
  *
- * @param configName Snapper設定名
- * @param snapshotNumber 復元元のスナップショット番号
- * @param filePaths 復元するファイルパスのリスト
- * @return 全ファイルの復元が成功した場合true、それ以外はfalse
+ * @param configName      Snapper設定名
+ * @param snapshotNumber  復元元スナップショット番号
+ * @param filePaths       復元対象絶対パス
+ * @param changeTypes     各ファイルの変更種別
+ * @return 全ファイル成功時 true
  */
 bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNumber,
                                       const QStringList &filePaths, const QStringList &changeTypes)
 {
+    return restoreFilesImpl(configName, snapshotNumber, filePaths, changeTypes,
+                            /*useReflink=*/false,
+                            /*removeOnTypechanged=*/false,
+                            "RestoreFiles");
+}
+
+/**
+ * @brief ファイルをスナップショットから復元する (高速経路)
+ *
+ * 内部でrestoreFilesImplを呼び出すだけのラッパー
+ * btrfs reflink (FICLONE) を優先し、typechanged時は既存ファイルを削除してから上書きする。
+ *
+ * @param configName      Snapper設定名
+ * @param snapshotNumber  復元元スナップショット番号
+ * @param filePaths       復元対象絶対パス
+ * @param changeTypes     各ファイルの変更種別
+ * @return 全ファイル成功時 true
+ */
+bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snapshotNumber,
+                                            const QStringList &filePaths, const QStringList &changeTypes)
+{
+    return restoreFilesImpl(configName, snapshotNumber, filePaths, changeTypes,
+                            /*useReflink=*/true,
+                            /*removeOnTypechanged=*/true,
+                            "RestoreFilesDirect");
+}
+
+/**
+ * @brief RestoreFiles / RestoreFilesDirect共通実装
+ *
+ * 主な差分:
+ *   - useReflink:          通常ファイルコピー時にFICLONE (btrfs CoW)を試行するか
+ *   - removeOnTypechanged: typechanged時に既存ファイルを先にrmするか (ディレクトリ --> ファイル変化対策)
+ *
+ * セキュリティ要件:
+ *   - configNameはresolveConfigOrFailで検証済みであること (呼び出し側の責務でないため本関数でも検証)
+ *   - filePathsの各要素は絶対パスで、かつ snapshotDir配下を指すこと
+ *     (snapshotFilePath = snapshotDir + filePathがsnapshotDir内に収まることをisPathWithinSnapshotRootで検証)
+ *   - "/.snapshots/" 直下への書き込み (systemFilePath側) は書き込み対象として棄却する
+ *   - シンボリックリンク解決は copySymlink / copyRegularFileのレイヤーで行う (本関数はパスの構文検証のみ)
+ */
+bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapshotNumber,
+                                          const QStringList &filePaths,
+                                          const QStringList &changeTypes,
+                                          bool useReflink, bool removeOnTypechanged,
+                                          const char *logTag)
+{
     resetIdleTimer();
-    // 事前認証済み(Authenticate呼び出し済み)の場合はスキップ、未認証なら従来通り認証
-    if (!m_authenticated && !checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
+
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return false;
+    }
+
+    if (!checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
         return false;
     }
 
@@ -1329,11 +1449,13 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
         return false;
     }
 
-    qWarning() << "RestoreFiles (YaST compatible): Starting restore for" << filePaths.size()
-               << "files from snapshot" << snapshotNumber;
+    qInfo() << logTag << ": Starting restore for" << filePaths.size()
+            << "files from snapshot" << snapshotNumber
+            << "(useReflink=" << useReflink
+            << ", removeOnTypechanged=" << removeOnTypechanged << ")";
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
+        snapper::Snapper *snapper = getSnapper(*cfg);
         if (!snapper) {
             sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -1351,7 +1473,7 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
         // スナップショットディレクトリのパスを取得
         QString snapshotDir = QString::fromStdString(snapshot1->snapshotDir());
 
-        qWarning() << "RestoreFiles: Snapshot mounted at" << snapshotDir;
+        qInfo() << logTag << ": Snapshot mounted at" << snapshotDir;
 
         bool allSuccess = true;
         int total = filePaths.size();
@@ -1362,34 +1484,50 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
             const QString &filePath = filePaths[i];
             const QString &changeType = changeTypes[i];
 
-            // 進捗を通知
-            emit restoreProgress(i + 1, total, filePath);
-
-            // 危険なパスをスキップ
-            if (filePath.startsWith("/.snapshots/")) {
-                qWarning() << "RestoreFiles: Skipping dangerous path:" << filePath;
+            // 入力検証 (進捗 emit より前に行い、未検証パスをD-Busシグナルへ漏出させない)
+            // (1) 絶対パスでなければ拒否
+            if (!filePath.startsWith(QLatin1Char('/'))) {
+                qWarning() << logTag << ": Rejecting non-absolute path:" << filePath;
                 skippedCount++;
                 continue;
             }
 
-            // スナップショット内のファイルパス
-            QString snapshotFilePath = snapshotDir + filePath;
-            // システム上のファイルパス
-            QString systemFilePath = filePath;
+            // (2) 書き込み先として /.snapshots/ 直下は禁止 (スナップショット木の破壊防止)
+            if (filePath.startsWith(QStringLiteral("/.snapshots/"))) {
+                qWarning() << logTag << ": Skipping dangerous destination path:" << filePath;
+                skippedCount++;
+                continue;
+            }
+
+            // (3) snapshotDir + filePathがsnapshotDir配下に収まっていること
+            //     (".."を含むfilePathによるsnapshotツリー外参照を防ぐ)
+            const QString snapshotFilePath = snapshotDir + filePath;
+            if (!qsnapper::security::isPathWithinSnapshotRoot(snapshotFilePath, snapshotDir)) {
+                qWarning() << logTag << ": Rejecting path escaping snapshot root:" << filePath;
+                skippedCount++;
+                continue;
+            }
+
+            // 検証通過後にのみ進捗を通知 (D-Busシグナルが運ぶのは受理済みパスのみ)
+            emit restoreProgress(i + 1, total, filePath);
+
+            // システム上のファイルパス (ルートからの絶対パス)
+            const QString systemFilePath = filePath;
 
             bool fileSuccess = false;
 
             if (changeType == "created") {
-                // スナップショット時点では存在しなかったファイル → 削除
+                // スナップショット時点では存在しなかったファイル --> 削除
                 std::error_code ec;
                 std::filesystem::remove_all(systemFilePath.toStdString(), ec);
                 fileSuccess = !ec;
                 if (!fileSuccess) {
-                    qWarning() << "RestoreFiles: Failed to remove" << systemFilePath << ec.message().c_str();
+                    qWarning() << logTag << ": Failed to remove" << systemFilePath
+                               << ec.message().c_str();
                 }
             }
             else {
-                // deleted / modified / typechanged → スナップショットからコピー
+                // deleted / modified / typechanged --> スナップショットからコピー
 
                 // 親ディレクトリを確認・作成
                 QString parentDir = systemFilePath.left(systemFilePath.lastIndexOf('/'));
@@ -1403,7 +1541,7 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
                     // シンボリックリンクの場合
                     fileSuccess = copySymlink(snapshotFilePath, systemFilePath);
                     if (!fileSuccess) {
-                        qWarning() << "RestoreFiles: Failed to copy symlink" << snapshotFilePath
+                        qWarning() << logTag << ": Failed to copy symlink" << snapshotFilePath
                                    << "to" << systemFilePath;
                     }
                 }
@@ -1427,220 +1565,28 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
                     fileSuccess = true;
                 }
                 else if (snapshotFileInfo.exists()) {
-                    // 通常ファイルの場合
-                    fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, false);
-                    if (!fileSuccess) {
-                        qWarning() << "RestoreFiles: Failed to copy" << snapshotFilePath
-                                   << "to" << systemFilePath;
-                    }
-                }
-                else {
-                    qWarning() << "RestoreFiles: Source not found in snapshot:" << snapshotFilePath;
-                    fileSuccess = false;
-                }
-            }
-
-            if (fileSuccess) {
-                successCount++;
-            }
-            else {
-                allSuccess = false;
-            }
-        }
-
-        // 安全ネット: 復元操作によりルートサブボリュームがread-onlyになっていないか確認・復旧
-        {
-            bool isReadOnly = false;
-            if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK && isReadOnly) {
-                qWarning() << "RestoreFiles: Root subvolume became read-only after restore, restoring rw";
-                btrfs_util_set_subvolume_read_only("/", false);
-            }
-        }
-
-        // スナップショットをアンマウント
-        try {
-            snapshot1->umountFilesystemSnapshot(true);
-        }
-        catch (...) {
-            qWarning() << "RestoreFiles: Failed to unmount snapshot";
-        }
-
-        if (skippedCount > 0) {
-            qWarning() << "RestoreFiles: Skipped" << skippedCount << "dangerous paths";
-        }
-        qWarning() << "RestoreFiles: Completed. Successful:" << successCount
-                   << "Failed:" << (total - successCount - skippedCount);
-
-        if (!allSuccess) {
-            QString errorMsg = QString("Failed to restore %1 out of %2 files").arg(total - successCount).arg(total);
-            sendErrorReply(QDBusError::Failed, errorMsg);
-        }
-
-        return allSuccess;
-    }
-    catch (const snapper::Exception &e) {
-        qWarning() << "RestoreFiles failed:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to restore files: %1").arg(e.what()));
-        return false;
-    }
-    catch (const std::exception &e) {
-        qWarning() << "RestoreFiles unexpected error:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Unexpected error: %1").arg(e.what()));
-        return false;
-    }
-}
-
-/**
- * @brief ファイルをスナップショットから直接コピーして復元 (高速版)
- *
- * Comparisonオブジェクトを使用せず、スナップショットのマウントパスから直接ファイルをコピーして復元します。
- * btrfsではreflink (COW) により高速なコピーが可能です。
- *
- * @param configName Snapper設定名
- * @param snapshotNumber 復元元のスナップショット番号
- * @param filePaths 復元するファイルパスのリスト
- * @param changeTypes 各ファイルの変更種別 ("created", "deleted", "modified", "typechanged")
- * @return 全ファイルの復元が成功した場合true、それ以外はfalse
- */
-bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snapshotNumber,
-                                            const QStringList &filePaths, const QStringList &changeTypes)
-{
-    resetIdleTimer();
-    // 事前認証済み(Authenticate呼び出し済み)の場合はスキップ、未認証なら従来通り認証
-    if (!m_authenticated && !checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
-        return false;
-    }
-
-    if (filePaths.isEmpty()) {
-        sendErrorReply(QDBusError::InvalidArgs, "No files specified for restore");
-        return false;
-    }
-
-    if (filePaths.size() != changeTypes.size()) {
-        sendErrorReply(QDBusError::InvalidArgs, "filePaths and changeTypes must have the same size");
-        return false;
-    }
-
-    qWarning() << "RestoreFilesDirect: Starting direct restore for" << filePaths.size()
-               << "files from snapshot" << snapshotNumber;
-
-    try {
-        snapper::Snapper *snapper = getSnapper(configName.isEmpty() ? QStringLiteral("root") : configName);
-        if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
-            return false;
-        }
-
-        snapper::Snapshots::const_iterator snapshot1 = snapper->getSnapshots().find(snapshotNumber);
-        if (snapshot1 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
-            return false;
-        }
-
-        // スナップショットをマウント
-        snapshot1->mountFilesystemSnapshot(true);
-
-        // スナップショットディレクトリのパスを取得
-        QString snapshotDir = QString::fromStdString(snapshot1->snapshotDir());
-
-        qWarning() << "RestoreFilesDirect: Snapshot mounted at" << snapshotDir;
-
-        bool allSuccess = true;
-        int total = filePaths.size();
-        int successCount = 0;
-        int skippedCount = 0;
-
-        for (int i = 0; i < total; ++i) {
-            const QString &filePath = filePaths[i];
-            const QString &changeType = changeTypes[i];
-
-            // 進捗を通知
-            emit restoreProgress(i + 1, total, filePath);
-
-            // 危険なパスをスキップ
-            if (filePath.startsWith("/.snapshots/")) {
-                qWarning() << "RestoreFilesDirect: Skipping dangerous path:" << filePath;
-                skippedCount++;
-                continue;
-            }
-
-            // スナップショット内のファイルパス
-            QString snapshotFilePath = snapshotDir + filePath;
-            // システム上のファイルパス (ルートからの絶対パス)
-            QString systemFilePath = filePath;
-
-            bool fileSuccess = false;
-
-            if (changeType == "created") {
-                // スナップショット時点では存在しなかったファイル → 削除
-                std::error_code ec;
-                std::filesystem::remove_all(systemFilePath.toStdString(), ec);
-                fileSuccess = !ec;
-                if (!fileSuccess) {
-                    qWarning() << "RestoreFilesDirect: Failed to remove" << systemFilePath
-                               << ec.message().c_str();
-                }
-            }
-            else {
-                // deleted / modified / typechanged → スナップショットからコピー
-
-                // 親ディレクトリを作成
-                QString parentDir = systemFilePath.left(systemFilePath.lastIndexOf('/'));
-                if (!parentDir.isEmpty()) {
-                    std::error_code ec;
-                    std::filesystem::create_directories(parentDir.toStdString(), ec);
-                }
-
-                QFileInfo snapshotFileInfo(snapshotFilePath);
-                if (snapshotFileInfo.isSymLink()) {
-                    // シンボリックリンクの場合
-                    fileSuccess = copySymlink(snapshotFilePath, systemFilePath);
-                    if (!fileSuccess) {
-                        qWarning() << "RestoreFilesDirect: Failed to copy symlink" << snapshotFilePath
-                                   << "to" << systemFilePath;
-                    }
-                }
-                else if (snapshotFileInfo.isDir()) {
-                    // ディレクトリの場合: 作成 + chown + chmod
-                    if (!QFileInfo::exists(systemFilePath)) {
-                        std::error_code ec;
-                        std::filesystem::create_directories(systemFilePath.toStdString(), ec);
-                    }
-
-                    // 所有者をコピー
-                    chown(systemFilePath.toUtf8().constData(),
-                          snapshotFileInfo.ownerId(), snapshotFileInfo.groupId());
-
-                    // パーミッションをコピー
-                    struct stat st;
-                    if (lstat(snapshotFilePath.toUtf8().constData(), &st) == 0) {
-                        chmod(systemFilePath.toUtf8().constData(), st.st_mode);
-                    }
-
-                    fileSuccess = true;
-                }
-                else if (snapshotFileInfo.exists()) {
-                    // typechanged の場合のみ既存ファイルを先に削除
-                    if (changeType == "typechanged" && QFileInfo::exists(systemFilePath)) {
+                    // typechanged の事前削除 (Direct経路のみ有効)
+                    if (removeOnTypechanged && changeType == "typechanged"
+                            && QFileInfo::exists(systemFilePath)) {
                         std::error_code ec;
                         std::filesystem::remove_all(systemFilePath.toStdString(), ec);
                         if (ec) {
-                            qWarning() << "RestoreFilesDirect: Failed to remove before copy"
+                            qWarning() << logTag << ": Failed to remove before copy"
                                        << systemFilePath << ec.message().c_str();
                             allSuccess = false;
                             continue;
                         }
                     }
 
-                    // ファイルの場合: reflink (btrfs CoW) を試行
-                    fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, true);
+                    // 通常ファイルの場合 (useReflink=trueならFICLONEを先行試行)
+                    fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, useReflink);
                     if (!fileSuccess) {
-                        qWarning() << "RestoreFilesDirect: Failed to copy" << snapshotFilePath
+                        qWarning() << logTag << ": Failed to copy" << snapshotFilePath
                                    << "to" << systemFilePath;
                     }
                 }
                 else {
-                    qWarning() << "RestoreFilesDirect: Source file not found in snapshot:" << snapshotFilePath;
+                    qWarning() << logTag << ": Source not found in snapshot:" << snapshotFilePath;
                     fileSuccess = false;
                 }
             }
@@ -1657,7 +1603,7 @@ bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snaps
         {
             bool isReadOnly = false;
             if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK && isReadOnly) {
-                qWarning() << "RestoreFilesDirect: Root subvolume became read-only after restore, restoring rw";
+                qWarning() << logTag << ": Root subvolume became read-only after restore, restoring rw";
                 btrfs_util_set_subvolume_read_only("/", false);
             }
         }
@@ -1667,29 +1613,30 @@ bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snaps
             snapshot1->umountFilesystemSnapshot(true);
         }
         catch (...) {
-            qWarning() << "RestoreFilesDirect: Failed to unmount snapshot";
+            qWarning() << logTag << ": Failed to unmount snapshot";
         }
 
         if (skippedCount > 0) {
-            qWarning() << "RestoreFilesDirect: Skipped" << skippedCount << "dangerous paths";
+            qWarning() << logTag << ": Skipped" << skippedCount << "dangerous paths";
         }
-        qWarning() << "RestoreFilesDirect: Completed. Successful:" << successCount
-                   << "Failed:" << (total - successCount - skippedCount);
+        qInfo() << logTag << ": Completed. Successful:" << successCount
+                << "Failed:" << (total - successCount - skippedCount);
 
         if (!allSuccess) {
-            QString errorMsg = QString("Failed to restore %1 out of %2 files").arg(total - successCount).arg(total);
+            QString errorMsg = QString("Failed to restore %1 out of %2 files")
+                    .arg(total - successCount).arg(total);
             sendErrorReply(QDBusError::Failed, errorMsg);
         }
 
         return allSuccess;
     }
     catch (const snapper::Exception &e) {
-        qWarning() << "RestoreFilesDirect failed:" << e.what();
+        qWarning() << logTag << " failed:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to restore files: %1").arg(e.what()));
         return false;
     }
     catch (const std::exception &e) {
-        qWarning() << "RestoreFilesDirect unexpected error:" << e.what();
+        qWarning() << logTag << " unexpected error:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Unexpected error: %1").arg(e.what()));
         return false;
     }

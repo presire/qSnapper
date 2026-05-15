@@ -455,7 +455,7 @@ allow qsnapper_t kernel_t:unix_dgram_socket sendto;
 
 # Self process / capabilities / sockets
 allow qsnapper_dbus_t self:capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource };
-allow qsnapper_dbus_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched setrlimit setfscreate };
+allow qsnapper_dbus_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched setrlimit setfscreate execmem execstack };
 allow qsnapper_dbus_t self:fifo_file { getattr open read write ioctl };
 allow qsnapper_dbus_t self:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown };
 allow qsnapper_dbus_t self:unix_dgram_socket { create bind connect read write sendto getattr setattr };

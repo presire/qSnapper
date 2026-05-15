@@ -10,17 +10,21 @@ Dialog {
     id: root
 
     property string configName: "root"               // Snapper設定名
-    property int snapshotNumber: 0                   // 対象スナップショット番号 (現在表示中)
+    property int snapshotNumber: 0                   // 親から渡される初期スナップショット番号 (入力専用)
     property int preSnapshotNumber: 0                // Preスナップショット番号 (0 = Pre/Postペアではない)
     property int postSnapshotNumber: 0               // Postスナップショット番号
+    // 現在のTreeViewに表示中のスナップショット番号 (ラジオボタン切替で変更される)
+    // snapshotNumberは親のQMLバインディング経由で渡されるため、ここで上書きするとバインディングが壊れ次回以降の表示が不正になる
+    // そのため内部状態は分離する。
+    property int activeSnapshotNumber: 0
     readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0
-    // Pre↔Post 間の差分を表示する閲覧専用モード。このモードでは復元ボタンと
-    // チェックボックスを無効化する (復元は vs 現在の差分でしか成立しないため)。
+    // Pre <--> Post間の差分を表示する閲覧専用モード
+    // このモードでは復元ボタンとチェックボックスを無効化する (復元は、現在の差分でしか成立しないため)
     property bool prePostDiffMode: false
 
     signal restoreConfirmed()                        // 復元確認シグナル
 
-    // 右ペインの選択状態・diff 表示をクリアする共通ヘルパ
+    // 右ペインの選択状態・diff表示をクリアする共通ヘルパ
     function resetRightPane() {
         rightPane.fileSelected = false
         rightPane.selectedFilePath = ""
@@ -32,29 +36,23 @@ Dialog {
         diffTextArea.text = ""
     }
 
-    // Pre/Post or Single → 対カレント比較
+    // Pre/Post または Single --> 対カレント比較
     function switchSnapshotView(targetNumber) {
-        if (!root.prePostDiffMode && root.snapshotNumber === targetNumber) return
+        if (!root.prePostDiffMode && root.activeSnapshotNumber === targetNumber) return
         root.prePostDiffMode = false
-        root.snapshotNumber = targetNumber
-        fileChangeModel.snapshotNumber = targetNumber   // betweenMode/flatMode を false にリセット
-
+        root.activeSnapshotNumber = targetNumber
+        fileChangeModel.snapshotNumber = targetNumber  // betweenMode/flatModeをfalseにリセット
         resetRightPane()
-
-        // ファイルツリーを再読み込み (切替先スナップショット vs 現在のシステムで比較)
-        fileChangeModel.loadChanges()
+        fileChangeModel.loadChanges()                  // ファイルツリーを再読み込み (切替先スナップショット vs 現在のシステムで比較)
     }
 
-    // Pre↔Post 間の閲覧モードに切り替え
+    // Pre <--> Post間の閲覧モードに切り替え
     function switchPrePostDiffView() {
         if (root.prePostDiffMode) return
         if (!root.isPrePostPair) return
         root.prePostDiffMode = true
-
         resetRightPane()
-
-        // flat=false でツリー構築 (TreeView 表示)
-        fileChangeModel.loadChangesBetween(root.preSnapshotNumber,
+        fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
                                            root.postSnapshotNumber,
                                            false)
     }
@@ -77,17 +75,30 @@ Dialog {
         errorLabel.visible = false
         fileChangeModel.configName = configName
 
+        // 前回表示したスナップショットの右ペイン状態 (選択ファイル・diff等) を引き継がないようにクリアする
+        resetRightPane()
+
+        // 毎回開いた時点のsnapshotNumberを現在表示用の状態に同期する
+        root.activeSnapshotNumber = snapshotNumber
+
         if (root.isPrePostPair) {
-            // Pre/Post ペア: 既定で Pre↔Post 間の差分を表示 (YaST snapper と同じ挙動)
+            // Pre/Post ペア: 既定で Pre <--> Post間の差分を表示
             root.prePostDiffMode = true
             fileChangeModel.loadChangesBetween(root.preSnapshotNumber,
                                                root.postSnapshotNumber,
                                                false)
-        } else {
+        }
+        else {
             root.prePostDiffMode = false
             fileChangeModel.snapshotNumber = snapshotNumber
             fileChangeModel.loadChanges()
         }
+    }
+
+    // ダイアログを閉じた際の状態クリア
+    // 次回別スナップショットで開かれた場合に前回のdiffが残らないようにする
+    onClosed: {
+        resetRightPane()
     }
 
     // ファイル変更モデル
@@ -110,7 +121,8 @@ Dialog {
             if (diff === "") {
                 diffTextArea.textFormat = TextEdit.PlainText
                 diffTextArea.text = ""
-            } else {
+            }
+            else {
                 diffTextArea.textFormat = TextEdit.RichText
                 diffTextArea.text = rightPane.formatDiffHtml(diff)
             }
@@ -139,10 +151,11 @@ Dialog {
                 diffTextArea.text = ""
 
                 // 復元成功後、ラジオボタン選択中のスナップショット番号に戻してから再読み込み
-                fileChangeModel.snapshotNumber = root.snapshotNumber
+                fileChangeModel.snapshotNumber = root.activeSnapshotNumber
                 fileChangeModel.loadChanges()
                 successDialog.open()
-            } else {
+            }
+            else {
                 // 復元失敗時のエラーフィードバック
                 restoreFailDialog.open()
             }
@@ -180,7 +193,7 @@ Dialog {
         spacing: 10
         visible: !fileChangeModel.loading
 
-        // 説明ヘッダー
+        // 説明ヘッダ
         Label {
             text: qsTr("Root Filesystem")
             font.bold: true
@@ -209,14 +222,14 @@ Dialog {
 
                 RadioButton {
                     id: preRadioButton
-                    checked: !root.prePostDiffMode && root.snapshotNumber === root.preSnapshotNumber
+                    checked: !root.prePostDiffMode && root.activeSnapshotNumber === root.preSnapshotNumber
                     text: qsTr("Show differences between snapshot #%1 (Pre) and the current system").arg(root.preSnapshotNumber)
                     onClicked: root.switchSnapshotView(root.preSnapshotNumber)
                 }
 
                 RadioButton {
                     id: postRadioButton
-                    checked: !root.prePostDiffMode && root.snapshotNumber === root.postSnapshotNumber
+                    checked: !root.prePostDiffMode && root.activeSnapshotNumber === root.postSnapshotNumber
                     text: qsTr("Show differences between snapshot #%1 (Post) and the current system").arg(root.postSnapshotNumber)
                     onClicked: root.switchSnapshotView(root.postSnapshotNumber)
                 }
@@ -369,9 +382,10 @@ Dialog {
                                             rightPane.fileSelected = true
                                             rightPane.fileLoading = true
 
-                                            // 非同期で統合リクエスト (1回のD-Bus呼び出し) 
+                                            // 非同期で統合リクエスト
                                             fileChangeModel.getFileDiffAndDetails(filePath)
-                                        } else {
+                                        }
+                                        else {
                                             rightPane.fileSelected = false
                                             rightPane.fileLoading = false
                                             diffTextArea.textFormat = TextEdit.PlainText
@@ -446,11 +460,11 @@ Dialog {
                 // コンテンツ変更テキストを取得
                 function getContentStatusText() {
                     switch (selectedChangeType) {
-                    case 0: return qsTr("New file was created.")
-                    case 1: return qsTr("File content was modified.")
-                    case 2: return qsTr("File was removed.")
-                    case 3: return qsTr("File type was changed.")
-                    default: return qsTr("File content was modified.")
+                        case 0: return qsTr("New file was created.")
+                        case 1: return qsTr("File content was modified.")
+                        case 2: return qsTr("File was removed.")
+                        case 3: return qsTr("File type was changed.")
+                        default: return qsTr("File content was modified.")
                     }
                 }
 
@@ -474,7 +488,7 @@ Dialog {
                     }
 
                     // ファイル選択時のコンテンツ
-                    // ファイルパスヘッダー
+                    // ファイルパスヘッダ
                     Label {
                         visible: rightPane.fileSelected
                         text: rightPane.selectedFilePath
@@ -524,9 +538,9 @@ Dialog {
                                 Layout.fillWidth: true
                                 color: {
                                     switch (rightPane.selectedChangeType) {
-                                    case 0: return ThemeManager.fileChangeCreated
-                                    case 2: return ThemeManager.fileChangeDeleted
-                                    default: return palette.text
+                                        case 0: return ThemeManager.fileChangeCreated
+                                        case 2: return ThemeManager.fileChangeDeleted
+                                        default: return palette.text
                                     }
                                 }
                             }
@@ -544,7 +558,7 @@ Dialog {
                                 Layout.fillWidth: true
                             }
 
-                            // ユーザー所有者変更
+                            // ユーザ所有者変更
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('u') !== -1
                                 text: {
@@ -649,13 +663,13 @@ Dialog {
                 highlighted: true
                 enabled: fileChangeModel.hasChanges && !root.prePostDiffMode
                 onClicked: {
-                    confirmRestoreDialog.restoreTargetNumber = root.snapshotNumber
+                    confirmRestoreDialog.restoreTargetNumber = root.activeSnapshotNumber
                     confirmRestoreDialog.open()
                 }
             }
 
             // Pre/Post時: Preスナップショットから復元
-            // Pre↔Post 閲覧モードでは無効 (復元するには Pre/Post ラジオに切替が必要)
+            // Pre <--> Post閲覧モードでは無効 (復元するには、Pre/Postラジオに切替が必要)
             Button {
                 visible: root.isPrePostPair
                 text: qsTr("Restore from Pre #%1").arg(root.preSnapshotNumber)
@@ -909,7 +923,7 @@ Dialog {
             Label {
                 text: rightPane.selectedChangeType === 0
                       ? qsTr("Remove this file from the current system?")
-                      : qsTr("Restore this file from snapshot #%1?").arg(snapshotNumber)
+                      : qsTr("Restore this file from snapshot #%1?").arg(root.activeSnapshotNumber)
                 font.bold: true
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 450

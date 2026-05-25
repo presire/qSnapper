@@ -416,7 +416,7 @@ qSnapper/
 
 ## ライセンス
 
-このプロジェクトはGNU General Public License v3.0以降の下でライセンスされています。  
+このプロジェクトはGNU General Public License v2.0以降の下でライセンスされています。  
 詳細については[LICENSE.md](LICENSE.md)ファイルを参照してください。  
 
 ## 謝辞

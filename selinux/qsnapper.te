@@ -1,4 +1,4 @@
-module qsnapper 1.3.0;
+module qsnapper 1.3.3;
 
 ########################################
 # qSnapper SELinux Policy Module
@@ -135,12 +135,12 @@ require {
     role system_r;
 
     # Object classes
-    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack setfscreate };
+    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack setfscreate siginh };
     class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint execmod watch watch_reads relabelfrom relabelto };
     class dir { getattr setattr open read write search add_name remove_name create rmdir ioctl mounton watch watch_reads relabelfrom relabelto };
     class lnk_file { getattr read create unlink relabelfrom relabelto };
     class fifo_file { getattr open read write create unlink ioctl relabelfrom relabelto };
-    class sock_file { getattr open read write create unlink relabelfrom relabelto };
+    class sock_file { getattr setattr open read write create unlink rename relabelfrom relabelto };
     class chr_file { getattr open read write ioctl map };
     class blk_file { getattr open read write ioctl };
     class unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
@@ -416,6 +416,36 @@ allow unconfined_t qsnapper_t:dbus send_msg;
 allow qsnapper_t init_t:fd use;
 allow qsnapper_t unconfined_t:fd use;
 
+# User-domain access to qsnapper-dbus-service
+# 任意ユーザドメインからqsnapper-dbus-serviceへのD-Bus呼び出しを許可する
+# 「誰が何を実行できるか」の細粒度認可は、qsnapper-dbus-service内のPolkit (auth_admin / auth_admin_keep) が判定するため、
+# SELinux側ではバスチャネルの確立のみを許可してよい
+# CLI経路 (dbus-send / busctl / Pythonテストスクリプト等) や GUIを介さずに管理スクリプトから直接サービスを呼び出すユースケースで必要
+allow unconfined_t qsnapper_dbus_t:dbus send_msg;
+allow qsnapper_dbus_t unconfined_t:dbus send_msg;
+
+# 制限ユーザドメイン (refpolicy 環境向け)
+# openSUSEの標準targeted policyではstaff_t/user_t/sysadm_tが存在しない場合があるため、
+# optionalブロックで囲み、対象ドメインが宣言されている場合のみallowする
+# (optional_policy(`...') は refpolicy m4 マクロで checkmodule では使えないため使用しない)
+optional {
+    require { type staff_t; }
+    allow staff_t qsnapper_dbus_t:dbus send_msg;
+    allow qsnapper_dbus_t staff_t:dbus send_msg;
+}
+
+optional {
+    require { type user_t; }
+    allow user_t qsnapper_dbus_t:dbus send_msg;
+    allow qsnapper_dbus_t user_t:dbus send_msg;
+}
+
+optional {
+    require { type sysadm_t; }
+    allow sysadm_t qsnapper_dbus_t:dbus send_msg;
+    allow qsnapper_dbus_t sysadm_t:dbus send_msg;
+}
+
 # Terminals
 allow qsnapper_t user_devpts_t:chr_file { getattr open read write ioctl };
 allow qsnapper_t user_tty_device_t:chr_file { getattr open read write ioctl };
@@ -445,9 +475,22 @@ allow qsnapper_t tmp_t:dir { getattr open read search write add_name remove_name
 allow qsnapper_t qsnapper_tmp_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_t qsnapper_tmp_t:file { getattr open read write create unlink rename };
 
-# Syslog
+# QLocalServer socket for single-instance guard (/tmp/qsnapper-<UID>)
+# - setattr: QLocalServer::UserAccessOption calls chmod()
+# - rename : QLocalServer creates the socket under a temporary name, sets
+#            permissions, then atomically renames it to the final name
+allow qsnapper_t qsnapper_tmp_t:sock_file { getattr setattr open read write create unlink rename };
+
+# Syslog / systemd journal
 allow qsnapper_t devlog_t:sock_file { getattr write };
 allow qsnapper_t kernel_t:unix_dgram_socket sendto;
+
+# systemd-journald socket (/run/systemd/journal/) for qInfo/qWarning output
+optional {
+    require { type syslogd_var_run_t; }
+    allow qsnapper_t syslogd_var_run_t:dir { getattr open read search };
+    allow qsnapper_t syslogd_var_run_t:sock_file { getattr open read write };
+}
 
 ########################################
 # qsnapper_dbus_t (D-Bus service) policy
@@ -730,8 +773,17 @@ allow init_t qsnapper_dbus_t:process { transition signal signull sigkill sigstop
 type_transition init_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
 allow qsnapper_dbus_t init_t:process sigchld;
 
+# systemd活性化時、systemd (init_t) から継承されるstdin/stdout/stderr等のunix_stream_socketへのread/writeを許可する
+# 継承直後に閉じる経路だが、enforcing下では最初の数バイト書き込みでAVCが出るため明示的に許可する
+allow qsnapper_dbus_t init_t:unix_stream_socket { read write };
+
+# 親プロセス (systemd) からのシグナル属性継承 (siginh) は意図的に拒否し続けつつ、運用ノイズ抑制のためログを抑止する
+dontaudit init_t qsnapper_dbus_t:process siginh;
+
 # Files created in /tmp inherit qsnapper_tmp_t
 type_transition qsnapper_t tmp_t:file qsnapper_tmp_t;
 type_transition qsnapper_t tmp_t:dir qsnapper_tmp_t;
+type_transition qsnapper_t tmp_t:sock_file qsnapper_tmp_t;
 type_transition qsnapper_dbus_t tmp_t:file qsnapper_tmp_t;
 type_transition qsnapper_dbus_t tmp_t:dir qsnapper_tmp_t;
+type_transition qsnapper_dbus_t tmp_t:sock_file qsnapper_tmp_t;

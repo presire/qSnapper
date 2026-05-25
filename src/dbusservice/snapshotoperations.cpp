@@ -58,221 +58,221 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 
 namespace {
 
-struct DiffOp {
-    enum Type { Equal, Delete, Insert };
-    Type type;
-    int aIdx, bIdx;  // 0-based index into old/new lines (-1 if N/A)
-};
+    struct DiffOp {
+        enum Type { Equal, Delete, Insert };
+        Type type;
+        int aIdx, bIdx;  // 0-based index into old/new lines (-1 if N/A)
+    };
 
-/**
- * Myers diffアルゴリズムで2つの文字列リスト間の最短編集スクリプトを計算する。
- *
- * @param a 旧ファイルの行リスト
- * @param b 新ファイルの行リスト
- * @return 編集操作のリスト (正順)
- */
-static QVector<DiffOp> computeMyersDiff(const QStringList &a, const QStringList &b)
-{
-    const int N = a.size(), M = b.size();
-
-    if (N == 0 && M == 0) return {};
-    if (N == 0) {
-        QVector<DiffOp> r;
-        r.reserve(M);
-        for (int i = 0; i < M; i++)
-            r.append({DiffOp::Insert, -1, i});
-        return r;
-    }
-    if (M == 0) {
-        QVector<DiffOp> r;
-        r.reserve(N);
-        for (int i = 0; i < N; i++)
-            r.append({DiffOp::Delete, i, -1});
-        return r;
-    }
-
-    const int MAX = N + M, OFF = MAX;
-
-    // V[k + OFF] = 対角線k上の最遠到達x座標
-    QVector<int> V(2 * MAX + 1, 0);
-
-    // 各dステップのVスナップショット (バックトラック用)
-    QVector<QVector<int>> trace;
-    trace.reserve(qMin(MAX, N + M));
-
-    for (int d = 0; d <= MAX; d++) {
-        trace.append(V);  // dステップ開始前 (= d-1ステップ終了後) のスナップショット
-        for (int k = -d; k <= d; k += 2) {
-            int x = (k == -d || (k != d && V[OFF + k - 1] < V[OFF + k + 1]))
-                    ? V[OFF + k + 1] : V[OFF + k - 1] + 1;
-            int y = x - k;
-            while (x < N && y < M && a[x] == b[y]) {
-                x++; y++;
-            }
-            V[OFF + k] = x;
-            if (x >= N && y >= M) goto done;
-        }
-    }
-
-done:
-    // バックトラックで編集スクリプトを逆順に構築
+    /**
+    * Myers diffアルゴリズムで2つの文字列リスト間の最短編集スクリプトを計算する
+    *
+    * @param a 旧ファイルの行リスト
+    * @param b 新ファイルの行リスト
+    * @return 編集操作のリスト (正順)
+    */
+    static QVector<DiffOp> computeMyersDiff(const QStringList &a, const QStringList &b)
     {
-        QVector<DiffOp::Type> revTypes;
-        revTypes.reserve(N + M);
-        int x = N, y = M;
+        const int N = a.size(), M = b.size();
 
-        for (int d = trace.size() - 1; d > 0; d--) {
-            const QVector<int> &vp = trace[d];  // d-1ステップ終了後のV
-            int k = x - y;
-            bool down = (k == -d) || (k != d && vp[OFF + k - 1] < vp[OFF + k + 1]);
-            int pk = down ? k + 1 : k - 1;
-            int px = vp[OFF + pk], py = px - pk;
-            int mx = down ? px : px + 1, my = mx - k;
+        if (N == 0 && M == 0) return {};
+        if (N == 0) {
+            QVector<DiffOp> r;
+            r.reserve(M);
+            for (int i = 0; i < M; i++)
+                r.append({DiffOp::Insert, -1, i});
+            return r;
+        }
+        if (M == 0) {
+            QVector<DiffOp> r;
+            r.reserve(N);
+            for (int i = 0; i < N; i++)
+                r.append({DiffOp::Delete, i, -1});
+            return r;
+        }
 
-            // 対角線上の等号行 (snake) を逆順に記録
-            while (x > mx && y > my) {
+        const int MAX = N + M, OFF = MAX;
+
+        // V[k + OFF] = 対角線k上の最遠到達x座標
+        QVector<int> V(2 * MAX + 1, 0);
+
+        // 各dステップのVスナップショット (バックトラック用)
+        QVector<QVector<int>> trace;
+        trace.reserve(qMin(MAX, N + M));
+
+        for (int d = 0; d <= MAX; d++) {
+            trace.append(V);  // dステップ開始前 (= d-1ステップ終了後) のスナップショット
+            for (int k = -d; k <= d; k += 2) {
+                int x = (k == -d || (k != d && V[OFF + k - 1] < V[OFF + k + 1]))
+                        ? V[OFF + k + 1] : V[OFF + k - 1] + 1;
+                int y = x - k;
+                while (x < N && y < M && a[x] == b[y]) {
+                    x++; y++;
+                }
+                V[OFF + k] = x;
+                if (x >= N && y >= M) goto done;
+            }
+        }
+
+    done:
+        // バックトラックで編集スクリプトを逆順に構築
+        {
+            QVector<DiffOp::Type> revTypes;
+            revTypes.reserve(N + M);
+            int x = N, y = M;
+
+            for (int d = trace.size() - 1; d > 0; d--) {
+                const QVector<int> &vp = trace[d];  // d-1ステップ終了後のV
+                int k = x - y;
+                bool down = (k == -d) || (k != d && vp[OFF + k - 1] < vp[OFF + k + 1]);
+                int pk = down ? k + 1 : k - 1;
+                int px = vp[OFF + pk], py = px - pk;
+                int mx = down ? px : px + 1, my = mx - k;
+
+                // 対角線上の等号行 (snake) を逆順に記録
+                while (x > mx && y > my) {
+                    x--; y--;
+                    revTypes.append(DiffOp::Equal);
+                }
+
+                // 非対角移動 (挿入/削除)
+                revTypes.append(down ? DiffOp::Insert : DiffOp::Delete);
+                x = px; y = py;
+            }
+
+            // d=0の初期 snake (等号行のみ、編集なし)
+            while (x > 0 && y > 0) {
                 x--; y--;
                 revTypes.append(DiffOp::Equal);
             }
 
-            // 非対角移動 (挿入/削除)
-            revTypes.append(down ? DiffOp::Insert : DiffOp::Delete);
-            x = px; y = py;
+            // 正順に反転
+            std::reverse(revTypes.begin(), revTypes.end());
+
+            // 操作タイプからインデックス付きDiffOpに変換
+            QVector<DiffOp> result;
+            result.reserve(revTypes.size());
+            int ai = 0, bi = 0;
+            for (auto t : revTypes) {
+                switch (t) {
+                    case DiffOp::Equal:
+                        result.append({DiffOp::Equal, ai, bi}); ai++; bi++; break;
+                    case DiffOp::Delete:
+                        result.append({DiffOp::Delete, ai, -1}); ai++; break;
+                    case DiffOp::Insert:
+                        result.append({DiffOp::Insert, -1, bi}); bi++; break;
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+    * 2つのファイルを読み込み、unified diff形式の文字列を生成する
+    * "diff -u"コマンドと互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能
+    *
+    * @param oldPath 旧ファイルパス (--- ヘッダに使用)
+    * @param newPath 新ファイルパス (+++ ヘッダに使用)
+    * @return unified diff文字列、差分がない場合は空文字列
+    */
+    static QString generateUnifiedDiff(const QString &oldPath, const QString &newPath)
+    {
+        QFile oldFile(oldPath), newFile(newPath);
+        if (!oldFile.open(QIODevice::ReadOnly | QIODevice::Text) ||
+            !newFile.open(QIODevice::ReadOnly | QIODevice::Text))
+            return {};
+
+        QStringList a = QString::fromUtf8(oldFile.readAll()).split('\n');
+        QStringList b = QString::fromUtf8(newFile.readAll()).split('\n');
+        oldFile.close();
+        newFile.close();
+
+        // ファイル末尾の改行で生じる空要素を除去
+        if (!a.isEmpty() && a.last().isEmpty()) a.removeLast();
+        if (!b.isEmpty() && b.last().isEmpty()) b.removeLast();
+
+        QVector<DiffOp> ops = computeMyersDiff(a, b);
+
+        // 変更がない場合は空文字列を返す (diff -u の差分なしと同じ挙動)
+        bool hasChanges = false;
+        for (const auto &op : ops) {
+            if (op.type != DiffOp::Equal) { hasChanges = true; break; }
+        }
+        if (!hasChanges) return {};
+
+        // 変更位置を特定
+        const int context = 3;
+        QVector<int> changes;
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops[i].type != DiffOp::Equal) changes.append(i);
         }
 
-        // d=0の初期 snake (等号行のみ、編集なし)
-        while (x > 0 && y > 0) {
-            x--; y--;
-            revTypes.append(DiffOp::Equal);
-        }
-
-        // 正順に反転
-        std::reverse(revTypes.begin(), revTypes.end());
-
-        // 操作タイプからインデックス付きDiffOpに変換
-        QVector<DiffOp> result;
-        result.reserve(revTypes.size());
-        int ai = 0, bi = 0;
-        for (auto t : revTypes) {
-            switch (t) {
-                case DiffOp::Equal:
-                    result.append({DiffOp::Equal, ai, bi}); ai++; bi++; break;
-                case DiffOp::Delete:
-                    result.append({DiffOp::Delete, ai, -1}); ai++; break;
-                case DiffOp::Insert:
-                    result.append({DiffOp::Insert, -1, bi}); bi++; break;
+        // hunkにグループ化 (距離が2*context以内の変更をマージ)
+        struct Hunk { int start, end; };
+        QVector<Hunk> hunks;
+        int hs = changes[0], he = changes[0];
+        for (int i = 1; i < changes.size(); i++) {
+            if (changes[i] - he <= 2 * context)
+                he = changes[i];
+            else {
+                hunks.append({hs, he});
+                hs = he = changes[i];
             }
         }
-        return result;
-    }
-}
+        hunks.append({hs, he});
 
-/**
- * 2つのファイルを読み込み、unified diff形式の文字列を生成する。
- * "diff -u"コマンドと互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能。
- *
- * @param oldPath 旧ファイルパス (--- ヘッダに使用)
- * @param newPath 新ファイルパス (+++ ヘッダに使用)
- * @return unified diff文字列、差分がない場合は空文字列
- */
-static QString generateUnifiedDiff(const QString &oldPath, const QString &newPath)
-{
-    QFile oldFile(oldPath), newFile(newPath);
-    if (!oldFile.open(QIODevice::ReadOnly | QIODevice::Text) ||
-        !newFile.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {};
+        // unified diff形式で出力
+        QString out;
+        out += "--- " + oldPath + "\n";
+        out += "+++ " + newPath + "\n";
 
-    QStringList a = QString::fromUtf8(oldFile.readAll()).split('\n');
-    QStringList b = QString::fromUtf8(newFile.readAll()).split('\n');
-    oldFile.close();
-    newFile.close();
+        for (const auto &h : hunks) {
+            int s = qMax(0, h.start - context);
+            int e = qMin(ops.size() - 1, h.end + context);
 
-    // ファイル末尾の改行で生じる空要素を除去
-    if (!a.isEmpty() && a.last().isEmpty()) a.removeLast();
-    if (!b.isEmpty() && b.last().isEmpty()) b.removeLast();
+            // hunk前の行数をカウント (行番号計算用)
+            int aBefore = 0, bBefore = 0;
+            for (int i = 0; i < s; i++) {
+                if (ops[i].type != DiffOp::Insert) aBefore++;
+                if (ops[i].type != DiffOp::Delete) bBefore++;
+            }
 
-    QVector<DiffOp> ops = computeMyersDiff(a, b);
+            // hunk内の行数をカウント
+            int aCount = 0, bCount = 0;
+            for (int i = s; i <= e; i++) {
+                if (ops[i].type != DiffOp::Insert) aCount++;
+                if (ops[i].type != DiffOp::Delete) bCount++;
+            }
 
-    // 変更がない場合は空文字列を返す (diff -u の差分なしと同じ挙動)
-    bool hasChanges = false;
-    for (const auto &op : ops) {
-        if (op.type != DiffOp::Equal) { hasChanges = true; break; }
-    }
-    if (!hasChanges) return {};
+            // 行番号は1ベース、空hunkの場合は0
+            out += QString("@@ -%1,%2 +%3,%4 @@\n")
+                .arg(aCount == 0 ? 0 : aBefore + 1).arg(aCount)
+                .arg(bCount == 0 ? 0 : bBefore + 1).arg(bCount);
 
-    // 変更位置を特定
-    const int context = 3;
-    QVector<int> changes;
-    for (int i = 0; i < ops.size(); i++) {
-        if (ops[i].type != DiffOp::Equal) changes.append(i);
-    }
-
-    // hunkにグループ化 (距離が2*context以内の変更をマージ)
-    struct Hunk { int start, end; };
-    QVector<Hunk> hunks;
-    int hs = changes[0], he = changes[0];
-    for (int i = 1; i < changes.size(); i++) {
-        if (changes[i] - he <= 2 * context)
-            he = changes[i];
-        else {
-            hunks.append({hs, he});
-            hs = he = changes[i];
-        }
-    }
-    hunks.append({hs, he});
-
-    // unified diff形式で出力
-    QString out;
-    out += "--- " + oldPath + "\n";
-    out += "+++ " + newPath + "\n";
-
-    for (const auto &h : hunks) {
-        int s = qMax(0, h.start - context);
-        int e = qMin(ops.size() - 1, h.end + context);
-
-        // hunk前の行数をカウント (行番号計算用)
-        int aBefore = 0, bBefore = 0;
-        for (int i = 0; i < s; i++) {
-            if (ops[i].type != DiffOp::Insert) aBefore++;
-            if (ops[i].type != DiffOp::Delete) bBefore++;
-        }
-
-        // hunk内の行数をカウント
-        int aCount = 0, bCount = 0;
-        for (int i = s; i <= e; i++) {
-            if (ops[i].type != DiffOp::Insert) aCount++;
-            if (ops[i].type != DiffOp::Delete) bCount++;
-        }
-
-        // 行番号は1ベース、空hunkの場合は0
-        out += QString("@@ -%1,%2 +%3,%4 @@\n")
-            .arg(aCount == 0 ? 0 : aBefore + 1).arg(aCount)
-            .arg(bCount == 0 ? 0 : bBefore + 1).arg(bCount);
-
-        for (int i = s; i <= e; i++) {
-            switch (ops[i].type) {
-                case DiffOp::Equal:
-                    out += " " + a[ops[i].aIdx] + "\n";
-                    break;
-                case DiffOp::Delete:
-                    out += "-" + a[ops[i].aIdx] + "\n";
-                    break;
-                case DiffOp::Insert:
-                    out += "+" + b[ops[i].bIdx] + "\n";
-                    break;
+            for (int i = s; i <= e; i++) {
+                switch (ops[i].type) {
+                    case DiffOp::Equal:
+                        out += " " + a[ops[i].aIdx] + "\n";
+                        break;
+                    case DiffOp::Delete:
+                        out += "-" + a[ops[i].aIdx] + "\n";
+                        break;
+                    case DiffOp::Insert:
+                        out += "+" + b[ops[i].bIdx] + "\n";
+                        break;
+                }
             }
         }
-    }
 
-    return out;
-}
+        return out;
+    }
 
 } // anonymous namespace
 
 /**
  * @brief SnapshotOperationsクラスのコンストラクタ
  *
- * スナップショット操作を管理するクラスを初期化します。
+ * スナップショット操作を管理するクラスを初期化します
  *
  * @param parent 親QObjectポインタ
  */
@@ -293,7 +293,7 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
 /**
  * @brief SnapshotOperationsクラスのデストラクタ
  *
- * リソースのクリーンアップを行います。
+ * リソースのクリーンアップを行う
  */
 SnapshotOperations::~SnapshotOperations()
 {
@@ -302,7 +302,7 @@ SnapshotOperations::~SnapshotOperations()
 /**
  * @brief アイドルタイマをリセット
  *
- * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長します。
+ * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長する
  */
 void SnapshotOperations::resetIdleTimer()
 {
@@ -312,7 +312,7 @@ void SnapshotOperations::resetIdleTimer()
 /**
  * @brief Snapperが設定されているか確認
  *
- * Snapper設定が1つ以上存在するかを確認します。
+ * Snapper設定が1つ以上存在するかを確認する
  * 認証は不要 (list-snapshotsと同じアクションでactiveユーザは自動許可)
  *
  * @return Snapper設定が存在する場合: true
@@ -332,8 +332,8 @@ bool SnapshotOperations::IsConfigured()
 /**
  * @brief Snapper設定を書き込む
  *
- * 指定されたキー/バリューペアをSnapper設定に書き込みます。
- * PolicyKit認証を必要とします。
+ * 指定されたキー/バリューペアをSnapper設定に書き込む
+ * PolicyKit認証を必要とする
  *
  * @param configName Snapper設定名
  * @param settings 設定のキー/バリューマップ
@@ -376,8 +376,8 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
 /**
  * @brief Snapperのクォータを設定
  *
- * 指定されたSnapper設定のクォータ機能を設定します。
- * PolicyKit認証を必要とします。
+ * 指定されたSnapper設定のクォータ機能を設定する
+ * PolicyKit認証を必要とする
  *
  * @param configName Snapper設定名
  * @return 成功時: true、失敗時: false
@@ -412,13 +412,13 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
 /**
  * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を送信する
  *
- * 空文字列入力を "root" に正規化した上で qsnapper::security::validateConfigName で検証する。
- * 無効な場合はQDBusError::InvalidArgsを送信し、std::nulloptを返す。
- * Polkitプロンプトを出す前に呼び出して、攻撃者が任意configNameでpolkitを浪費するのを防ぐ。
+ * 空文字列入力を "root" に正規化した上で qsnapper::security::validateConfigName で検証する
+ * 無効な場合はQDBusError::InvalidArgsを送信し、std::nulloptを返す
+ * Polkitプロンプトを出す前に呼び出して、攻撃者が任意configNameでpolkitを浪費するのを防ぐ
  *
- * 旧 validateConfigOrFail のリプレースメント。
- * 「空 → "root"」のデフォルト割当をここに集約することで、呼び出し側の
- * `configName.isEmpty() ? "root" : configName` パターンを排除する。
+ * 旧 validateConfigOrFail のリプレースメント
+ * 「空 → "root"」のデフォルト割当をここに集約することで、
+ * 呼び出し側の `configName.isEmpty() ? "root" : configName` パターンを排除する
  *
  * @param configName 検査する設定名 (空文字列は "root" として扱う)
  * @return 正規化後の設定名 (有効時)、無効でエラー送信済み (std::nullopt)
@@ -439,12 +439,12 @@ std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &co
 /**
  * @brief PolicyKitによる認証チェックを実行
  *
- * 指定されたアクションIDに対してユーザが権限を持っているかを確認します。
- * 権限がない場合はD-Busエラー応答を送信します。
+ * 指定されたアクションIDに対してユーザが権限を持っているかを確認する
+ * 権限がない場合はD-Busエラー応答を送信する
  *
- * SubjectはSystemBusNameSubjectを用いる。
- * UnixProcessSubject (PIDベース) はPIDがレース中に再割り当てされるTOCTOU脆弱性 (CVE-2013-4288) があり、polkit自身も非推奨としている。
- * SystemBusNameSubjectはカーネルのD-Bus name-owner情報をpolkitdが参照するため、呼び出し元の取り違えが起きない。
+ * SubjectはSystemBusNameSubjectを用いる
+ * UnixProcessSubject (PIDベース) はPIDがレース中に再割り当てされるTOCTOU脆弱性 (CVE-2013-4288) があり、polkit自身も非推奨としている
+ * SystemBusNameSubjectはカーネルのD-Bus name-owner情報をpolkitdが参照するため、呼び出し元の取り違えが起きない
  *
  * @param actionId チェックするアクションID
  * @return 認証成功時: true、失敗時: false
@@ -468,8 +468,8 @@ bool SnapshotOperations::checkAuthorization(const QString &actionId)
 /**
  * @brief Snapperインスタンスを取得
  *
- * 指定された設定名でSnapperインスタンスを取得または作成します。
- * 設定が変更された場合は新しいインスタンスを作成します。
+ * 指定された設定名でSnapperインスタンスを取得または作成する
+ * 設定が変更された場合は新しいインスタンスを作成する
  *
  * @param configName Snapper設定名
  * @return Snapperインスタンスへのポインタ、失敗時はnullptr
@@ -495,7 +495,7 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
 /**
  * @brief スナップショットタイプを文字列に変換
  *
- * snapperライブラリのスナップショットタイプ列挙値を文字列表現に変換します。
+ * snapperライブラリのスナップショットタイプ列挙値を文字列表現に変換する
  *
  * @param type スナップショットタイプ (snapper::SINGLE, PRE, POST)
  * @return タイプの文字列表現 ("single", "pre", "post")
@@ -513,7 +513,7 @@ QString SnapshotOperations::snapshotTypeToString(int type)
 /**
  * @brief 文字列をスナップショットタイプに変換
  *
- * 文字列表現をsnapperライブラリのスナップショットタイプ列挙値に変換します。
+ * 文字列表現をsnapperライブラリのスナップショットタイプ列挙値に変換する
  *
  * @param typeStr タイプの文字列表現 ("single", "pre", "post")
  * @return スナップショットタイプ列挙値
@@ -528,7 +528,7 @@ int SnapshotOperations::stringToSnapshotType(const QString &typeStr)
 /**
  * @brief スナップショット一覧をCSV形式に変換
  *
- * Snapperインスタンスから取得したスナップショット一覧をCSV形式の文字列に変換します。
+ * Snapperインスタンスから取得したスナップショット一覧をCSV形式の文字列に変換する
  *
  * @param snapper Snapperインスタンスへのポインタ
  * @return CSV形式のスナップショット情報文字列
@@ -575,9 +575,9 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
 /**
  * @brief 利用可能なSnapper設定名のリストを返す
  *
- * libsnapperのgetConfigs()を呼び出し、存在する全Snapper設定 (例: "root", "home") の設定名を抽出して配列で返す。
- * スナップショット本体は返さない。
- * PolicyKit認証 (list-snapshots) を必要とする。
+ * libsnapperのgetConfigs()を呼び出し、存在する全Snapper設定 (例: "root", "home") の設定名を抽出して配列で返す
+ * スナップショット本体は返さない
+ * PolicyKit認証 (list-snapshots) を必要とする
  *
  * @return 設定名の配列、失敗時は空配列
  */
@@ -608,17 +608,17 @@ QStringList SnapshotOperations::ListConfigs()
 /**
  * @brief 指定設定のスナップショット一覧をCSVで取得する
  *
- * 空文字列のconfigNameは"root"と解釈される。
- * 呼び出し毎にSnapperインスタンスを強制再構築し、外部 (snapperd/snapper CLI等) で作成された新規スナップショットを確実に反映する。
- * PolicyKit認証 (list-snapshots) を必要とする。
+ * 空文字列のconfigNameは"root"と解釈される
+ * 呼び出し毎にSnapperインスタンスを強制再構築し、外部 (snapperd/snapper CLI等) で作成された新規スナップショットを確実に反映する
+ * PolicyKit認証 (list-snapshots) を必要とする
  *
  * @param configName Snapper設定名 (空文字列時は"root")
  * @return CSV形式のスナップショット一覧、失敗時は空文字列
  */
 QString SnapshotOperations::ListSnapshots(const QString &configName)
 {
-    // resolveConfigOrFail が空文字列を "root" に正規化した上で検証する。
-    // 失敗時はD-Busエラー応答が送出済み。
+    // resolveConfigOrFail が空文字列を "root" に正規化した上で検証する
+    // 失敗時はD-Busエラー応答が送出済み
     const auto cfg = resolveConfigOrFail(configName);
     if (!cfg) {
         return QString();
@@ -648,8 +648,8 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
 /**
  * @brief 新しいスナップショットを作成
  *
- * 指定されたパラメータで新しいスナップショットを作成します。
- * single、pre、postの3種類のタイプをサポートします。
+ * 指定されたパラメータで新しいスナップショットを作成する
+ * single、pre、postの3種類のタイプをサポートする
  *
  * @param type スナップショットのタイプ ("single", "pre", "post")
  * @param description スナップショットの説明
@@ -761,10 +761,10 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
 /**
  * @brief 既存スナップショットのメタデータを編集
  *
- * description / cleanup algorithm / userdata を差し替えます。
- * 空文字列("")のdescriptionはそのまま空文字列で上書きされます。
- * userdataは渡されたマップで完全に置き換わります。(差分ではない)
- * PolicyKit認証を必要とします。
+ * description / cleanup algorithm / userdata を差し替える
+ * 空文字列("")のdescriptionはそのまま空文字列で上書きされる
+ * userdataは渡されたマップで完全に置き換わる (差分ではない)
+ * PolicyKit認証を必要とする
  *
  * @param configName Snapper設定名
  * @param number 編集対象のスナップショット番号
@@ -826,8 +826,8 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
 /**
  * @brief スナップショットを削除する (D-Busスロット)
  *
- * Polkit認証は毎回 checkAuthorization()に委ねる。
- * 連続削除時の再入力はpolkitのauth_admin_keep設定により、short-lived cookieで抑止される。
+ * Polkit認証は毎回 checkAuthorization()に委ねる
+ * 連続削除時の再入力はpolkitのauth_admin_keep設定により、short-lived cookieで抑止される
  *
  * @param configName 設定名
  * @param number 削除対象スナップショット番号
@@ -881,7 +881,7 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
 /**
  * @brief スナップショットにロールバック
  *
- * 指定されたスナップショットをデフォルトに設定し、次回起動時にそのスナップショットの状態で起動するようにします。
+ * 指定されたスナップショットをデフォルトに設定し、次回起動時にそのスナップショットの状態で起動する
  *
  * @param number ロールバック先のスナップショット番号
  * @return 設定成功時: true、失敗時: false
@@ -911,7 +911,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
             return false;
         }
 
-        // "sudo snapper rollback N"と同等の挙動を再現する。
+        // "sudo snapper rollback N"と同等の挙動を再現する
         //
         // CLI (client/snapper/cmd-rollback.cc) はambitを以下で判定する:
         //   - previous_defaultがread-only --> TRANSACTIONAL
@@ -1014,7 +1014,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
 /**
  * @brief ファイル変更一覧を取得
  *
- * 指定されたスナップショットと現在のシステム状態を比較し、変更されたファイルの一覧を取得します。
+ * 指定されたスナップショットと現在のシステム状態を比較し、変更されたファイルの一覧を取得する
  *
  * @param configName Snapper設定名
  * @param snapshotNumber 比較元のスナップショット番号
@@ -1091,8 +1091,8 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
 /**
  * @brief 2 つのスナップショット間のファイル変更リストを取得
  *
- * snapshot1 → snapshot2の差分を取得します。現在のシステム状態は使用しません。
- * GetFileChangesの「任意の2つのsnapshot間」版です。
+ * snapshot1 → snapshot2の差分を取得する
+ * 現在のシステム状態は使用しない
  */
 QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int number1, int number2)
 {
@@ -1156,8 +1156,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
 /**
  * @brief 2つのスナップショット間の個別ファイルの詳細 + diffを取得
  *
- * GetFileDiffAndDetailsの任意2つのsnapshot間版
- * snapshot1側のパーミッションとsnapshot2側のパーミッションを返し、diff部も両snapshot上のファイルを比較します。
+ * snapshot1側のパーミッションとsnapshot2側のパーミッションを返し、diff部も両snapshot上のファイルを比較する
  */
 QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int number1, int number2, const QString &filePath)
 {
@@ -1259,8 +1258,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
 /**
  * @brief ファイルの差分と詳細情報を一括取得
  *
- * 1回のComparisonオブジェクト生成で、差分(diff)と詳細情報(パーミッション等)の両方を取得します。
- * GetFileDiff + GetFileDetailsの統合版。
+ * 1回のComparisonオブジェクト生成で、差分(diff)と詳細情報(パーミッション等)の両方を取得する
  *
  * @param configName Snapper設定名
  * @param snapshotNumber 比較元のスナップショット番号
@@ -1367,10 +1365,10 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
 }
 
 /**
- * @brief ファイルをスナップショットから復元する (YaST 互換経路)
+ * @brief ファイルをスナップショットから復元する (YaST互換経路)
  *
- * 内部で restoreFilesImpl を呼び出すだけのラッパ。
- * reflink は使用せず typechanged の事前削除も行わない。
+ * 内部で restoreFilesImpl を呼び出すだけのラッパ
+ * reflinkは使用せず、typechangedの事前削除も行わない
  *
  * @param configName      Snapper設定名
  * @param snapshotNumber  復元元スナップショット番号
@@ -1391,7 +1389,7 @@ bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNum
  * @brief ファイルをスナップショットから復元する (高速経路)
  *
  * 内部でrestoreFilesImplを呼び出すだけのラッパー
- * btrfs reflink (FICLONE) を優先し、typechanged時は既存ファイルを削除してから上書きする。
+ * btrfs reflink (FICLONE) を優先し、typechanged時は既存ファイルを削除してから上書きする
  *
  * @param configName      Snapper設定名
  * @param snapshotNumber  復元元スナップショット番号
@@ -1420,7 +1418,7 @@ bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snaps
  *   - filePathsの各要素は絶対パスで、かつ snapshotDir配下を指すこと
  *     (snapshotFilePath = snapshotDir + filePathがsnapshotDir内に収まることをisPathWithinSnapshotRootで検証)
  *   - "/.snapshots/" 直下への書き込み (systemFilePath側) は書き込み対象として棄却する
- *   - シンボリックリンク解決は copySymlink / copyRegularFileのレイヤーで行う (本関数はパスの構文検証のみ)
+ *   - シンボリックリンク解決は copySymlink / copyRegularFileのレイヤーで行う
  */
 bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapshotNumber,
                                           const QStringList &filePaths,
@@ -1646,9 +1644,9 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
  * @brief 通常ファイルをコピー (sendfile + 権限・所有者・タイムスタンプ保持)
  *
  * tryReflink=trueの場合、まずioctl(FICLONE)を試行し、
- * btrfs CoW (reflink)が使用可能であれば高速コピー、失敗時はsendfileにフォールバック。
+ * btrfs CoW (reflink)が使用可能であれば高速コピー、失敗時はsendfileにフォールバック
  *
- * "cp -d --preserve=all --no-preserve=xattr"と同等の動作。
+ * "cp -d --preserve=all --no-preserve=xattr"と同等の動作
  */
 bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst, bool tryReflink)
 {
@@ -1700,7 +1698,8 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
 
     // 所有者を保持 (cp --preserve=all)
     if (fchown(dstFd, srcStat.st_uid, srcStat.st_gid) < 0) {
-        // root権限でのみ成功する; 失敗は警告のみ
+        // root権限でのみ成功する
+        // 失敗は警告のみ
         qWarning() << "copyRegularFile: fchown failed (non-fatal):" << strerror(errno);
     }
 
@@ -1718,7 +1717,7 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
 /**
  * @brief シンボリックリンクをコピー (readlink → symlink + lchown + タイムスタンプ)
  *
- * "cp -d --preserve=all --no-preserve=xattr"のシンボリックリンク版。
+ * "cp -d --preserve=all --no-preserve=xattr"のシンボリックリンク版
  */
 bool SnapshotOperations::copySymlink(const QString &src, const QString &dst)
 {

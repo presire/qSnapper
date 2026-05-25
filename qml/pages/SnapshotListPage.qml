@@ -166,6 +166,7 @@ Page {
             Button {
                 text: qsTr("Refresh")
                 icon.name: "view-refresh"
+                icon.color: palette.buttonText
                 onClicked: {
                     root.clearSelection()
                     snapshotListModel.refresh()
@@ -176,6 +177,7 @@ Page {
             Button {
                 text: qsTr("Delete Selected")
                 icon.name: "edit-delete"
+                icon.color: enabled ? "#ef5350" : palette.buttonText
                 enabled: root.selectedCount > 0
                 opacity: enabled ? 1.0 : 0.45
                 onClicked: deleteConfirmDialog.open()
@@ -185,6 +187,7 @@ Page {
             Button {
                 text: qsTr("Create Snapshot")
                 icon.name: "list-add"
+                icon.color: enabled ? "#66bb6a" : palette.buttonText
                 onClicked: createSnapshotDialog.open()
             }
 
@@ -192,6 +195,7 @@ Page {
             Button {
                 text: qsTr("Modify")
                 icon.name: "document-edit"
+                icon.color: palette.buttonText
                 enabled: root.selectedCount === 1
                 opacity: enabled ? 1.0 : 0.45
                 onClicked: {
@@ -211,6 +215,7 @@ Page {
             Button {
                 text: qsTr("Compare")
                 icon.name: "view-visible"
+                icon.color: palette.buttonText
                 enabled: root.selectedCount === 2
                 opacity: enabled ? 1.0 : 0.45
                 onClicked: {

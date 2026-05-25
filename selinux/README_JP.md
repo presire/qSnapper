@@ -364,4 +364,4 @@ sudo restorecon -F -R -v /usr/libexec/qsnapper-dbus-service
 
 ## ライセンス
 
-このSELinuxポリシーモジュールは、qSnapperプロジェクトと同じライセンス(GPL-3.0)で配布されます。
+このSELinuxポリシーモジュールは、qSnapperプロジェクトと同じライセンス(GPL-2.0-or-later)で配布されます。

@@ -13,17 +13,12 @@ SUSE Security Review 2026-04 で指摘された脆弱性の PoC 再現/回帰ス
 
 ```
 security_poc/
-├── README.md            (この文書)
-├── common.sh            (共通ヘルパ: VM検証、ベースライン比較、snapshot ID取得)
-├── run_all.sh           (全PoCを順次実行し results/ に記録)
-├── poc_polkit_race.py   (C-1: issue 1, UnixProcessSubject race)
-├── poc_config_traversal.sh (C-2: issue 2, configNameパストラバーサル)
-├── poc_cross_user.sh    (C-3: issue 4a, m_authenticated クロスユーザー汚染)
-├── poc_action_mixup.sh  (C-4: issue 4b, Authenticate() 任意action混用)
-├── poc_restore_traversal.sh (C-5: issue 5a, RestoreFiles任意ファイル上書き)
-├── poc_quit_dos.sh      (C-6: issue 5b, Quit()無認証DoS)
-├── poc_log_leak.sh      (C-7: issue 5c, /var/log/qsnapper情報漏洩)
-└── results/             (各実行の結果ログ保存先)
+├── README.md                   (この文書)
+├── common.sh                   (共通ヘルパ: VM検証、ベースライン比較、snapshot ID取得)
+├── poc_polkit_race.py          (C-1: issue 1, UnixProcessSubject race)
+├── poc_restore_traversal.sh    (C-5: issue 5a, RestoreFiles任意ファイル上書き)
+├── poc_quit_dos.sh             (C-6: issue 5b, Quit()無認証DoS)
+└── results/                    (各実行の結果ログ保存先)
 ```
 
 ## 実行手順
@@ -33,35 +28,52 @@ security_poc/
 ```bash
 sudo zypper in qSnapper-1.3.2-*.rpm       # 修正前版
 cd tests/security_poc
-sudo BASELINE=1 ./run_all.sh              # results/baseline_*.log に記録
+
+sudo BASELINE=1 python3 poc_polkit_race.py --iterations 1000
+sudo BASELINE=1 ./poc_restore_traversal.sh
+sudo BASELINE=1 ./poc_quit_dos.sh
 ```
-**全PoCが「成功 (=脆弱性再現)」となることを確認**。成立しないPoCがあれば、環境差異か修正が既に入ったかを先に調査。
+
+**全 PoC が「成功 (=脆弱性再現)」となることを確認**。成立しないPoCがあれば、環境差異か修正が既に入ったかを先に調査。
 
 ### 2. 修正版検証
 
 ```bash
 sudo zypper in qSnapper-1.3.3-*.rpm       # 修正版
-sudo ./run_all.sh                         # results/fixed_*.log に記録
-```
-**全PoCが「失敗 (=修正により閉じられた)」となることを確認**。
 
-### 3. 比較レポート生成
+sudo python3 poc_polkit_race.py --iterations 1000
+sudo ./poc_restore_traversal.sh
+sudo ./poc_quit_dos.sh
+```
+
+**全 PoC が「失敗 (=修正により閉じられた)」となることを確認**。
+
+### 3. bob からの実行時の注意
+
+`poc_polkit_race.py` を `sudo -u bob` で実行する場合、bob は `/home/<owner>/...` 配下を
+読めない (700 ホーム) ため、スクリプトを `/tmp/qsnapper_poc/` 等の共有可能な場所に
+コピーしてから実行する:
 
 ```bash
-./compare_results.sh > results/SUMMARY.md
+sudo cp -r tests/security_poc /tmp/qsnapper_poc
+sudo chmod -R o+rX /tmp/qsnapper_poc
+sudo -u bob python3 /tmp/qsnapper_poc/poc_polkit_race.py --iterations 1000
 ```
 
 ## 対応表
 
-| PoC | Issue | CVE candidate | 修正項目 |
-|---|---|---|---|
-| C-1 | #1 | 1 | P0-1 (SystemBusNameSubject置換) |
-| C-2 | #2 | 2 | P0-3 (validateConfigName) |
-| C-3 | #4a | 4 | P0-2 (m_authenticated撤去) |
-| C-4 | #4b | 5 | P0-2 (Authenticate削除) |
-| C-5 | #5a | – | P0-4 (RestoreFiles統合 + openat) |
-| C-6 | #5b | – | P1-6 (Quit削除) |
-| C-7 | #5c | – | P1-7 (ログ権限) |
+| PoC | Issue | 修正項目 |
+|---|---|---|
+| C-1 | #1   | P0-1 (SystemBusNameSubject置換) |
+| C-5 | #5a  | P0-4 (RestoreFiles統合 + openat) |
+| C-6 | #5b  | P1-6 (Quit削除) + P2 (.conf per-member ACL) |
+
+> **削除済 PoC** (テスト計画書 [テスト計画]SUSE_Security_Fix_テスト項目.md と同期):
+> - **C-2** (poc_config_traversal.sh): B-2 + `tests/integration/test_configname_dbus.py` で完全カバー
+> - **C-3** (poc_cross_user.sh): B-1-4 (suse@KDE + bob@SSH) と重複、自動化不能 (Polkit subject 制約)
+> - **C-4** (poc_action_mixup.sh): 攻撃起点 `Authenticate()` が削除済のため実行不能
+> - **C-7** (poc_log_leak.sh): B-5 (ログファイル権限テスト) と完全重複
+> - **run_all.sh**: 削除済 PoC を含むため一括実行廃止、PoC 単位で個別実行する
 
 ## 各スクリプトのExitコード規約
 

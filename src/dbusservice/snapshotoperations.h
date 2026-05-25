@@ -39,15 +39,15 @@ private:
     void resetIdleTimer();
 
     /**
-     * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を返す
+     * @brief configNameを正規化 + 検証し、不正ならD-Busエラー応答を返す
      *
-     * 旧 validateConfigOrFail のリプレースメント。
-     * 空文字列の入力は "root" に正規化した上で qsnapper::security::validateConfigName で検証する。
+     * 旧 validateConfigOrFail のリプレースメント
+     * 空文字列の入力は "root" に正規化した上で qsnapper::security::validateConfigName で検証する
      * これにより呼び出し側の "空なら root" デフォルト割当パターンが不要になり、
-     * 空入力に対する一貫した扱い (常に "root" として受理) を保証する。
+     * 空入力に対する一貫した扱い (常に "root" として受理) を保証する
      *
-     * 各D-Busスロットの先頭 (checkAuthorization より前) で呼び出すこと。
-     * Polkitプロンプトが出てから "invalid config name" で蹴られるUXを避けるため順序が重要。
+     * 各D-Busスロットの先頭 (checkAuthorization より前) で呼び出すこと
+     * Polkitプロンプトが出てから "invalid config name" で蹴られるUXを避けるため順序が重要
      *
      * @param configName 検査対象の設定名 (空文字列は "root" として扱う)
      * @return 正規化後の設定名 (有効な場合)、無効でエラー応答済みなら std::nullopt
@@ -90,7 +90,7 @@ private:
     /**
      * @brief RestoreFiles / RestoreFilesDirect 共通実装
      *
-     * 両エントリポイントは差分フラグを引数にして本関数へ委譲する。
+     * 両エントリポイントは差分フラグを引数にして本関数へ委譲する
      * 入力パスはqsnapper::security::isPathWithinSnapshotRootでsnapshot root内に収まっていることを検証する
      *
      * @param configName      Snapper設定名
@@ -201,14 +201,14 @@ public slots:
                                   int number2);
 
     /**
-     * @brief 指定ファイルの現在とスナップショット間のunified diff + 詳細を返す
+     * @brief 指定ファイルの現在とスナップショット間のunified diff + "詳細"を返す
      */
     QString GetFileDiffAndDetails(const QString &configName,
                                   int snapshotNumber,
                                   const QString &filePath);
 
     /**
-     * @brief 指定ファイルの2スナップショット間のunified diff + 詳細を返す
+     * @brief 指定ファイルの2スナップショット間のunified diff + "詳細"を返す
      */
     QString GetFileDiffBetween(const QString &configName,
                                int number1,
@@ -228,7 +228,7 @@ public slots:
     /**
      * @brief ファイルをスナップショットから復元する (高速経路)
      *
-     * btrfs reflinkを優先、typechangedは既存ファイル削除後にコピー。
+     * btrfs reflinkを優先、typechangedは既存ファイル削除後にコピー
      */
     bool RestoreFilesDirect(const QString &configName,
                             int snapshotNumber,

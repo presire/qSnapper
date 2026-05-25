@@ -511,6 +511,18 @@ reason=manual-test</translation>
         <translation>ファイルの変更を読み込み中です。しばらくお待ちください...</translation>
     </message>
     <message>
+        <source>Show differences between Pre #%1 and Post #%2 (view only)</source>
+        <translation>事前 #%1 と事後 #%2 の差分を表示 (閲覧のみ)</translation>
+    </message>
+    <message>
+        <source>Switch to &apos;Pre vs current&apos; view to restore.</source>
+        <translation>復元するには「事前 vs 現在」表示に切り替えてください。</translation>
+    </message>
+    <message>
+        <source>Switch to &apos;Post vs current&apos; view to restore.</source>
+        <translation>復元するには「事後 vs 現在」表示に切り替えてください。</translation>
+    </message>
+    <message>
         <source>Show differences between snapshot #%1 (Pre) and the current system</source>
         <translation>スナップショット #%1 (事前) と現在のシステムとの差分を表示</translation>
     </message>
@@ -633,12 +645,12 @@ reason=manual-test</translation>
         <translation>Linux上でBtrfs/Snapperファイルシステムのスナップショットを管理するためのQtアプリケーション。</translation>
     </message>
     <message>
-        <source>This program is licensed under the GNU General Public License v3.0 or later.</source>
-        <translation>このプログラムは、GNU General Public License v3.0以降の下でライセンスされています。</translation>
+        <source>This program is licensed under the GNU General Public License v2.0 or later.</source>
+        <translation>このプログラムは、GNU General Public License v2.0以降の下でライセンスされています。</translation>
     </message>
     <message>
-        <source>For more information, see &lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0.html&quot;&gt;gnu.org/licenses/gpl-3.0&lt;/a&gt;.</source>
-        <translation>詳細については&lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0.html&quot;&gt;gnu.org/licenses/gpl-3.0&lt;/a&gt;をご覧ください。</translation>
+        <source>For more information, see &lt;a href=&quot;https://www.gnu.org/licenses/old-licenses/gpl-2.0.html&quot;&gt;gnu.org/licenses/gpl-2.0&lt;/a&gt;.</source>
+        <translation>詳細については&lt;a href=&quot;https://www.gnu.org/licenses/old-licenses/gpl-2.0.html&quot;&gt;gnu.org/licenses/gpl-2.0&lt;/a&gt;をご覧ください。</translation>
     </message>
     <message>
         <source>GitHub: &lt;a href=&quot;https://github.com/presire/qSnapper&quot;&gt;github.com/presire/qSnapper&lt;/a&gt;</source>

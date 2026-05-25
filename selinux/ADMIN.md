@@ -677,4 +677,4 @@ For issues or questions about this policy, refer to the following resources:
 ---
 
 This document is provided as part of the qSnapper project.  
-License: GPL-3.0  
+License: GPL-2.0-or-later  

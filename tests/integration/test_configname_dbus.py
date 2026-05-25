@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-test_configname_dbus.py - B-2: configName validation を全14メソッドに対して網羅。
+test_configname_dbus.py - B-2: configName validation を全 13 メソッドに対して網羅。
 
 対象メソッド (configName を引数に取るもの):
-    GetFstype, ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
+    ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
     RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
     GetFileDiffAndDetails, GetFileDiffBetween, RestoreFiles, RestoreFilesDirect,
     WriteSnapperConfig, SetupQuota
 
-各メソッドに対し 6種の悪性 configName を投入し、全て InvalidArgs で拒否されることを
-検証する。読み取り系 (GetFstype 等) で試すので副作用はない。
+各メソッドに対し 6 種の悪性 configName を投入し、全て InvalidArgs で拒否されることを
+検証する。読み取り系 (ListSnapshots 等) で試すので副作用はない。
 
 修正前 (v1.3.2): 多くのメソッドで validation なく snapper 層まで到達し、
                   snapper 例外や予期せぬエラーを返すことで漏洩の兆候を観測。
@@ -60,7 +60,6 @@ def empty_userdata():
 
 
 SPECS: list[MethodSpec] = [
-    MethodSpec("GetFstype", lambda c: [c]),
     MethodSpec("ListSnapshots", lambda c: [c]),
     MethodSpec("CreateSnapshot",
                lambda c: [c, "single", "test", 0, "", empty_userdata(), False]),

@@ -672,4 +672,4 @@ sudo semodule -l | grep qsnapper
 ---
 
 このドキュメントは、qSnapperプロジェクトの一部として提供されます。  
-ライセンス: GPL-3.0  
+ライセンス: GPL-2.0-or-later  

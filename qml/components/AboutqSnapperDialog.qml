@@ -78,7 +78,7 @@ Dialog {
 
                     // ライセンス情報
                     Label {
-                        text: qsTr("This program is licensed under the GNU General Public License v3.0 or later.")
+                        text: qsTr("This program is licensed under the GNU General Public License v2.0 or later.")
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                         Layout.topMargin: 10
@@ -86,7 +86,7 @@ Dialog {
 
                     // GPLライセンスリンク
                     Label {
-                        text: qsTr("For more information, see <a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">gnu.org/licenses/gpl-3.0</a>.")
+                        text: qsTr("For more information, see <a href=\"https://www.gnu.org/licenses/old-licenses/gpl-2.0.html\">gnu.org/licenses/gpl-2.0</a>.")
                         textFormat: Text.RichText
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true

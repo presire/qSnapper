@@ -210,6 +210,7 @@ Dialog {
             Button {
                 text: qsTr("Show Changes")
                 icon.name: "document-revert"
+                icon.color: ThemeManager.isDark ? "#FFFFFF" : palette.buttonText
                 highlighted: true
                 onClicked: restorePreviewDialog.open()
             }
@@ -218,6 +219,7 @@ Dialog {
             Button {
                 text: qsTr("System Rollback")
                 icon.name: "view-refresh"
+                icon.color: ThemeManager.isDark ? "#FFFFFF" : palette.buttonText
                 onClicked: confirmDialog.open()
             }
 

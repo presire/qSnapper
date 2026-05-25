@@ -364,4 +364,4 @@ See [ADMIN.md](ADMIN.md).
 
 ## License
 
-This SELinux policy module is distributed under the same license (GPL-3.0) as the qSnapper project.
+This SELinux policy module is distributed under the same license (GPL-2.0-or-later) as the qSnapper project.

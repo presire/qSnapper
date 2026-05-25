@@ -499,6 +499,18 @@ reason=manual-test</translation>
         <translation>Dateiänderungen werden geladen. Bitte warten...</translation>
     </message>
     <message>
+        <source>Show differences between Pre #%1 and Post #%2 (view only)</source>
+        <translation>Unterschiede zwischen Vorher #%1 und Nachher #%2 anzeigen (nur Ansicht)</translation>
+    </message>
+    <message>
+        <source>Switch to &apos;Pre vs current&apos; view to restore.</source>
+        <translation>Zum Wiederherstellen zur Ansicht „Vorher vs. aktuell“ wechseln.</translation>
+    </message>
+    <message>
+        <source>Switch to &apos;Post vs current&apos; view to restore.</source>
+        <translation>Zum Wiederherstellen zur Ansicht „Nachher vs. aktuell“ wechseln.</translation>
+    </message>
+    <message>
         <source>Show differences between snapshot #%1 (Pre) and the current system</source>
         <translation>Unterschiede zwischen Schnappschuss #%1 (Vorher) und dem aktuellen System anzeigen</translation>
     </message>
@@ -621,12 +633,12 @@ reason=manual-test</translation>
         <translation>Eine Qt App zur Verwaltung von Linux Btrfs/Snapper Schnappschüssen.</translation>
     </message>
     <message>
-        <source>This program is licensed under the GNU General Public License v3.0 or later.</source>
-        <translation>Dieses Programm ist unter der GNU General Public License v3.0 oder später lizenziert.</translation>
+        <source>This program is licensed under the GNU General Public License v2.0 or later.</source>
+        <translation>Dieses Programm ist unter der GNU General Public License v2.0 oder später lizenziert.</translation>
     </message>
     <message>
-        <source>For more information, see &lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0.html&quot;&gt;gnu.org/licenses/gpl-3.0&lt;/a&gt;.</source>
-        <translation>Weitere Informationen finden sich unter &lt;a href=&quot;https://www.gnu.org/licenses/gpl-3.0.html&quot;&gt;gnu.org/licenses/gpl-3.0&lt;a&gt;.</translation>
+        <source>For more information, see &lt;a href=&quot;https://www.gnu.org/licenses/old-licenses/gpl-2.0.html&quot;&gt;gnu.org/licenses/gpl-2.0&lt;/a&gt;.</source>
+        <translation>Weitere Informationen finden sich unter &lt;a href=&quot;https://www.gnu.org/licenses/old-licenses/gpl-2.0.html&quot;&gt;gnu.org/licenses/gpl-2.0&lt;a&gt;.</translation>
     </message>
     <message>
         <source>GitHub: &lt;a href=&quot;https://github.com/presire/qSnapper&quot;&gt;github.com/presire/qSnapper&lt;/a&gt;</source>

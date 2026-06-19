@@ -259,6 +259,27 @@ else()
 endif()
 
 ########################################
+# Manual page (scdoc)
+########################################
+find_program(SCDOC_EXECUTABLE scdoc)
+if(SCDOC_EXECUTABLE)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.1
+        COMMAND ${SCDOC_EXECUTABLE} < ${CMAKE_CURRENT_SOURCE_DIR}/man/qsnapper.1.scd
+                                    > ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.1
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/man/qsnapper.1.scd
+        VERBATIM
+    )
+    add_custom_target(manpage ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.1)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.1
+        DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+    )
+    message(STATUS "Manual page: ENABLED (scdoc found at ${SCDOC_EXECUTABLE})")
+else()
+    message(STATUS "Manual page: DISABLED (scdoc not found)")
+endif()
+
+########################################
 # Packaging (CPack)
 ########################################
 include(cmake/packaging.cmake)

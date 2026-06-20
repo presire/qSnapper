@@ -1,4 +1,4 @@
-qsnapper(1) "June 2026" "qSnapper 1.3.3"
+qsnapper(1) "June 2026" "qSnapper 1.3.4"
 
 # NAME
 
@@ -336,6 +336,6 @@ This manual page was written for the qSnapper project.
 
 # COPYRIGHT
 
-Copyright © 2024-2026 Presire. Released under the GNU General Public License,
+Copyright © 2025-2026 Presire. Released under the GNU General Public License,
 version 2 or later. See _/usr/share/doc/qsnapper/LICENSE.md_ or
 <https://www.gnu.org/licenses/gpl-2.0.html> for the full license text.

@@ -28,7 +28,7 @@ public:
     bool isConfigured();
     Q_INVOKABLE void configureSnapper();
 
-    // 設定 (config) 切替 API
+    // 設定 (config) 切替API
     QStringList configs();
     QString currentConfig() const { return m_currentConfig; }
     Q_INVOKABLE void setCurrentConfig(const QString &name);

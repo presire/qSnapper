@@ -104,6 +104,7 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 - Qt6開発パッケージ
 - PolicyKit-Qt6開発ファイル
 - Snapper開発ヘッダー
+- scdoc (オプション、manページ生成用。未インストールの場合はmanページ生成をスキップ)
 
 ## インストール
 
@@ -117,7 +118,7 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 sudo zypper install cmake gcc-c++ \
                     qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-devel qt6-linguist-devel \
                     polkit-devel libpolkit-qt6-1-devel \
-                    libsnapper-devel libbtrfsutil-devel
+                    libsnapper-devel libbtrfsutil-devel scdoc
 ```
 
 **RHEL 9 / 10**
@@ -126,7 +127,7 @@ sudo zypper install cmake gcc-c++ \
 sudo dnf install cmake gcc-c++ \
                  qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel qt6-linguist-devel \
                  polkit-devel polkit-qt6-1-devel \
-                 snapper-devel btrfs-progs-devel
+                 snapper-devel btrfs-progs-devel scdoc
 ```
 
 #### 2. ビルドとインストール
@@ -184,6 +185,7 @@ sudo make install
 - PolicyKitポリシーを `/usr/share/polkit-1/actions/` に
 - デスクトップエントリを `/usr/share/applications/` に
 - アプリケーションアイコンを `/usr/share/icons/hicolor/128x128/apps/` に
+- manページを `/usr/share/man/man1/` に (`man qsnapper` で参照可能。ビルド時にscdocが利用可能な場合のみ)
 
 D-BusとPolicyKitをリロード：  
 
@@ -387,6 +389,8 @@ qSnapper/
 ├── icons/                   # アプリケーションアイコン
 ├── dbus/                    # D-Bus設定ファイル
 ├── polkit/                  # PolicyKitポリシーファイル
+├── man/                     # manページソース (scdoc)
+│   └── qsnapper.1.scd      # qsnapper(1) manページソース
 ├── selinux/                 # SELinuxポリシーモジュール
 │   ├── qsnapper.te          # Type Enforcementルール
 │   ├── qsnapper.if          # インターフェース定義

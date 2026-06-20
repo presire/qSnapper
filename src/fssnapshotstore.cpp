@@ -1,19 +1,48 @@
 #include <QFile>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QDir>
 #include <QDebug>
+#include <QRegularExpression>
+#include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>
 #include "fssnapshotstore.h"
 
 const QString FsSnapshotStore::SNAPSHOT_DIR = QStringLiteral("/var/lib/qsnapper");
 const QString FsSnapshotStore::SNAPSHOT_FILE_PREFIX = QStringLiteral("pre_snapshot_");
 const QString FsSnapshotStore::SNAPSHOT_FILE_SUFFIX = QStringLiteral(".id");
 
+namespace {
+    bool validateSnapshotPurpose(const QString &purpose)
+    {
+        static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9_-]+$"));
+        return !purpose.isEmpty() && re.match(purpose).hasMatch();
+    }
+
+    bool ensureSnapshotDirectory()
+    {
+        const QString snapshotDir = QStringLiteral("/var/lib/qsnapper");
+        QDir dir;
+        if (!dir.mkpath(snapshotDir)) {
+            return false;
+        }
+
+        const QByteArray encodedPath = snapshotDir.toUtf8();
+        struct stat st;
+        // 注意:
+        // このクライアントサイドのヘルパーは、D-Busサービスのファイルシステム強化レイヤーに対してリンクされていない
+        // パスはユーザが入力するものではなく、アプリケーションが所有する固定のディレクトリであるため、ここでは単純な lstat() で十分である
+        return ::lstat(encodedPath.constData(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+}
+
 /**
  * @brief スナップショット番号をファイルに保存
  *
- * 指定された用途(purpose)に対応するスナップショット番号をファイルに保存する。
- * ファイルパスは/var/lib/qsnapper/pre_snapshot_<purpose>.idとなる。
- * ディレクトリが存在しない場合は自動的に作成される。
+ * 指定された用途(purpose)に対応するスナップショット番号をファイルに保存する
+ * ファイルパスは /var/lib/qsnapper/pre_snapshot_<purpose>.id となる
+ * ディレクトリが存在しない場合は自動的に作成される
  *
  * @param purpose スナップショットの用途識別子
  * @param snapshotNumber 保存するスナップショット番号
@@ -22,17 +51,19 @@ const QString FsSnapshotStore::SNAPSHOT_FILE_SUFFIX = QStringLiteral(".id");
  */
 bool FsSnapshotStore::save(const QString &purpose, int snapshotNumber)
 {
-    QString filePath = snapshotFilePath(purpose);
-
-    QDir dir(SNAPSHOT_DIR);
-    if (!dir.exists()) {
-        if (!dir.mkpath(SNAPSHOT_DIR)) {
-            qWarning() << "Failed to create directory:" << SNAPSHOT_DIR;
-            return false;
-        }
+    if (!validateSnapshotPurpose(purpose)) {
+        qWarning() << "Invalid snapshot purpose:" << purpose;
+        return false;
     }
 
-    QFile file(filePath);
+    QString filePath = snapshotFilePath(purpose);
+
+    if (!ensureSnapshotDirectory()) {
+        qWarning() << "Failed to create or validate directory:" << SNAPSHOT_DIR;
+        return false;
+    }
+
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         qWarning() << "Failed to open file for writing:" << filePath;
         return false;
@@ -40,7 +71,11 @@ bool FsSnapshotStore::save(const QString &purpose, int snapshotNumber)
 
     QTextStream out(&file);
     out << snapshotNumber;
-    file.close();
+    out.flush();
+    if (!file.commit()) {
+        qWarning() << "Failed to atomically save snapshot number to" << filePath;
+        return false;
+    }
 
     qDebug() << "Saved snapshot number" << snapshotNumber << "to" << filePath;
     return true;
@@ -49,26 +84,27 @@ bool FsSnapshotStore::save(const QString &purpose, int snapshotNumber)
 /**
  * @brief ファイルからスナップショット番号を読み込み
  *
- * 指定された用途(purpose)に対応するファイルからスナップショット番号を読み込む。
- * ファイルが存在しない、または読み込みに失敗した場合は-1を返す。
+ * 指定された用途(purpose)に対応するファイルからスナップショット番号を読み込む
+ * ファイルが存在しない、または読み込みに失敗した場合は-1を返す
  *
  * @param purpose スナップショットの用途識別子
  *
  * @return 読み込んだスナップショット番号、
- *         ファイルが存在しないまたは読み込みに失敗した場合は-1
+ *         ファイルが存在しないまたは読み込みに失敗した場合: -1
  */
 int FsSnapshotStore::load(const QString &purpose)
 {
-    QString filePath = snapshotFilePath(purpose);
-
-    QFile file(filePath);
-    if (!file.exists()) {
-        qDebug() << "Snapshot file does not exist:" << filePath;
+    if (!validateSnapshotPurpose(purpose)) {
+        qWarning() << "Invalid snapshot purpose:" << purpose;
         return -1;
     }
 
+    QString filePath = snapshotFilePath(purpose);
+
+    QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        qWarning() << "Failed to open file for reading:" << filePath;
+        qWarning() << "Failed to open snapshot file for reading:" << filePath
+                   << file.errorString();
         return -1;
     }
 
@@ -91,37 +127,36 @@ int FsSnapshotStore::load(const QString &purpose)
 /**
  * @brief 保存されたスナップショット番号ファイルを削除
  *
- * 指定された用途(purpose)に対応するスナップショット番号ファイルを削除する。
- * ファイルが存在しない場合はtrueを返す(既に削除済みとみなす)。
+ * 指定された用途(purpose)に対応するスナップショット番号ファイルを削除する
+ * ファイルが存在しない場合はtrueを返す (既に削除済みとみなす)
  *
  * @param purpose スナップショットの用途識別子
  *
- * @return 削除に成功した場合またはファイルが存在しない場合true、
- *         削除に失敗した場合false
+ * @return 削除に成功した場合またはファイルが存在しない場合: true、削除に失敗した場合: false
  */
 bool FsSnapshotStore::clean(const QString &purpose)
 {
-    QString filePath = snapshotFilePath(purpose);
-
-    QFile file(filePath);
-    if (!file.exists()) {
-        return true;
-    }
-
-    if (file.remove()) {
-        qDebug() << "Removed snapshot file:" << filePath;
-        return true;
-    } else {
-        qWarning() << "Failed to remove snapshot file:" << filePath;
+    if (!validateSnapshotPurpose(purpose)) {
+        qWarning() << "Invalid snapshot purpose:" << purpose;
         return false;
     }
+
+    QString filePath = snapshotFilePath(purpose);
+    const QByteArray encodedPath = filePath.toUtf8();
+    if (::unlink(encodedPath.constData()) == 0 || errno == ENOENT) {
+        qDebug() << "Removed snapshot file:" << filePath;
+        return true;
+    }
+
+    qWarning() << "Failed to remove snapshot file:" << filePath;
+    return false;
 }
 
 /**
  * @brief スナップショットファイルの完全パスを生成
  *
- * 用途識別子からスナップショット番号を保存するファイルの完全パスを生成する。
- * パスは /var/lib/qsnapper/pre_snapshot_<purpose>.id の形式となる。
+ * 用途識別子からスナップショット番号を保存するファイルの完全パスを生成する
+ * パスは /var/lib/qsnapper/pre_snapshot_<purpose>.id の形式となる
  *
  * @param purpose スナップショットの用途識別子
  *

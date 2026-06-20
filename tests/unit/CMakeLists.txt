@@ -16,7 +16,11 @@ set(INPUTVALIDATOR_SOURCES
     ${CMAKE_SOURCE_DIR}/src/dbusservice/inputvalidator.cpp
 )
 
-# --- tst_configname ---------------------------------------------------------
+set(FILESYSTEM_HELPER_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers.cpp
+)
+
+# --- tst_configname ---
 add_executable(tst_configname
     tst_configname.cpp
     ${INPUTVALIDATOR_SOURCES}
@@ -31,7 +35,7 @@ target_link_libraries(tst_configname PRIVATE
 set_target_properties(tst_configname PROPERTIES AUTOMOC ON)
 add_test(NAME tst_configname COMMAND tst_configname)
 
-# --- tst_filepaths ----------------------------------------------------------
+# --- tst_filepaths ---
 add_executable(tst_filepaths
     tst_filepaths.cpp
     ${INPUTVALIDATOR_SOURCES}
@@ -46,9 +50,24 @@ target_link_libraries(tst_filepaths PRIVATE
 set_target_properties(tst_filepaths PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filepaths COMMAND tst_filepaths)
 
+# --- tst_filesystemhelpers ---
+add_executable(tst_filesystemhelpers
+    tst_filesystemhelpers.cpp
+    ${FILESYSTEM_HELPER_SOURCES}
+)
+target_include_directories(tst_filesystemhelpers PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_filesystemhelpers PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_filesystemhelpers PROPERTIES AUTOMOC ON)
+add_test(NAME tst_filesystemhelpers COMMAND tst_filesystemhelpers)
+
 # ASan/UBSan を全テストに適用 (Debugビルド時に-DQSNAPPER_TEST_SANITIZE=ONで)
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths)
+    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

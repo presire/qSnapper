@@ -13,7 +13,7 @@
 class SnapshotGroupModel : public QAbstractListModel
 {
     Q_OBJECT
-    Q_PROPERTY(SnapshotListModel* sourceModel READ sourceModel WRITE setSourceModel NOTIFY sourceModelChanged)
+    Q_PROPERTY(SnapshotListModel* snapshotListModel READ snapshotListModel WRITE setSnapshotListModel NOTIFY snapshotListModelChanged)
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
@@ -48,13 +48,13 @@ public:
 
     int count() const;
 
-    SnapshotListModel *sourceModel() const;
-    void setSourceModel(SnapshotListModel *model);
+    SnapshotListModel *snapshotListModel() const;
+    void setSnapshotListModel(SnapshotListModel *model);
 
     Q_INVOKABLE QVariantList snapshotNumbersAt(int row) const;
 
 signals:
-    void sourceModelChanged();
+    void snapshotListModelChanged();
     void countChanged();
 
 private slots:
@@ -74,7 +74,7 @@ private:
         bool isImportant;
     };
 
-    SnapshotListModel *m_sourceModel = nullptr;
+    SnapshotListModel *m_snapshotListModel = nullptr;
     QList<SnapshotGroup> m_groups;
 };
 

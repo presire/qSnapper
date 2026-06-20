@@ -608,7 +608,7 @@ reason=manual-test</translation>
     </message>
     <message>
         <source>Failed to restore some or all files.</source>
-        <translation>一部またはすべてのファイルの復元に失敗しました。</translation>
+        <translation>一部または全てのファイルの復元に失敗しました。</translation>
     </message>
     <message>
         <source>The files may already be in sync with the snapshot, or an error occurred during restoration. Check the system log for details.</source>

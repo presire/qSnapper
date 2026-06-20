@@ -9,7 +9,7 @@ ThemeManager* ThemeManager::s_instance = nullptr;
 /**
  * @brief ThemeManagerのコンストラクタ
  *
- * 設定を読み込み、システムテーマ変更の監視を開始します。
+ * 設定を読み込み、システムテーマ変更の監視を開始する
  *
  * @param parent 親オブジェクト
  */

@@ -8,7 +8,12 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QDebug>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include "snapshotoperations.h"
+#include "filesystemhelpers.h"
 
 static const QString &logDir()
 {
@@ -22,30 +27,58 @@ static const QString &logFile()
     return file;
 }
 
+namespace {
+
+bool ensureRealLogDirectory()
+{
+    if (!qsnapper::security::safeMkpath(logDir(), 0700)) {
+        return false;
+    }
+
+    struct stat st;
+    return qsnapper::security::safeLstat(logDir(), &st) && S_ISDIR(st.st_mode);
+}
+
+int openLogFileNoFollow()
+{
+    const QByteArray logFilePath = logFile().toUtf8();
+    const int fd = ::open(logFilePath.constData(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((st.st_mode & 0777) != 0600 && ::fchmod(fd, 0600) != 0) {
+        ::close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+}
+
 static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
 {
     Q_UNUSED(context)
 
-    // ログディレクトリを作成し、パーミッション 0700にする
-    // 所有者はsystemdにより、root:rootで起動されるためrootに固定される
+    // ログディレクトリを作成し、パーミッションを0700にする
+    // root:rootで起動されるため、所有者はrootに固定される
     // 恒久的なmode設定はsystemd-tmpfiles (tmpfiles.d/qsnapper.conf) 側で担保するが、
     // パッケージ導入前の初回起動でも安全側に倒すため本関数でも設定する
-    const bool dirExistedBefore = QFile::exists(logDir());
-    QDir().mkpath(logDir());
-    if (!dirExistedBefore) {
-        QFile::setPermissions(logDir(),
-                              QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
-    }
-
-    const bool fileExistedBefore = QFile::exists(logFile());
-    QFile file(logFile());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+    if (!ensureRealLogDirectory()) {
         return;
     }
 
-    if (!fileExistedBefore) {
-        // ログファイルを 0600 (owner rw のみ) にする
-        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    const int fd = openLogFileNoFollow();
+    if (fd < 0) {
+        return;
     }
 
     const char *level = nullptr;
@@ -67,10 +100,25 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context
             break;
     }
 
-    QTextStream stream(&file);
-    stream << QDateTime::currentDateTime().toString(Qt::ISODate)
-           << " [" << level << "] "
-           << msg << "\n";
+    const QString logLine = QDateTime::currentDateTime().toString(Qt::ISODate)
+            + QStringLiteral(" [") + QString::fromLatin1(level) + QStringLiteral("] ")
+            + msg + QLatin1Char('\n');
+    const QByteArray encoded = logLine.toUtf8();
+
+    qsizetype offset = 0;
+    while (offset < encoded.size()) {
+        const ssize_t written = ::write(fd, encoded.constData() + offset,
+                                        static_cast<size_t>(encoded.size() - offset));
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        offset += written;
+    }
+
+    ::close(fd);
 }
 
 int main(int argc, char *argv[])

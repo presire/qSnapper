@@ -1,29 +1,6 @@
 // tst_filepaths.cpp
-// レイヤA-2: RestoreFiles パス正規化の単体テスト (テスト計画 §2 A-2)
-//
-// 検査対象インタフェース (src/dbusservice/inputvalidator.h):
-//
-//   namespace qsnapper::security {
-//       // filePath (絶対パス) が snapshotRoot 配下に収まっているか検証する。
-//       // 仕様:
-//       //   - filePath / snapshotRoot は絶対パスでなければ拒否
-//       //   - filePath / snapshotRoot に制御文字 (C0 / DEL / C1) を含む場合は拒否
-//       //   - PATH_MAX 超過は拒否
-//       //   - std::filesystem::path::lexically_normal() で正規化した上で、
-//       //     filePath が snapshotRoot を完全プレフィクスとして持ち、
-//       //     かつ境界が「完全一致」または「直後がパス区切り '/'」であることを要求する
-//       //     (sibling root trick "/a/b/snap" vs "/a/b/snap-evil" を弾くため、
-//       //      単純な find()==0 ではなく境界チェックを必須としている)
-//       //   - シンボリックリンク検証は呼び出し側で openat(O_NOFOLLOW) によって
-//       //     行う (純粋関数のこのレイヤでは扱わない)
-//       bool isPathWithinSnapshotRoot(const QString &filePath,
-//                                     const QString &snapshotRoot);
-//   }
-//
-// 注意:
-//   symlink 関連のテスト (A-2-7 / A-2-8) は openat+O_NOFOLLOW のレイヤで扱うため、
-//   本ファイルでは「正規化レベルで検知できるもの」のみ対象。symlink テストは
-//   別途 tst_restore_integration.cpp で FS フィクスチャを用意して行う。
+// isPathWithinSnapshotRoot() / validateAbsoluteFilePath() の単体テスト。
+// 契約の詳細は src/dbusservice/inputvalidator.h を参照。
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -31,6 +8,7 @@
 #include "inputvalidator.h"
 
 using qsnapper::security::isPathWithinSnapshotRoot;
+using qsnapper::security::validateAbsoluteFilePath;
 
 class TestFilePaths : public QObject
 {
@@ -42,6 +20,9 @@ private slots:
 
     void reject_data();
     void reject();
+
+    void absolutePathValidation_data();
+    void absolutePathValidation();
 
     void longPath();
 };
@@ -161,6 +142,35 @@ void TestFilePaths::reject()
                             .arg(why, filePath)));
 }
 
+void TestFilePaths::absolutePathValidation_data()
+{
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<bool>("expected");
+
+    QTest::newRow("absolute ok")
+        << QStringLiteral("/etc/hosts")
+        << true;
+    QTest::newRow("empty")
+        << QString()
+        << false;
+    QTest::newRow("relative")
+        << QStringLiteral("etc/hosts")
+        << false;
+    QTest::newRow("newline")
+        << QStringLiteral("/etc/hosts\nfoo")
+        << false;
+    QTest::newRow("nul")
+        << QString::fromUtf8("/etc/hosts\0evil", 15)
+        << false;
+}
+
+void TestFilePaths::absolutePathValidation()
+{
+    QFETCH(QString, path);
+    QFETCH(bool, expected);
+    QCOMPARE(validateAbsoluteFilePath(path), expected);
+}
+
 void TestFilePaths::longPath()
 {
     // A-2-9: PATH_MAX (Linuxでは通常 4096) 超過
@@ -169,6 +179,8 @@ void TestFilePaths::longPath()
     const QString bad = root + QStringLiteral("/") + longTail;
     QVERIFY2(!isPathWithinSnapshotRoot(bad, root),
              "paths exceeding PATH_MAX must be rejected");
+    QVERIFY2(!validateAbsoluteFilePath(bad),
+             "absolute path validator must reject paths exceeding PATH_MAX");
 }
 
 QTEST_APPLESS_MAIN(TestFilePaths)

@@ -1,5 +1,6 @@
 #include <QProcess>
 #include <QFile>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QDir>
 #include <QRegularExpression>
@@ -29,7 +30,7 @@ SnapperService* SnapperService::s_instance = nullptr;
 /**
  * @brief SnapperServiceのコンストラクタ
  *
- * D-Busインターフェースを初期化し、Snapperサービスへの接続を確立します。
+ * D-Busインターフェースを初期化し、Snapperサービスへの接続を確立する
  *
  * @param parent 親オブジェクト
  */
@@ -62,7 +63,7 @@ SnapperService::SnapperService(QObject *parent)
 /**
  * @brief SnapperServiceのデストラクタ
  *
- * リソースのクリーンアップを行います。
+ * リソースのクリーンアップを行う
  */
 SnapperService::~SnapperService()
 {
@@ -71,8 +72,8 @@ SnapperService::~SnapperService()
 /**
  * @brief SnapperServiceのシングルトンインスタンスを取得
  *
- * SnapperServiceのシングルトンインスタンスを返します。
- * インスタンスが存在しない場合は新規作成します。
+ * SnapperServiceのシングルトンインスタンスを返す
+ * インスタンスが存在しない場合は新規作成する
  *
  * @return SnapperServiceのシングルトンインスタンス
  */
@@ -87,24 +88,21 @@ SnapperService* SnapperService::instance()
 /**
  * @brief D-Busサービスへの再接続を試みる
  *
- * アイドルタイムアウトでヘルパープロセスが終了した場合など、D-Busインターフェースが無効になった時に呼び出します。
- * QDBusInterfaceを再生成することでD-Bus activationが発動し、ヘルパープロセスが自動的に再起動されます。
+ * アイドルタイムアウトでヘルパープロセスが終了した場合など、D-Busインターフェースが無効になった時に呼び出す
+ * QDBusInterfaceを再生成することでD-Bus activationが発動し、ヘルパープロセスが自動的に再起動される
  *
- * @return 再接続に成功した場合はtrue
+ * @return 再接続に成功した場合: true
  */
 bool SnapperService::reconnect()
 {
     qCInfo(snapperLog) << "D-Bus service lost, attempting to reconnect...";
 
-    // startService() でヘルパーの起動完了を待ってから接続する。
-    // QDBusInterface 再生成だけでは activation の完了前に isValid() を
-    // 確認してしまい false が返ることがある。
-    // Qt6 では startService() は QDBusReply<void> を返すため isValid() のみ確認する。
-    auto startReply = QDBusConnection::systemBus().interface()->startService(
-        "com.presire.qsnapper.Operations");
+    // startService() でヘルパーの起動完了を待ってから接続する
+    // QDBusInterface 再生成だけでは activation の完了前に isValid() を確認してしまい、falseが返ることがある
+    // Qt 6では startService() は QDBusReply<void> を返すため isValid() のみ確認する
+    auto startReply = QDBusConnection::systemBus().interface()->startService("com.presire.qsnapper.Operations");
     if (!startReply.isValid()) {
-        qCCritical(snapperLog) << "Failed to start D-Bus service:"
-                               << startReply.error().message();
+        qCCritical(snapperLog) << "Failed to start D-Bus service:" << startReply.error().message();
         return false;
     }
 
@@ -116,11 +114,12 @@ bool SnapperService::reconnect()
         QDBusConnection::systemBus(),
         this
     );
+
     if (!m_dbusInterface->isValid()) {
-        qCCritical(snapperLog) << "Reconnection failed:"
-                               << QDBusConnection::systemBus().lastError().message();
+        qCCritical(snapperLog) << "Reconnection failed:" << QDBusConnection::systemBus().lastError().message();
         return false;
     }
+
     qCInfo(snapperLog) << "Reconnected to D-Bus service successfully.";
     return true;
 }
@@ -128,10 +127,10 @@ bool SnapperService::reconnect()
 /**
  * @brief Snapperが設定されているか確認
  *
- * Snapperが正しく設定されているかを確認します。
- * 結果はキャッシュされ、2回目以降の呼び出しではキャッシュ値を返します。
+ * Snapperが正しく設定されているかを確認する
+ * 結果はキャッシュされ、2回目以降の呼び出しではキャッシュ値を返す
  *
- * @return Snapperが設定されている場合はtrue、それ以外はfalse
+ * @return Snapperが設定されている場合: true、それ以外: false
  */
 bool SnapperService::isConfigured()
 {
@@ -160,9 +159,9 @@ bool SnapperService::isConfigured()
  */
 QStringList SnapperService::configs()
 {
-    // 注意: ここで遅延refreshConfigs()を呼ぶと、プロパティゲッター評価中に
-    // configsChangedシグナルが送信され、QML側でbinding loopとして検出される。
-    // 初回取得はQMLのComponent.onCompletedから明示的にrefreshConfigs()を呼ぶ契約とする。
+    // 注意:
+    // ここで 遅延refreshConfigs() を呼ぶと、プロパティゲッター評価中にconfigsChangedシグナルが送信され、QML側でbinding loopとして検出される
+    // 初回取得はQMLのComponent.onCompletedから明示的に refreshConfigs() を呼ぶ契約とする
     return m_configs;
 }
 
@@ -205,8 +204,8 @@ void SnapperService::setCurrentConfig(const QString &name)
 /**
  * @brief Snapperを設定
  *
- * Snapperの初期設定を実行します。
- * 設定完了後、configuredChangedシグナルを発行します。
+ * Snapperの初期設定を実行する
+ * 設定完了後、configuredChangedシグナルを発行する
  */
 void SnapperService::configureSnapper()
 {
@@ -223,11 +222,10 @@ void SnapperService::configureSnapper()
 /**
  * @brief スナップショット作成が許可されているか確認
  *
- * 環境変数DISABLE_SNAPSHOTSの設定に基づいて、
- * 指定されたタイプのスナップショット作成が許可されているか判定します。
+ * 環境変数DISABLE_SNAPSHOTSの設定に基づいて、指定されたタイプのスナップショット作成が許可されているか判定する
  *
  * @param snapshotType スナップショットのタイプ ("single", "around"など)
- * @return 作成が許可されている場合はtrue、それ以外はfalse
+ * @return 作成が許可されている場合: true、それ以外: false
  */
 bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
 {
@@ -250,13 +248,13 @@ bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
 /**
  * @brief シングルスナップショットを作成
  *
- * 単一のスナップショットを作成します。
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返します。
+ * 単一のスナップショットを作成する
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返す
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 作成されたスナップショット、失敗時はnullptr
+ * @return 成功時: 作成されたスナップショット、失敗時: nullptr
  */
 FsSnapshot* SnapperService::createSingle(const QString &description,
                                          FsSnapshot::CleanupAlgorithm cleanup,
@@ -273,13 +271,13 @@ FsSnapshot* SnapperService::createSingle(const QString &description,
 /**
  * @brief Preスナップショットを作成
  *
- * 変更前のスナップショット (Pre)を作成します。
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返します。
+ * 変更前のスナップショット (Pre)を作成する
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返す
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 作成されたスナップショット、失敗時はnullptr
+ * @return 成功時: 作成されたスナップショット、失敗時: nullptr
  */
 FsSnapshot* SnapperService::createPre(const QString &description,
                                       FsSnapshot::CleanupAlgorithm cleanup,
@@ -296,14 +294,14 @@ FsSnapshot* SnapperService::createPre(const QString &description,
 /**
  * @brief Postスナップショットを作成
  *
- * 変更後のスナップショット (Post) を作成します。
- * 対応するPreスナップショットとペアになります。
+ * 変更後のスナップショット (Post) を作成する
+ * 対応するPreスナップショットとペアになる
  *
  * @param description スナップショットの説明
  * @param previousNumber 対応するPreスナップショットの番号
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 作成されたスナップショット、失敗時はnullptr
+ * @return 成功時: 作成されたスナップショット、失敗時: nullptr
  */
 FsSnapshot* SnapperService::createPost(const QString &description,
                                        int previousNumber,
@@ -327,9 +325,9 @@ FsSnapshot* SnapperService::createPost(const QString &description,
 }
 
 /**
- * @brief すべてのスナップショットを取得
+ * @brief 全てのスナップショットを取得
  *
- * D-Bus経由でSnapperに問い合わせ、すべてのスナップショットのリストを取得します。
+ * D-Bus経由でSnapperに問い合わせ、全てのスナップショットのリストを取得する
  *
  * @return スナップショットのリスト
  */
@@ -358,7 +356,7 @@ QList<FsSnapshot*> SnapperService::all()
 /**
  * @brief 指定された番号のスナップショットを検索
  *
- * スナップショット番号を指定して、該当するスナップショットを検索します。
+ * スナップショット番号を指定して、該当するスナップショットを検索する
  *
  * @param number スナップショット番号
  * @return 見つかったスナップショット、見つからない場合はnullptr
@@ -377,11 +375,11 @@ FsSnapshot* SnapperService::find(int number)
 /**
  * @brief 指定されたスナップショットにロールバック
  *
- * D-Bus経由でスナップショットへのロールバックを実行します。
- * 成功時はrollbackCompletedシグナル、失敗時はrollbackFailedシグナルを発行します。
+ * D-Bus経由でスナップショットへのロールバックを実行する
+ * 成功時はrollbackCompletedシグナル、失敗時はrollbackFailedシグナルを発行する
  *
  * @param number ロールバック先のスナップショット番号
- * @return ロールバックが成功した場合はtrue、それ以外はfalse
+ * @return ロールバックが成功した場合: true、それ以外: false
  */
 bool SnapperService::rollback(int number)
 {
@@ -406,7 +404,8 @@ bool SnapperService::rollback(int number)
     bool success = reply.value();
     if (success) {
         emit rollbackCompleted();
-    } else {
+    }
+    else {
         qCWarning(snapperLog) << "Rollback to snapshot" << number << "failed";
         emit rollbackFailed(tr("Rollback operation failed."));
     }
@@ -417,11 +416,11 @@ bool SnapperService::rollback(int number)
 /**
  * @brief 指定されたスナップショットを削除
  *
- * D-Bus経由でスナップショットの削除を実行します。
- * 成功時はsnapshotDeletedシグナル、失敗時はsnapshotDeletionFailedシグナルを発行します。
+ * D-Bus経由でスナップショットの削除を実行する
+ * 成功時はsnapshotDeletedシグナル、失敗時はsnapshotDeletionFailedシグナルを発行する
  *
  * @param number 削除するスナップショット番号
- * @return 削除が成功した場合はtrue、それ以外はfalse
+ * @return 削除が成功した場合: true、それ以外: false
  */
 bool SnapperService::deleteSnapshot(int number)
 {
@@ -446,7 +445,8 @@ bool SnapperService::deleteSnapshot(int number)
     bool success = reply.value();
     if (success) {
         emit snapshotDeleted(number);
-    } else {
+    }
+    else {
         qCWarning(snapperLog) << "Delete snapshot" << number << "failed";
         emit snapshotDeletionFailed(number, tr("Delete operation failed."));
     }
@@ -457,15 +457,15 @@ bool SnapperService::deleteSnapshot(int number)
 /**
  * @brief スナップショットを作成 (内部実装)
  *
- * D-Bus経由でスナップショットを作成します。
- * 作成成功時はsnapshotCreatedシグナル、失敗時はsnapshotCreationFailedシグナルを送信します。
+ * D-Bus経由でスナップショットを作成する
+ * 作成成功時はsnapshotCreatedシグナル、失敗時はsnapshotCreationFailedシグナルを送信する
  *
  * @param snapshotType スナップショットのタイプ
  * @param description スナップショットの説明
  * @param previous 前のスナップショット (Postタイプの場合)
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 作成されたスナップショット、失敗時はnullptr
+ * @return 成功時: 作成されたスナップショット、失敗時: nullptr
  */
 FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
                                    const QString &description,
@@ -500,10 +500,8 @@ FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
                                                       important);
 
     if (!reply.isValid()) {
-        qCCritical(snapperLog) << "Failed to create snapshot via D-Bus:"
-                               << reply.error().message();
-        emit snapshotCreationFailed(tr("Failed to create snapshot: %1")
-                                    .arg(reply.error().message()));
+        qCCritical(snapperLog) << "Failed to create snapshot via D-Bus:" << reply.error().message();
+        emit snapshotCreationFailed(tr("Failed to create snapshot: %1").arg(reply.error().message()));
         return nullptr;
     }
 
@@ -521,8 +519,8 @@ FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
 /**
  * @brief 既存スナップショットのメタデータを編集
  *
- * description / cleanup / userdata を更新します。
- * 成功時にsnapshotModifiedシグナル、失敗時にsnapshotModificationFailedシグナルを送信します。
+ * description / cleanup / userdata を更新する
+ * 成功時にsnapshotModifiedシグナル、失敗時にsnapshotModificationFailedシグナルを送信する
  */
 bool SnapperService::modifySnapshot(int number,
                                     const QString &description,
@@ -563,7 +561,7 @@ bool SnapperService::modifySnapshot(int number,
 /**
  * @brief ターゲットルートパスを取得
  *
- * インストール中かどうかを判定し、適切なルートパスを返します。
+ * インストール中かどうかを判定し、適切なルートパスを返す
  *
  * @return ルートパス (通常は"/"、インストール中は"/mnt"など)
  */
@@ -579,7 +577,7 @@ QString SnapperService::targetRoot() const
 /**
  * @brief 非スイッチインストール環境かどうかを判定
  *
- * 現在のシステムが非スイッチインストール環境かどうかを返します。
+ * 現在のシステムが非スイッチインストール環境かどうかを返す
  *
  * @return 常にfalse (現在の実装では未使用)
  */
@@ -591,7 +589,7 @@ bool SnapperService::nonSwitchedInstallation() const
 /**
  * @brief インストールヘルパーステップ4を実行
  *
- * Snapperのインストールヘルパースクリプトのステップ4を実行します。
+ * Snapperのインストールヘルパースクリプトのステップ4を実行しす
  */
 void SnapperService::installationHelperStep4()
 {
@@ -605,8 +603,8 @@ void SnapperService::installationHelperStep4()
 /**
  * @brief Snapper設定を書き込む
  *
- * Snapperの各種設定パラメータを設定します。
- * NUMBER_CLEANUP、NUMBER_LIMIT、TIMELINE_CREATEなどの設定を行います。
+ * Snapperの各種設定パラメータを設定する
+ * NUMBER_CLEANUP、NUMBER_LIMIT、TIMELINE_CREATEなどの設定を行う
  */
 void SnapperService::writeSnapperConfig()
 {
@@ -634,8 +632,8 @@ void SnapperService::writeSnapperConfig()
 /**
  * @brief /etc/sysconfig/yast2を更新
  *
- * /etc/sysconfig/yast2ファイル内のUSE_SNAPPER設定を"yes"に更新します。
- * 設定が存在しない場合は新規追加します。
+ * /etc/sysconfig/yast2ファイル内のUSE_SNAPPER設定を"yes"に更新する
+ * 設定が存在しない場合は新規追加する
  */
 void SnapperService::updateEtcSysconfigYast2()
 {
@@ -659,20 +657,25 @@ void SnapperService::updateEtcSysconfigYast2()
         content.append("\nUSE_SNAPPER=\"yes\"\n");
     }
 
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QSaveFile saveFile(sysconfigPath);
+    if (!saveFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         qCWarning(snapperLog) << "Could not open" << sysconfigPath << "for writing";
         return;
     }
 
-    QTextStream out(&file);
+    QTextStream out(&saveFile);
     out << content;
-    file.close();
+    out.flush();
+
+    if (!saveFile.commit()) {
+        qCWarning(snapperLog) << "Could not atomically update" << sysconfigPath;
+    }
 }
 
 /**
  * @brief Snapperのクォータを設定
  *
- * Snapperのクォータ機能を設定します。
+ * Snapperのクォータ機能を設定する
  */
 void SnapperService::setupSnapperQuota()
 {
@@ -692,8 +695,7 @@ void SnapperService::setupSnapperQuota()
 /**
  * @brief CSV形式のスナップショットリストをパース
  *
- * Snapperから取得したCSV形式の出力をパースし、
- * FsSnapshotオブジェクトのリストに変換します。
+ * Snapperから取得したCSV形式の出力をパースし、FsSnapshotオブジェクトのリストに変換する
  *
  * @param csvOutput CSV形式のスナップショットリスト
  * @return パースされたスナップショットのリスト
@@ -741,11 +743,15 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
         QString description = fields[6];
 
         // Parse userdata (key1=value1,key2=value2 format)
-        // Note: the line was already split by ',' so each userdata pair is a separate field
+        // 注意: 行はカンマで区切られているため、各userdataのペアは個別のフィールドとなっている
         QVariantMap userdata;
         for (int j = 7; j < fields.size(); ++j) {
-            if (fields[j].isEmpty()) continue;
+            if (fields[j].isEmpty()) {
+                continue;
+            }
+
             int eqIdx = fields[j].indexOf('=');
+
             if (eqIdx > 0) {
                 userdata[fields[j].left(eqIdx)] = fields[j].mid(eqIdx + 1);
             }
@@ -762,8 +768,8 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 /**
  * @brief コマンドを実行
  *
- * 指定されたプログラムを引数付きで実行し、出力を取得します。
- * xx秒のタイムアウトが設定されています。
+ * 指定されたプログラムを引数付きで実行し、出力を取得する
+ * xx秒のタイムアウトが設定されている
  *
  * @param program 実行するプログラムのパス
  * @param arguments プログラムに渡す引数のリスト

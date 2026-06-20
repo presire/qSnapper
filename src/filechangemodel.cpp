@@ -1,6 +1,3 @@
-#include "filechangemodel.h"
-#include <QProcess>
-#include <QDebug>
 #include <QFileInfo>
 #include <QDir>
 #include <QRegularExpression>
@@ -14,7 +11,9 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDebug>
 #include <algorithm>
+#include "filechangemodel.h"
 
 // ============================================================================
 // FileChangeItem Implementation
@@ -23,7 +22,7 @@
 /**
  * @brief FileChangeItemのコンストラクタ
  *
- * ファイル変更アイテムを作成し、パス、変更タイプ、親アイテムを設定します。
+ * ファイル変更アイテムを作成し、パス、変更タイプ、親アイテムを設定する
  *
  * @param path ファイルパス
  * @param type 変更タイプ (Created, Deleted, Modifiedなど)
@@ -37,7 +36,7 @@ FileChangeItem::FileChangeItem(const QString &path, ChangeType type, const QStri
 /**
  * @brief FileChangeItemのデストラクタ
  *
- * すべての子アイテムを削除します。
+ * 全ての子アイテムを削除する
  */
 FileChangeItem::~FileChangeItem()
 {
@@ -47,7 +46,7 @@ FileChangeItem::~FileChangeItem()
 /**
  * @brief 子アイテムを追加
  *
- * このアイテムに子アイテムを追加します。
+ * このアイテムに子アイテムを追加する
  *
  * @param child 追加する子アイテムへのポインタ
  */
@@ -59,7 +58,7 @@ void FileChangeItem::appendChild(FileChangeItem *child)
 /**
  * @brief 指定された行番号の子アイテムを取得
  *
- * 指定された行番号に対応する子アイテムを返します。
+ * 指定された行番号に対応する子アイテムを返す
  *
  * @param row 子アイテムの行番号
  * @return 子アイテムへのポインタ (範囲外の場合はnullptr)
@@ -74,7 +73,7 @@ FileChangeItem *FileChangeItem::child(int row)
 /**
  * @brief 子アイテムの数を取得
  *
- * このアイテムが持つ子アイテムの数を返します。
+ * このアイテムが持つ子アイテムの数を返す
  *
  * @return 子アイテムの数
  */
@@ -86,7 +85,7 @@ int FileChangeItem::childCount() const
 /**
  * @brief 親アイテム内での行番号を取得
  *
- * このアイテムが親アイテムの何番目の子であるかを返します。
+ * このアイテムが親アイテムの何番目の子であるかを返す
  *
  * @return 行番号 (親がない場合は0)
  */
@@ -100,7 +99,7 @@ int FileChangeItem::row() const
 /**
  * @brief 親アイテムを取得
  *
- * このアイテムの親アイテムへのポインタを返します。
+ * このアイテムの親アイテムへのポインタを返す
  *
  * @return 親アイテムへのポインタ
  */
@@ -112,7 +111,7 @@ FileChangeItem *FileChangeItem::parent()
 /**
  * @brief ファイル名またはディレクトリ名を取得
  *
- * パスからファイル名またはディレクトリ名を抽出して返します。
+ * パスからファイル名またはディレクトリ名を抽出して返す
  *
  * @return ファイル名またはディレクトリ名
  */
@@ -141,9 +140,9 @@ QString FileChangeItem::name() const
 /**
  * @brief ディレクトリかどうかを判定
  *
- * パスの末尾がスラッシュで終わっているか、子要素があればディレクトリと判定します。
+ * パスの末尾がスラッシュで終わっているか、子要素があればディレクトリと判定する
  *
- * @return ディレクトリの場合はtrue、それ以外はfalse
+ * @return ディレクトリの場合: true、それ以外: false
  */
 bool FileChangeItem::isDirectory() const
 {
@@ -158,7 +157,7 @@ bool FileChangeItem::isDirectory() const
 /**
  * @brief FileChangeModelのコンストラクタ
  *
- * モデルを初期化し、D-Busインターフェースへの接続を確立します。
+ * モデルを初期化し、D-Busインターフェースへの接続を確立する
  *
  * @param parent 親QObjectへのポインタ
  */
@@ -197,16 +196,15 @@ FileChangeModel::FileChangeModel(QObject *parent)
     );
 
     if (!m_dbusInterface->isValid()) {
-        qWarning() << "Failed to connect to D-Bus service:"
-                   << QDBusConnection::systemBus().lastError().message();
+        qWarning() << "Failed to connect to D-Bus service:" << QDBusConnection::systemBus().lastError().message();
     }
 }
 
 /**
  * @brief D-Busサービスへの再接続を試みる
  *
- * アイドルタイムアウトでヘルパープロセスが終了した場合など、D-Busインターフェースが無効になった場合に呼び出します。
- * QDBusInterfaceを再生成することでD-Bus activationが発動し、ヘルパープロセスが自動的に再起動されます。
+ * アイドルタイムアウトでヘルパープロセスが終了した場合など、D-Busインターフェースが無効になった場合に呼び出す
+ * QDBusInterfaceを再生成することでD-Bus activationが発動し、ヘルパープロセスが自動的に再起動される
  *
  * @return 再接続に成功した場合はtrue
  */
@@ -232,11 +230,13 @@ bool FileChangeModel::reconnectDbus()
         QDBusConnection::systemBus(),
         this
     );
+
     if (!m_dbusInterface->isValid()) {
         qWarning() << "Reconnection failed:"
                    << QDBusConnection::systemBus().lastError().message();
         return false;
     }
+
     qInfo() << "Reconnected to D-Bus service successfully.";
     return true;
 }
@@ -244,7 +244,7 @@ bool FileChangeModel::reconnectDbus()
 /**
  * @brief FileChangeModelのデストラクタ
  *
- * ルートアイテムとその配下のすべてのアイテムを削除します。
+ * ルートアイテムとその配下の全てのアイテムを削除する
  */
 FileChangeModel::~FileChangeModel()
 {
@@ -254,7 +254,7 @@ FileChangeModel::~FileChangeModel()
 /**
  * @brief 復元進捗のスロット
  *
- * D-Busから送信される復元進捗シグナルを受信し、全体の進捗を計算してemitします。
+ * D-Busから送信される復元進捗シグナルを受信し、全体の進捗を計算してemitする
  *
  * @param current バッチ内の現在処理中のファイル数
  * @param total バッチ内の総ファイル数
@@ -273,7 +273,7 @@ void FileChangeModel::onRestoreProgress(int current, int total, const QString &f
 /**
  * @brief 設定名を設定
  *
- * Snapperの設定名を設定し、変更された場合はシグナルを発行します。
+ * Snapperの設定名を設定し、変更された場合はシグナルを発行する
  *
  * @param name 設定名
  */
@@ -288,7 +288,7 @@ void FileChangeModel::setConfigName(const QString &name)
 /**
  * @brief スナップショット番号を設定
  *
- * 復元元となるスナップショット番号を設定し、変更された場合はシグナルを発行します。
+ * 復元元となるスナップショット番号を設定し、変更された場合はシグナルを発行する
  *
  * @param number スナップショット番号
  */
@@ -306,8 +306,8 @@ void FileChangeModel::setSnapshotNumber(int number)
 /**
  * @brief ファイル変更リストを読み込み (非同期) 
  *
- * D-Bus経由でSnapperからファイル変更リストを非同期で取得し、モデルを構築します。
- * 読み込み中はloadingプロパティがtrueになります。
+ * D-Bus経由でSnapperからファイル変更リストを非同期で取得し、モデルを構築する
+ * 読み込み中はloadingプロパティがtrueになる
  */
 void FileChangeModel::loadChanges()
 {
@@ -388,7 +388,8 @@ void FileChangeModel::loadChanges()
 
                 if (path.endsWith('/')) {
                     dirPaths.insert(normalizedPath);
-                } else {
+                }
+                else {
                     filePathSet.insert(normalizedPath);
                 }
             }
@@ -417,7 +418,8 @@ void FileChangeModel::loadChanges()
                 if (pathsWithChildren.contains(normalizedPath) && !path.endsWith('/')) {
                     QString modifiedLine = parts[0] + " " + path + "/";
                     processedChanges.append(modifiedLine);
-                } else {
+                }
+                else {
                     processedChanges.append(line);
                 }
             }
@@ -432,17 +434,10 @@ void FileChangeModel::loadChanges()
 }
 
 /**
- * @brief 単一ファイルを復元
- *
- * 指定されたファイルをスナップショットの状態に復元します。
- *
- * @param filePath 復元するファイルのパス
- */
-/**
  * @brief 任意の2つのスナップショット間のファイル変更を読み込む
  *
- * num1 --> num2 の差分を取得し、ツリー構造を構築します。
- * 復元操作では使用されず、表示 / diff取得専用です。
+ * num1 --> num2 の差分を取得し、ツリー構造を構築する
+ * 復元操作では使用されず、表示 / diff取得専用
  */
 void FileChangeModel::loadChangesBetween(int number1, int number2, bool flat)
 {
@@ -450,21 +445,23 @@ void FileChangeModel::loadChangesBetween(int number1, int number2, bool flat)
         emit errorOccurred("Invalid config name or snapshot numbers");
         return;
     }
+
     m_betweenMode     = true;
-    m_flatMode        = flat;   // true=フラット(比較ダイアログ), false=ツリー(復元プレビュー)
+    m_flatMode        = flat;  // true = フラット (比較ダイアログ), false = ツリー (復元プレビュー)
     m_compareNumber1  = number1;
     m_compareNumber2  = number2;
-    // 比較先スナップショットを主としておく (RestoreFiles 呼び出し時の参照用)
+
+    // 比較先スナップショットを主としておく (RestoreFiles() 呼び出し時の参照用)
     m_snapshotNumber  = number2;
     loadChanges();
 }
 
 /**
- * @brief 「対カレント」比較モードを強制して ロードする補助は現状未使用。
- *        QML側でsetSnapshotNumber --> loadChanges()の順で呼び出す場合、
- *        m_betweenModeが残らないよう、setSnapshotNumberでリセットする。
+ * @brief 「対カレント」比較モードを強制して ロードする補助は現状未使用
+ *
+ * QML側でsetSnapshotNumber --> loadChanges()の順で呼び出す場合、
+ * m_betweenModeが残らないよう、setSnapshotNumberでリセットする
  */
-
 void FileChangeModel::restoreSingleFile(const QString &filePath)
 {
     if (m_configName.isEmpty() || m_snapshotNumber <= 0 || filePath.isEmpty()) {
@@ -484,9 +481,9 @@ void FileChangeModel::restoreSingleFile(const QString &filePath)
     m_totalFilesCount = 1;
     m_processedFilesCount = 0;
 
-    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)。
-    // Polkit 認証は RestoreFiles / RestoreFilesDirect 呼び出し時に都度行われ、
-    // `auth_admin_keep` により短時間の連続操作では UX 的にも1回プロンプトと同等になる。
+    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)
+    // Polkit認証は RestoreFiles / RestoreFilesDirect 呼び出し時に都度行われ、
+    // auth_admin_keepにより短時間の連続操作ではUX的にも1回プロンプトと同等になる
 
     QStringList filePaths;
     filePaths << filePath;
@@ -516,7 +513,8 @@ void FileChangeModel::restoreSingleFile(const QString &filePath)
             qWarning() << "Single file restore failed:" << reply.error().message();
             emit errorOccurred(tr("Restore failed: %1").arg(reply.error().message()));
             emit restoreCompleted(false);
-        } else {
+        }
+        else {
             emit restoreCompleted(reply.value());
         }
     });
@@ -525,7 +523,7 @@ void FileChangeModel::restoreSingleFile(const QString &filePath)
 /**
  * @brief ファイルの差分と詳細情報を非同期で一括取得
  *
- * D-Bus経由でGetFileDiffAndDetailsを非同期で呼び出し、結果をfileDiffAndDetailsReadyシグナルで通知します。
+ * D-Bus経由でGetFileDiffAndDetailsを非同期で呼び出し、結果をfileDiffAndDetailsReadyシグナルで通知する
  *
  * @param filePath 対象ファイルのパス
  */
@@ -534,9 +532,11 @@ void FileChangeModel::getFileDiffAndDetails(const QString &filePath)
     if (m_configName.isEmpty() || filePath.isEmpty()) {
         return;
     }
+
     if (!m_betweenMode && m_snapshotNumber <= 0) {
         return;
     }
+
     if (m_betweenMode && (m_compareNumber1 <= 0 || m_compareNumber2 <= 0)) {
         return;
     }
@@ -548,9 +548,9 @@ void FileChangeModel::getFileDiffAndDetails(const QString &filePath)
         }
     }
 
-    // Pre↔Post 表示モード (m_betweenMode=true) では2スナップショット間の diff を取得し、
-    // それ以外 (対カレント) では従来どおり GetFileDiffAndDetails を呼ぶ。どちらも
-    // 戻り値フォーマット (details + ---DIFF_SEPARATOR--- + diff) は同一。
+    // Pre↔Post表示モード (m_betweenMode = true) では2スナップショット間のdiffを取得し、
+    // それ以外 (対カレント) では従来どおり GetFileDiffAndDetails() を呼ぶ
+    // どちらも戻り値フォーマット (details + ---DIFF_SEPARATOR--- + diff) は同一
     QDBusPendingCall pendingCall = m_betweenMode
         ? m_dbusInterface->asyncCall("GetFileDiffBetween", m_configName, m_compareNumber1, m_compareNumber2, filePath)
         : m_dbusInterface->asyncCall("GetFileDiffAndDetails", m_configName, m_snapshotNumber, filePath);
@@ -582,7 +582,8 @@ void FileChangeModel::getFileDiffAndDetails(const QString &filePath)
         if (sepIndex >= 0) {
             detailsPart = result.left(sepIndex);
             diffPart = result.mid(sepIndex + separator.length());
-        } else {
+        }
+        else {
             detailsPart = result;
         }
 
@@ -603,7 +604,7 @@ void FileChangeModel::getFileDiffAndDetails(const QString &filePath)
 /**
  * @brief 指定された位置のインデックスを取得
  *
- * モデル内の指定された行、列、親インデックスに対応するQModelIndexを返します。
+ * モデル内の指定された行、列、親インデックスに対応するQModelIndexを返す
  *
  * @param row 行番号
  * @param column 列番号
@@ -612,14 +613,16 @@ void FileChangeModel::getFileDiffAndDetails(const QString &filePath)
  */
 QModelIndex FileChangeModel::index(int row, int column, const QModelIndex &parent) const
 {
-    if (!hasIndex(row, column, parent))
+    if (!hasIndex(row, column, parent)) {
         return QModelIndex();
+    }
 
     FileChangeItem *parentItem = getItem(parent);
     FileChangeItem *childItem = parentItem->child(row);
 
-    if (childItem)
+    if (childItem) {
         return createIndex(row, column, childItem);
+    }
 
     return QModelIndex();
 }
@@ -627,21 +630,23 @@ QModelIndex FileChangeModel::index(int row, int column, const QModelIndex &paren
 /**
  * @brief 親のインデックスを取得
  *
- * 指定された子アイテムの親のQModelIndexを返します。
+ * 指定された子アイテムの親のQModelIndexを返す
  *
  * @param child 子のQModelIndex
  * @return 親のQModelIndex
  */
 QModelIndex FileChangeModel::parent(const QModelIndex &child) const
 {
-    if (!child.isValid())
+    if (!child.isValid()) {
         return QModelIndex();
+    }
 
     FileChangeItem *childItem = getItem(child);
     FileChangeItem *parentItem = childItem->parent();
 
-    if (parentItem == m_rootItem || parentItem == nullptr)
+    if (parentItem == m_rootItem || parentItem == nullptr) {
         return QModelIndex();
+    }
 
     return createIndex(parentItem->row(), 0, parentItem);
 }
@@ -649,7 +654,7 @@ QModelIndex FileChangeModel::parent(const QModelIndex &child) const
 /**
  * @brief 行数を取得
  *
- * 指定された親アイテムの持つ子アイテムの数を返します。
+ * 指定された親アイテムの持つ子アイテムの数を返す
  *
  * @param parent 親のQModelIndex
  * @return 行数 (子アイテムの数)
@@ -663,7 +668,7 @@ int FileChangeModel::rowCount(const QModelIndex &parent) const
 /**
  * @brief 列数を取得
  *
- * このモデルは常に1列です。
+ * このモデルは常に1列である
  *
  * @param parent 親のQModelIndex (未使用)
  * @return 列数 (常に1)
@@ -677,7 +682,7 @@ int FileChangeModel::columnCount(const QModelIndex &parent) const
 /**
  * @brief データを取得
  *
- * 指定されたインデックスとロールに対応するデータを返します。
+ * 指定されたインデックスとロールに対応するデータを返す
  *
  * @param index データを取得したいQModelIndex
  * @param role データのロール (PathRole, NameRoleなど)
@@ -713,7 +718,7 @@ QVariant FileChangeModel::data(const QModelIndex &index, int role) const
 /**
  * @brief ロール名を取得
  *
- * QML等で使用するロール名のマッピングを返します。
+ * QML等で使用するロール名のマッピングを返す
  *
  * @return ロール名のハッシュマップ
  */
@@ -732,8 +737,8 @@ QHash<int, QByteArray> FileChangeModel::roleNames() const
 /**
  * @brief モデルデータの構築
  *
- * ファイル変更リストからツリー構造のモデルデータを構築します。
- * 重複を除外し、ディレクトリ階層を適切に生成します。
+ * ファイル変更リストからツリー構造のモデルデータを構築する
+ * 重複を除外し、ディレクトリ階層を適切に生成
  *
  * @param changes ファイル変更リスト
  */
@@ -742,29 +747,29 @@ void FileChangeModel::setupModelData(const QStringList &changes)
     beginResetModel();
     clearModel();
 
-    // --- フラットモード: 2 スナップショット比較ダイアログ用 ---------------
-    // ListView は QAbstractItemModel のルート直下しか反復しないため、
-    // 各変更を m_rootItem の直接の子として 1 行ずつ追加する。
-    // 中間ディレクトリは生成せず、重複除去のみ行う。
+    // --- フラットモード: 2 スナップショット比較ダイアログ用 ---
+    // ListViewは、QAbstractItemModelのルート直下しか反復しないため、各変更をm_rootItemの直接の子として1行ずつ追加する
+    // 中間ディレクトリは生成せず、重複除去のみ行う
     if (m_flatMode) {
         QSet<QString> seen;
         for (const QString &line : changes) {
-            if (line.isEmpty())
+            if (line.isEmpty()) {
                 continue;
+            }
+
             QRegularExpression re("\\s+");
             QStringList parts = line.split(re, Qt::SkipEmptyParts);
-            if (parts.size() < 2)
+            if (parts.size() < 2) {
                 continue;
+            }
 
             const QString statusChars = parts[0];
             const QString filePath    = parts[1];
-
             const bool    isDirectory    = filePath.endsWith('/');
-            const QString normalizedPath = isDirectory
-                ? filePath.left(filePath.length() - 1)
-                : filePath;
-            if (seen.contains(normalizedPath))
+            const QString normalizedPath = isDirectory ? filePath.left(filePath.length() - 1) : filePath;
+            if (seen.contains(normalizedPath)) {
                 continue;
+            }
             seen.insert(normalizedPath);
 
             FileChangeItem::ChangeType type = parseChangeType(statusChars.at(0));
@@ -775,8 +780,8 @@ void FileChangeModel::setupModelData(const QStringList &changes)
         return;
     }
 
-    // --- ツリーモード (従来): 対カレント比較 / 復元 UI 用 -------------------
-    // アイテムマップ：正規化パス (スラッシュなし)→ FileChangeItem
+    // --- ツリーモード (従来): 対カレント比較 / 復元UI用 ---
+    // アイテムマップ：正規化パス (スラッシュなし) --> FileChangeItem
     QMap<QString, FileChangeItem*> itemMap;
     itemMap[""] = m_rootItem;
 
@@ -858,9 +863,7 @@ void FileChangeModel::setupModelData(const QStringList &changes)
                 // 中間ディレクトリの処理
                 if (!itemMap.contains(currentPath)) {
                     // まだ作成されていない中間ディレクトリを作成
-                    FileChangeItem *dirItem = new FileChangeItem(currentPath + "/",
-                                                                FileChangeItem::Modified,
-                                                                QString(), parentItem);
+                    FileChangeItem *dirItem = new FileChangeItem(currentPath + "/", FileChangeItem::Modified, QString(), parentItem);
                     parentItem->appendChild(dirItem);
                     itemMap[currentPath] = dirItem;
                 }
@@ -875,7 +878,7 @@ void FileChangeModel::setupModelData(const QStringList &changes)
 /**
  * @brief モデルをクリア
  *
- * ルートアイテムを削除して新しいルートアイテムを作成し、モデルをリセットします。
+ * ルートアイテムを削除して新しいルートアイテムを作成し、モデルをリセットする
  */
 void FileChangeModel::clearModel()
 {
@@ -886,7 +889,7 @@ void FileChangeModel::clearModel()
 /**
  * @brief インデックスからアイテムを取得
  *
- * QModelIndexに対応するFileChangeItemを返します。
+ * QModelIndexに対応するFileChangeItemを返す
  *
  * @param index QModelIndex
  * @return FileChangeItemへのポインタ (無効なインデックスの場合はルートアイテム)
@@ -895,8 +898,9 @@ FileChangeItem *FileChangeModel::getItem(const QModelIndex &index) const
 {
     if (index.isValid()) {
         FileChangeItem *item = static_cast<FileChangeItem*>(index.internalPointer());
-        if (item)
+        if (item) {
             return item;
+        }
     }
     return m_rootItem;
 }
@@ -904,7 +908,7 @@ FileChangeItem *FileChangeModel::getItem(const QModelIndex &index) const
 /**
  * @brief 変更タイプをパース
  *
- * Snapperのステータス文字から変更タイプを判定します。
+ * Snapperのステータス文字から変更タイプを判定する
  *
  * @param statusChar ステータス文字 ('+', '-', 'c', 'm', 't'など)
  * @return 変更タイプ
@@ -929,9 +933,10 @@ FileChangeItem::ChangeType FileChangeModel::parseChangeType(const QChar &statusC
 /**
  * @brief アイテムのチェック状態を設定
  *
- * 指定されたパスのアイテムのチェック状態を設定します。
- * ディレクトリの場合は配下のすべてのアイテムも再帰的に設定されます。
- * チェックを外す場合は、明示的にチェックを外したフラグが立てられます。
+ * 指定されたパスのアイテムのチェック状態を設定する
+ * ディレクトリの場合は配下の全てのアイテムも再帰的に設定される
+ *
+ * チェックを外す場合は、明示的にチェックを外したフラグが立てられる
  *
  * @param filePath ファイルパス
  * @param checked チェック状態 (true/false)
@@ -946,7 +951,8 @@ void FileChangeModel::setItemChecked(const QString &filePath, bool checked)
         // チェックを外す場合は、明示的にチェックを外したフラグを立てる
         if (!checked) {
             item->setExplicitlyUnchecked(true);
-        } else {
+        }
+        else {
             // チェックを入れる場合は、フラグをクリア
             item->setExplicitlyUnchecked(false);
         }
@@ -958,8 +964,8 @@ void FileChangeModel::setItemChecked(const QString &filePath, bool checked)
 /**
  * @brief アイテムのチェック状態を再帰的に設定
  *
- * 指定されたアイテムとその配下のすべてのアイテムのチェック状態を再帰的に設定します。
- * 明示的にチェックを外された子アイテムはスキップされます。
+ * 指定されたアイテムとその配下の全てのアイテムのチェック状態を再帰的に設定する
+ * 明示的にチェックを外された子アイテムはスキップされる
  *
  * @param item 対象のFileChangeItem
  * @param index 対象のQModelIndex
@@ -967,8 +973,9 @@ void FileChangeModel::setItemChecked(const QString &filePath, bool checked)
  */
 void FileChangeModel::setItemCheckedRecursive(FileChangeItem *item, const QModelIndex &index, bool checked)
 {
-    if (!item)
+    if (!item) {
         return;
+    }
 
     // 現在のアイテムのチェック状態を設定
     item->setChecked(checked);
@@ -993,8 +1000,8 @@ void FileChangeModel::setItemCheckedRecursive(FileChangeItem *item, const QModel
 /**
  * @brief チェックされたアイテムのリストを取得
  *
- * チェックされたすべてのアイテムのパスを収集し、復元順序に最適化してリストを返します。
- * ディレクトリ階層の深い順にソートされます。
+ * チェックされた全てのアイテムのパスを収集し、復元順序に最適化してリストを返す
+ * ディレクトリ階層の深い順にソートされる
  *
  * @return チェックされたアイテムのパスリスト
  */
@@ -1043,7 +1050,7 @@ QStringList FileChangeModel::getCheckedItems() const
     std::sort(directories.begin(), directories.end(), sortByDepth);
     std::sort(files.begin(), files.end(), sortByDepth);
 
-    // 復元リストを構築：ファイル → ディレクトリの順
+    // 復元リストを構築：ファイル --> ディレクトリの順
     // (深い階層から浅い階層へ)
     QStringList sortedPaths;
     sortedPaths.append(files);
@@ -1052,8 +1059,16 @@ QStringList FileChangeModel::getCheckedItems() const
     return sortedPaths;
 }
 
+/**
+ * @brief 復元バッチサイズを更新する
+ *
+ * 入力値を 1..1000 に丸めた上で保持し、設定ファイルへ永続化する
+ *
+ * @param size ユーザが要求したバッチサイズ
+ */
 void FileChangeModel::setRestoreBatchSize(int size)
 {
+    // UIや設定値の揺れを吸収するため、有効範囲へ丸める
     size = qBound(1, size, 1000);
     if (m_restoreBatchSize != size) {
         m_restoreBatchSize = size;
@@ -1063,6 +1078,13 @@ void FileChangeModel::setRestoreBatchSize(int size)
     }
 }
 
+/**
+ * @brief 直接復元モードの有効 / 無効を更新する
+ *
+ * 値が変化した場合のみ内部状態と設定ファイルを更新する
+ *
+ * @param use trueなら直接復元を使用する
+ */
 void FileChangeModel::setUseDirectRestore(bool use)
 {
     if (m_useDirectRestore != use) {
@@ -1073,6 +1095,14 @@ void FileChangeModel::setUseDirectRestore(bool use)
     }
 }
 
+/**
+ * @brief ChangeType列挙値をD-Bus送信用の文字列へ変換する
+ *
+ * RestoreFiles系APIが期待するlower-case文字列へ正規化する
+ *
+ * @param type 変換対象の変更種別
+ * @return 対応するchangeType文字列
+ */
 QString FileChangeModel::changeTypeToString(FileChangeItem::ChangeType type)
 {
     switch (type) {
@@ -1084,12 +1114,23 @@ QString FileChangeModel::changeTypeToString(FileChangeItem::ChangeType type)
     return QStringLiteral("modified");
 }
 
+/**
+ * @brief チェック済みアイテムを changeType 付きで再帰収集する
+ *
+ * ディレクトリは自身の変更と配下の変更を分けて扱い、
+ * 最終的にRestoreFiles系APIへ渡せるpath / changeType配列を構築する
+ *
+ * @param parent 走査開始ノード
+ * @param paths 収集したパスの格納先
+ * @param changeTypes 収集したchangeType文字列の格納先
+ */
 void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStringList &paths, QStringList &changeTypes) const
 {
     for (int i = 0; i < parent->childCount(); ++i) {
         FileChangeItem *child = parent->child(i);
 
         if (child->isChecked()) {
+            // チェックされたノードは、自身と必要なら配下の両方を収集対象にする
             QString itemPath = child->path();
 
             // パスを正規化 (末尾のスラッシュを削除)
@@ -1098,6 +1139,8 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
             }
 
             bool hasChildren = (child->childCount() > 0);
+            // Modified は「親ディレクトリとして存在するだけ」の場合があるため、
+            // ディレクトリエントリ自体を送るかどうかは別途判定する
             bool isActualChange = (child->changeType() != FileChangeItem::Modified);
 
             if (hasChildren) {
@@ -1117,6 +1160,7 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
             }
         }
         else {
+            // 親が未チェックでも、配下に個別選択された項目があれば拾う
             collectCheckedItemsWithTypes(child, paths, changeTypes);
         }
     }
@@ -1125,14 +1169,14 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
 /**
  * @brief チェックされたアイテムを復元
  *
- * チェックされたすべてのアイテムを復元します。
- * 大量のファイルがある場合はバッチに分割して処理されます。
+ * チェックされた全てのアイテムを復元する
+ * 大量のファイルがある場合はバッチに分割して処理される
  *
- * @return 復元処理が開始された場合はtrue、エラーの場合はfalse
+ * @return 復元処理が開始された場合: true、エラーの場合: false
  */
 bool FileChangeModel::restoreCheckedItems()
 {
-    // 両方のモードでchangeTypeを収集する (RestoreFiles/RestoreFilesDirect共にchangeTypes必須)
+    // 両方のモードでchangeTypeを収集する (RestoreFiles() / RestoreFilesDirect() 共にchangeTypes必須)
     QStringList checkedPaths;
     QStringList checkedChangeTypes;
 
@@ -1173,9 +1217,9 @@ bool FileChangeModel::restoreCheckedItems()
         }
     }
 
-    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)。
-    // バッチの最初の RestoreFiles / RestoreFilesDirect 呼び出しで Polkit が
-    // プロンプトを出し、以降は `auth_admin_keep` の cookie により抑止される。
+    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)
+    // バッチの最初の RestoreFiles() / RestoreFilesDirect() 呼び出しで、
+    // Polkitがプロンプトを出し、以降はauth_admin_keepのcookieにより抑止される
 
     // D-Busシグナルを接続して進捗を受信
     bool connected = QDBusConnection::systemBus().connect(
@@ -1221,9 +1265,10 @@ bool FileChangeModel::restoreCheckedItems()
 /**
  * @brief 次のバッチを処理
  *
- * 復元処理のバッチを順次処理します。
- * すべてのバッチが完了すると、完了シグナルを発行します。
- * キャンセルが要求された場合は、残りのバッチをスキップします。
+ * 復元処理のバッチを順次処理する
+ * 全てのバッチが完了すると、完了シグナルを発行する
+ *
+ * キャンセルが要求された場合は、残りのバッチをスキップする
  */
 void FileChangeModel::processNextBatch()
 {
@@ -1243,7 +1288,7 @@ void FileChangeModel::processNextBatch()
     }
 
     if (m_currentBatchIndex >= m_restoreBatches.size()) {
-        // すべてのバッチが処理完了
+        // 全てのバッチが処理完了
         QDBusConnection::systemBus().disconnect(
             "com.presire.qsnapper.Operations",
             "/com/presire/qsnapper/Operations",
@@ -1278,8 +1323,9 @@ void FileChangeModel::processNextBatch()
         if (reply.isError()) {
             qWarning() << "Failed to restore batch:" << reply.error().message();
             m_restoreHasError = true;
-            // エラーが発生してもすべてのバッチを処理する
-        } else {
+            // エラーが発生しても全てのバッチを処理する
+        }
+        else {
             bool success = reply.value();
             if (!success) {
                 m_restoreHasError = true;
@@ -1291,7 +1337,7 @@ void FileChangeModel::processNextBatch()
 
         // バッチ完了時に明示的に進捗を通知
         emit restoreProgress(m_processedFilesCount, m_totalFilesCount,
-                           QString("Batch %1/%2 completed").arg(m_currentBatchIndex + 1).arg(m_restoreBatches.size()));
+                             QString("Batch %1/%2 completed").arg(m_currentBatchIndex + 1).arg(m_restoreBatches.size()));
 
         m_currentBatchIndex++;
 
@@ -1305,7 +1351,7 @@ void FileChangeModel::processNextBatch()
 /**
  * @brief アイテムのインデックスを検索
  *
- * 指定されたパスのアイテムを再帰的に検索し、そのQModelIndexを返します。
+ * 指定されたパスのアイテムを再帰的に検索し、そのQModelIndexを返す
  *
  * @param parent 検索開始アイテム
  * @param path 検索するパス
@@ -1332,8 +1378,8 @@ QModelIndex FileChangeModel::findItemIndex(FileChangeItem *parent, const QString
 /**
  * @brief チェックされたアイテムを収集
  *
- * チェックされたアイテムのパスを再帰的に収集します。
- * ディレクトリの場合は、配下のすべてのファイルも収集されます。
+ * チェックされたアイテムのパスを再帰的に収集する
+ * ディレクトリの場合は、配下の全てのファイルも収集される
  *
  * @param parent 収集開始アイテム
  * @param paths 収集されたパスのリスト (出力)
@@ -1382,10 +1428,10 @@ void FileChangeModel::collectCheckedItems(FileChangeItem *parent, QStringList &p
 }
 
 /**
- * @brief すべてのファイルを再帰的に収集
+ * @brief 全てのファイルを再帰的に収集
  *
- * 指定されたアイテム配下のすべてのファイルとディレクトリを再帰的に収集します。
- * チェックが外されているアイテムはスキップされます。
+ * 指定されたアイテム配下の全てのファイルとディレクトリを再帰的に収集する
+ * チェックが外されているアイテムはスキップされる
  *
  * @param parent 収集開始アイテム
  * @param paths 収集されたパスのリスト (出力)
@@ -1433,9 +1479,10 @@ void FileChangeModel::collectAllFilesRecursive(FileChangeItem *parent, QStringLi
 /**
  * @brief 復元処理をキャンセル
  *
- * 復元処理のキャンセルを要求します。
- * 現在実行中のバッチは完了しますが、次のバッチ以降はスキップされます。
- * 既に復元されたファイルやディレクトリはそのまま残ります。
+ * 復元処理のキャンセルを要求する
+ *
+ * 現在実行中のバッチは完了するが、次のバッチ以降はスキップされる
+ * 既に復元されたファイルやディレクトリはそのまま残る
  */
 void FileChangeModel::cancelRestore()
 {

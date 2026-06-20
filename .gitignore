@@ -108,3 +108,4 @@ vgcore.*
 **/yast-snapper/
 **/libyui/
 **/selinux/qsnapper-architecture.drawio
+.opencode/

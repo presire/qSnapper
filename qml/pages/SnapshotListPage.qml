@@ -86,7 +86,7 @@ Page {
     // グループ化モデル (Pre/Postペアを1行にまとめる)
     SnapshotGroupModel {
         id: snapshotGroupModel
-        sourceModel: snapshotListModel
+        snapshotListModel: snapshotListModel
     }
 
     // テーブルカラム幅の一元管理

@@ -39,10 +39,9 @@ private:
     void resetIdleTimer();
 
     /**
-     * @brief configNameを正規化 + 検証し、不正ならD-Busエラー応答を返す
+     * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を返す
      *
-     * 旧 validateConfigOrFail のリプレースメント
-     * 空文字列の入力は "root" に正規化した上で qsnapper::security::validateConfigName で検証する
+     * 空文字列の入力は "root" に正規化した上で、qsnapper::security::validateConfigNameで検証する
      * これにより呼び出し側の "空なら root" デフォルト割当パターンが不要になり、
      * 空入力に対する一貫した扱い (常に "root" として受理) を保証する
      *
@@ -57,7 +56,7 @@ private:
     /**
      * @brief Polkit認証を実行する
      *
-     * 認証失敗時はD-Busエラー応答を送信する。
+     * 認証失敗時はD-Busエラー応答を送信する
      *
      * @param actionId Polkitアクションid
      * @return 認証成功時true
@@ -201,14 +200,14 @@ public slots:
                                   int number2);
 
     /**
-     * @brief 指定ファイルの現在とスナップショット間のunified diff + "詳細"を返す
+     * @brief 指定ファイルの現在とスナップショット間のunified diff + 詳細を返す
      */
     QString GetFileDiffAndDetails(const QString &configName,
                                   int snapshotNumber,
                                   const QString &filePath);
 
     /**
-     * @brief 指定ファイルの2スナップショット間のunified diff + "詳細"を返す
+     * @brief 指定ファイルの2スナップショット間のunified diff + 詳細を返す
      */
     QString GetFileDiffBetween(const QString &configName,
                                int number1,
@@ -228,7 +227,7 @@ public slots:
     /**
      * @brief ファイルをスナップショットから復元する (高速経路)
      *
-     * btrfs reflinkを優先、typechangedは既存ファイル削除後にコピー
+     * btrfs reflinkを優先、typechangedは既存ファイル削除後にコピー。
      */
     bool RestoreFilesDirect(const QString &configName,
                             int snapshotNumber,
@@ -250,6 +249,7 @@ public slots:
      * @brief Snapperクォータ機能をセットアップする
      */
     bool SetupQuota(const QString &configName);
+
 
 signals:
     /**

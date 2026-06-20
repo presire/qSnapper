@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.3 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.4 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -36,6 +36,7 @@ set(SOURCES
     src/filechangemodel.cpp
     src/thememanager.cpp
     src/snapshotgroupmodel.cpp
+    src/singleinstanceguard.cpp
 )
 
 set(HEADERS
@@ -46,6 +47,7 @@ set(HEADERS
     include/filechangemodel.h
     include/thememanager.h
     include/snapshotgroupmodel.h
+    include/singleinstanceguard.h
 )
 
 qt6_add_executable(qsnapper ${SOURCES} ${HEADERS})
@@ -125,11 +127,13 @@ set(DBUS_SERVICE_SOURCES
     src/dbusservice/main.cpp
     src/dbusservice/snapshotoperations.cpp
     src/dbusservice/inputvalidator.cpp
+    src/dbusservice/filesystemhelpers.cpp
 )
 
 set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
     src/dbusservice/inputvalidator.h
+    src/dbusservice/filesystemhelpers.h
 )
 
 qt6_add_executable(qsnapper-dbus-service
@@ -202,7 +206,7 @@ install(FILES systemd/tmpfiles.d/qsnapper.conf
     DESTINATION lib/tmpfiles.d
 )
 
-# アプリケーションアイコン (hicolor theme, 複数解像度)
+# アプリケーションアイコン (hicolorテーマ, 複数解像度)
 install(FILES icons/qSnapper@64.png
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/64x64/apps
     RENAME qSnapper.png

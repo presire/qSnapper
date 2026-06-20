@@ -104,6 +104,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 - Qt6 development packages
 - PolicyKit-Qt6 development files
 - Snapper development headers
+- scdoc (optional, for generating the man page; if absent, the build skips man page generation)
 
 ## Installation
 
@@ -117,7 +118,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 sudo zypper install cmake gcc-c++ \
                     qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-devel qt6-linguist-devel \
                     polkit-devel libpolkit-qt6-1-devel \
-                    libsnapper-devel libbtrfsutil-devel
+                    libsnapper-devel libbtrfsutil-devel scdoc
 ```
 
 **RHEL 9 / 10**
@@ -126,7 +127,7 @@ sudo zypper install cmake gcc-c++ \
 sudo dnf install cmake gcc-c++ \
                  qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel qt6-linguist-devel \
                  polkit-devel polkit-qt6-1-devel \
-                 snapper-devel btrfs-progs-devel
+                 snapper-devel btrfs-progs-devel scdoc
 ```
 
 #### 2. Build and Install
@@ -179,6 +180,7 @@ The installation process automatically installs:
 - PolicyKit policy to `/usr/share/polkit-1/actions/`
 - Desktop entry to `/usr/share/applications/`
 - Application icon to `/usr/share/icons/hicolor/128x128/apps/`
+- Manual page to `/usr/share/man/man1/` (view with `man qsnapper`; only when scdoc is available at build time)
 
 Reload D-Bus and PolicyKit:  
 
@@ -382,6 +384,8 @@ qSnapper/
 ├── icons/                   # Application icons
 ├── dbus/                    # D-Bus configuration files
 ├── polkit/                  # PolicyKit policy files
+├── man/                     # Manual page source (scdoc)
+│   └── qsnapper.1.scd      # qsnapper(1) man page source
 ├── selinux/                 # SELinux policy module
 │   ├── qsnapper.te          # Type enforcement rules
 │   ├── qsnapper.if          # Interface definitions

@@ -17,7 +17,6 @@
 #include <snapper/Version.h>
 #include <btrfsutil.h>
 #include <algorithm>
-#include <filesystem>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
 #include <linux/fs.h>
@@ -25,8 +24,12 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <utime.h>
+#include <pwd.h>
+#include <grp.h>
+#include <errno.h>
 #include "snapshotoperations.h"
 #include "inputvalidator.h"
+#include "filesystemhelpers.h"
 
 // 古いlibsnapper (7.x未満) には LIBSNAPPER_VERSION_AT_LEAST マクロが存在しない
 #ifndef LIBSNAPPER_VERSION_AT_LEAST
@@ -57,6 +60,92 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 // ============================================================================
 
 namespace {
+
+    QString siblingTemporaryPath(const QString &path, const QString &tag, int attempt)
+    {
+        const int slashIndex = path.lastIndexOf(QLatin1Char('/'));
+        const QString dirPath = slashIndex <= 0 ? QStringLiteral("/") : path.left(slashIndex);
+        const QString baseName = slashIndex < 0 ? path : path.mid(slashIndex + 1);
+
+        return dirPath
+                + QLatin1Char('/')
+                + QLatin1Char('.')
+                + baseName
+                + QStringLiteral(".") + tag
+                + QStringLiteral(".") + QString::number(QCoreApplication::applicationPid())
+                + QStringLiteral(".") + QString::number(QDateTime::currentMSecsSinceEpoch())
+                + QStringLiteral(".") + QString::number(attempt);
+    }
+
+    // live path 上の退避 rename も parent dirfd を固定した renameat() に寄せる。
+    // これにより intermediate parent の symlink 差し替えに依存しない。
+    bool movePathAsideNoFollow(const QString &path, QString *movedPath)
+    {
+        if (movedPath) {
+            movedPath->clear();
+        }
+
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            const QString candidate = siblingTemporaryPath(path, QStringLiteral("qsnapper-old"), attempt);
+
+            if (qsnapper::security::safeRenamePathNoFollow(path, candidate)) {
+                if (movedPath) {
+                    *movedPath = candidate;
+                }
+                return true;
+            }
+
+            if (errno == ENOENT) {
+                return true;
+            }
+
+            if (errno == EEXIST || errno == ENOTEMPTY) {
+                continue;
+            }
+
+            return false;
+        }
+
+        errno = EEXIST;
+        return false;
+    }
+
+    QString ownerName(uid_t uid)
+    {
+        if (passwd *pwd = ::getpwuid(uid)) {
+            return QString::fromLocal8Bit(pwd->pw_name);
+        }
+        return QString::number(uid);
+    }
+
+    QString groupName(gid_t gid)
+    {
+        if (group *grp = ::getgrgid(gid)) {
+            return QString::fromLocal8Bit(grp->gr_name);
+        }
+        return QString::number(gid);
+    }
+
+    QString permsToOctal(mode_t mode)
+    {
+        return QString("%1").arg(static_cast<unsigned int>(mode & 07777), 4, 8, QChar('0'));
+    }
+
+    QString readTextFileNoFollow(const QString &path)
+    {
+        const int fd = qsnapper::security::safeOpenRegularFileRead(path);
+        if (fd < 0) {
+            return {};
+        }
+
+        QFile file;
+        if (!file.open(fd, QIODevice::ReadOnly | QIODevice::Text, QFileDevice::AutoCloseHandle)) {
+            ::close(fd);
+            return {};
+        }
+
+        return QString::fromUtf8(file.readAll());
+    }
 
     struct DiffOp {
         enum Type { Equal, Delete, Insert };
@@ -177,15 +266,13 @@ namespace {
     */
     static QString generateUnifiedDiff(const QString &oldPath, const QString &newPath)
     {
-        QFile oldFile(oldPath), newFile(newPath);
-        if (!oldFile.open(QIODevice::ReadOnly | QIODevice::Text) ||
-            !newFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        const QString oldContent = readTextFileNoFollow(oldPath);
+        const QString newContent = readTextFileNoFollow(newPath);
+        if (oldContent.isNull() || newContent.isNull())
             return {};
 
-        QStringList a = QString::fromUtf8(oldFile.readAll()).split('\n');
-        QStringList b = QString::fromUtf8(newFile.readAll()).split('\n');
-        oldFile.close();
-        newFile.close();
+        QStringList a = oldContent.split('\n');
+        QStringList b = newContent.split('\n');
 
         // ファイル末尾の改行で生じる空要素を除去
         if (!a.isEmpty() && a.last().isEmpty()) a.removeLast();
@@ -272,7 +359,7 @@ namespace {
 /**
  * @brief SnapshotOperationsクラスのコンストラクタ
  *
- * スナップショット操作を管理するクラスを初期化します
+ * スナップショット操作を管理するクラスを初期化する
  *
  * @param parent 親QObjectポインタ
  */
@@ -410,24 +497,18 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
 }
 
 /**
- * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を送信する
+ * @brief configNameを正規化 + 検証し、不正ならD-Busエラー応答を送信する
  *
  * 空文字列入力を "root" に正規化した上で qsnapper::security::validateConfigName で検証する
  * 無効な場合はQDBusError::InvalidArgsを送信し、std::nulloptを返す
  * Polkitプロンプトを出す前に呼び出して、攻撃者が任意configNameでpolkitを浪費するのを防ぐ
- *
- * 旧 validateConfigOrFail のリプレースメント
- * 「空 → "root"」のデフォルト割当をここに集約することで、
- * 呼び出し側の `configName.isEmpty() ? "root" : configName` パターンを排除する
  *
  * @param configName 検査する設定名 (空文字列は "root" として扱う)
  * @return 正規化後の設定名 (有効時)、無効でエラー送信済み (std::nullopt)
  */
 std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &configName)
 {
-    const QString effective = configName.isEmpty()
-                                 ? QStringLiteral("root")
-                                 : configName;
+    const QString effective = configName.isEmpty() ? QStringLiteral("root") : configName;
     if (!qsnapper::security::validateConfigName(effective)) {
         sendErrorReply(QDBusError::InvalidArgs,
                        QStringLiteral("Invalid configName"));
@@ -617,7 +698,7 @@ QStringList SnapshotOperations::ListConfigs()
  */
 QString SnapshotOperations::ListSnapshots(const QString &configName)
 {
-    // resolveConfigOrFail が空文字列を "root" に正規化した上で検証する
+    // resolveConfigOrFailが空文字列を "root" に正規化した上で検証する
     // 失敗時はD-Busエラー応答が送出済み
     const auto cfg = resolveConfigOrFail(configName);
     if (!cfg) {
@@ -666,6 +747,7 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
     if (!cfg) {
         return QString();
     }
+
     if (!checkAuthorization("com.presire.qsnapper.create-snapshot")) {
         return QString();
     }
@@ -1079,19 +1161,18 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
 
         return output;
 
-    } catch (const snapper::Exception &e) {
+    }
+    catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file changes:" << e.what();
         sendErrorReply(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
         return QString();
     }
 }
 
-
-
 /**
- * @brief 2 つのスナップショット間のファイル変更リストを取得
+ * @brief 2つのスナップショット間のファイル変更リストを取得
  *
- * snapshot1 → snapshot2の差分を取得する
+ * snapshot1 -> snapshot2の差分を取得する
  * 現在のシステム状態は使用しない
  */
 QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int number1, int number2)
@@ -1165,6 +1246,11 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
         return QString();
     }
 
+    if (!qsnapper::security::validateAbsoluteFilePath(filePath)) {
+        sendErrorReply(QDBusError::InvalidArgs, "Invalid file path");
+        return QString();
+    }
+
     if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
         return QString();
     }
@@ -1206,42 +1292,30 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
         if (statusStr.isEmpty()) statusStr = ".....";
         statusStr = statusStr.leftJustified(5, '.');
 
-        auto permsToOctal = [](QFile::Permissions p) -> QString {
-            int mode = 0;
-            if (p & QFile::ReadOwner)  mode |= 0400;
-            if (p & QFile::WriteOwner) mode |= 0200;
-            if (p & QFile::ExeOwner)   mode |= 0100;
-            if (p & QFile::ReadGroup)  mode |= 0040;
-            if (p & QFile::WriteGroup) mode |= 0020;
-            if (p & QFile::ExeGroup)   mode |= 0010;
-            if (p & QFile::ReadOther)  mode |= 0004;
-            if (p & QFile::WriteOther) mode |= 0002;
-            if (p & QFile::ExeOther)   mode |= 0001;
-            return QString("%1").arg(mode, 4, 8, QChar('0'));
-        };
-
         QString detailsPart;
         detailsPart += "status=" + statusStr + "\n";
 
         // snapshot1をLOC_PREとして扱い、snapshot2をLOC_POSTとして扱う
         QString path1 = QString::fromStdString(fileIt->getAbsolutePath(snapper::LOC_PRE));
-        QFileInfo info1(path1);
-        if (info1.exists()) {
-            detailsPart += "snapshotPerms=" + permsToOctal(info1.permissions()) + "\n";
-            detailsPart += "snapshotOwner=" + info1.owner() + "\n";
-            detailsPart += "snapshotGroup=" + info1.group() + "\n";
+        struct stat info1;
+        const bool hasInfo1 = qsnapper::security::safeLstat(path1, &info1);
+        if (hasInfo1) {
+            detailsPart += "snapshotPerms=" + permsToOctal(info1.st_mode) + "\n";
+            detailsPart += "snapshotOwner=" + ownerName(info1.st_uid) + "\n";
+            detailsPart += "snapshotGroup=" + groupName(info1.st_gid) + "\n";
         }
 
         QString path2 = QString::fromStdString(fileIt->getAbsolutePath(snapper::LOC_POST));
-        QFileInfo info2(path2);
-        if (info2.exists()) {
-            detailsPart += "currentPerms=" + permsToOctal(info2.permissions()) + "\n";
-            detailsPart += "currentOwner=" + info2.owner() + "\n";
-            detailsPart += "currentGroup=" + info2.group() + "\n";
+        struct stat info2;
+        const bool hasInfo2 = qsnapper::security::safeLstat(path2, &info2);
+        if (hasInfo2) {
+            detailsPart += "currentPerms=" + permsToOctal(info2.st_mode) + "\n";
+            detailsPart += "currentOwner=" + ownerName(info2.st_uid) + "\n";
+            detailsPart += "currentGroup=" + groupName(info2.st_gid) + "\n";
         }
 
         QString diffPart;
-        if (info1.exists() && info2.exists()) {
+        if (hasInfo1 && hasInfo2) {
             diffPart = generateUnifiedDiff(path1, path2);
         }
 
@@ -1258,7 +1332,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
 /**
  * @brief ファイルの差分と詳細情報を一括取得
  *
- * 1回のComparisonオブジェクト生成で、差分(diff)と詳細情報(パーミッション等)の両方を取得する
+ * 1回のComparisonオブジェクト生成で、差分 (diff) と 詳細情報 (パーミッション等) の両方を取得する
  *
  * @param configName Snapper設定名
  * @param snapshotNumber 比較元のスナップショット番号
@@ -1269,6 +1343,11 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
 {
     const auto cfg = resolveConfigOrFail(configName);
     if (!cfg) {
+        return QString();
+    }
+
+    if (!qsnapper::security::validateAbsoluteFilePath(filePath)) {
+        sendErrorReply(QDBusError::InvalidArgs, "Invalid file path");
         return QString();
     }
 
@@ -1300,7 +1379,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
             return QString();
         }
 
-        // --- Details部の構築 ---
+        // Details部の構築
         unsigned int status = fileIt->getPreToPostStatus();
         QString statusStr;
         if (status & snapper::CREATED) statusStr += "+";
@@ -1315,42 +1394,30 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
         if (statusStr.isEmpty()) statusStr = ".....";
         statusStr = statusStr.leftJustified(5, '.');
 
-        auto permsToOctal = [](QFile::Permissions p) -> QString {
-            int mode = 0;
-            if (p & QFile::ReadOwner)  mode |= 0400;
-            if (p & QFile::WriteOwner) mode |= 0200;
-            if (p & QFile::ExeOwner)   mode |= 0100;
-            if (p & QFile::ReadGroup)  mode |= 0040;
-            if (p & QFile::WriteGroup) mode |= 0020;
-            if (p & QFile::ExeGroup)   mode |= 0010;
-            if (p & QFile::ReadOther)  mode |= 0004;
-            if (p & QFile::WriteOther) mode |= 0002;
-            if (p & QFile::ExeOther)   mode |= 0001;
-            return QString("%1").arg(mode, 4, 8, QChar('0'));
-        };
-
         QString detailsPart;
         detailsPart += "status=" + statusStr + "\n";
 
         QString snapshotPath = QString::fromStdString(fileIt->getAbsolutePath(snapper::LOC_PRE));
-        QFileInfo snapshotInfo(snapshotPath);
-        if (snapshotInfo.exists()) {
-            detailsPart += "snapshotPerms=" + permsToOctal(snapshotInfo.permissions()) + "\n";
-            detailsPart += "snapshotOwner=" + snapshotInfo.owner() + "\n";
-            detailsPart += "snapshotGroup=" + snapshotInfo.group() + "\n";
+        struct stat snapshotInfo;
+        const bool hasSnapshotInfo = qsnapper::security::safeLstat(snapshotPath, &snapshotInfo);
+        if (hasSnapshotInfo) {
+            detailsPart += "snapshotPerms=" + permsToOctal(snapshotInfo.st_mode) + "\n";
+            detailsPart += "snapshotOwner=" + ownerName(snapshotInfo.st_uid) + "\n";
+            detailsPart += "snapshotGroup=" + groupName(snapshotInfo.st_gid) + "\n";
         }
 
         QString currentPath = QString::fromStdString(fileIt->getAbsolutePath(snapper::LOC_SYSTEM));
-        QFileInfo currentInfo(currentPath);
-        if (currentInfo.exists()) {
-            detailsPart += "currentPerms=" + permsToOctal(currentInfo.permissions()) + "\n";
-            detailsPart += "currentOwner=" + currentInfo.owner() + "\n";
-            detailsPart += "currentGroup=" + currentInfo.group() + "\n";
+        struct stat currentInfo;
+        const bool hasCurrentInfo = qsnapper::security::safeLstat(currentPath, &currentInfo);
+        if (hasCurrentInfo) {
+            detailsPart += "currentPerms=" + permsToOctal(currentInfo.st_mode) + "\n";
+            detailsPart += "currentOwner=" + ownerName(currentInfo.st_uid) + "\n";
+            detailsPart += "currentGroup=" + groupName(currentInfo.st_gid) + "\n";
         }
 
-        // --- Diff部の取得 ---
+        // Diff部の取得
         QString diffPart;
-        if (snapshotInfo.exists() && currentInfo.exists()) {
+        if (hasSnapshotInfo && hasCurrentInfo) {
             diffPart = generateUnifiedDiff(snapshotPath, currentPath);
         }
 
@@ -1367,7 +1434,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
 /**
  * @brief ファイルをスナップショットから復元する (YaST互換経路)
  *
- * 内部で restoreFilesImpl を呼び出すだけのラッパ
+ * 内部で restoreFilesImpl を呼び出すだけのラッパー
  * reflinkは使用せず、typechangedの事前削除も行わない
  *
  * @param configName      Snapper設定名
@@ -1414,7 +1481,7 @@ bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snaps
  *   - removeOnTypechanged: typechanged時に既存ファイルを先にrmするか (ディレクトリ --> ファイル変化対策)
  *
  * セキュリティ要件:
- *   - configNameはresolveConfigOrFailで検証済みであること (呼び出し側の責務でないため本関数でも検証)
+ *   - configNameは本関数冒頭で resolveConfigOrFail() により正規化・検証すること
  *   - filePathsの各要素は絶対パスで、かつ snapshotDir配下を指すこと
  *     (snapshotFilePath = snapshotDir + filePathがsnapshotDir内に収まることをisPathWithinSnapshotRootで検証)
  *   - "/.snapshots/" 直下への書き込み (systemFilePath側) は書き込み対象として棄却する
@@ -1481,6 +1548,10 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         for (int i = 0; i < total; ++i) {
             const QString &filePath = filePaths[i];
             const QString &changeType = changeTypes[i];
+            const bool validChangeType = changeType == QStringLiteral("created")
+                    || changeType == QStringLiteral("deleted")
+                    || changeType == QStringLiteral("modified")
+                    || changeType == QStringLiteral("typechanged");
 
             // 入力検証 (進捗 emit より前に行い、未検証パスをD-Busシグナルへ漏出させない)
             // (1) 絶対パスでなければ拒否
@@ -1490,14 +1561,22 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                 continue;
             }
 
-            // (2) 書き込み先として /.snapshots/ 直下は禁止 (スナップショット木の破壊防止)
-            if (filePath.startsWith(QStringLiteral("/.snapshots/"))) {
+            // (2) 書き込み先として /.snapshots とその配下は禁止 (スナップショット木の破壊防止)
+            if (filePath == QStringLiteral("/.snapshots")
+                    || filePath.startsWith(QStringLiteral("/.snapshots/"))) {
                 qWarning() << logTag << ": Skipping dangerous destination path:" << filePath;
                 skippedCount++;
                 continue;
             }
 
-            // (3) snapshotDir + filePathがsnapshotDir配下に収まっていること
+            // (3) 変更種別は既知のallowlistのみ許可
+            if (!validChangeType) {
+                qWarning() << logTag << ": Rejecting unknown change type:" << changeType;
+                skippedCount++;
+                continue;
+            }
+
+            // (4) snapshotDir + filePathがsnapshotDir配下に収まっていること
             //     (".."を含むfilePathによるsnapshotツリー外参照を防ぐ)
             const QString snapshotFilePath = snapshotDir + filePath;
             if (!qsnapper::security::isPathWithinSnapshotRoot(snapshotFilePath, snapshotDir)) {
@@ -1507,7 +1586,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
             }
 
             // 検証通過後にのみ進捗を通知 (D-Busシグナルが運ぶのは受理済みパスのみ)
-            emit restoreProgress(i + 1, total, filePath);
+            emit restoreProgress(i + 1, total, QFileInfo(filePath).fileName());
 
             // システム上のファイルパス (ルートからの絶対パス)
             const QString systemFilePath = filePath;
@@ -1516,12 +1595,10 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
 
             if (changeType == "created") {
                 // スナップショット時点では存在しなかったファイル --> 削除
-                std::error_code ec;
-                std::filesystem::remove_all(systemFilePath.toStdString(), ec);
-                fileSuccess = !ec;
+                fileSuccess = qsnapper::security::safeRemoveAll(systemFilePath);
                 if (!fileSuccess) {
                     qWarning() << logTag << ": Failed to remove" << systemFilePath
-                               << ec.message().c_str();
+                               << strerror(errno);
                 }
             }
             else {
@@ -1529,13 +1606,33 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
 
                 // 親ディレクトリを確認・作成
                 QString parentDir = systemFilePath.left(systemFilePath.lastIndexOf('/'));
-                if (!parentDir.isEmpty()) {
-                    std::error_code ec;
-                    std::filesystem::create_directories(parentDir.toStdString(), ec);
+                if (!parentDir.isEmpty() && !qsnapper::security::safeMkpath(parentDir)) {
+                    qWarning() << logTag << ": Failed to safely create parent directory"
+                               << parentDir << strerror(errno);
+                    allSuccess = false;
+                    continue;
                 }
 
-                QFileInfo snapshotFileInfo(snapshotFilePath);
-                if (snapshotFileInfo.isSymLink()) {
+                struct stat snapshotFileInfo;
+                const bool hasSnapshotFileInfo = qsnapper::security::safeLstat(snapshotFilePath, &snapshotFileInfo);
+
+                if (removeOnTypechanged && changeType == "typechanged") {
+                    QString detachedPath;
+                    if (!movePathAsideNoFollow(systemFilePath, &detachedPath)) {
+                        qWarning() << logTag << ": Failed to move existing path aside before restore"
+                                   << systemFilePath << strerror(errno);
+                        allSuccess = false;
+                        continue;
+                    }
+                    if (!detachedPath.isEmpty() && !qsnapper::security::safeRemoveAll(detachedPath)) {
+                        qWarning() << logTag << ": Failed to remove detached path before restore"
+                                   << detachedPath;
+                        allSuccess = false;
+                        continue;
+                    }
+                }
+
+                if (hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode)) {
                     // シンボリックリンクの場合
                     fileSuccess = copySymlink(snapshotFilePath, systemFilePath);
                     if (!fileSuccess) {
@@ -1543,39 +1640,47 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                                    << "to" << systemFilePath;
                     }
                 }
-                else if (snapshotFileInfo.isDir()) {
-                    // ディレクトリの場合: 作成 + chown + chmod
-                    if (!QFileInfo::exists(systemFilePath)) {
-                        std::error_code ec;
-                        std::filesystem::create_directories(systemFilePath.toStdString(), ec);
+                else if (hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode)) {
+            // ディレクトリの場合: safeMkpath + safeOpenDirectory で取得した dirFd に対して fchown/fchmod
+            if (!qsnapper::security::safeMkpath(systemFilePath)) {
+                        qWarning() << logTag << ": Failed to safely create directory"
+                                   << systemFilePath;
+                        fileSuccess = false;
                     }
-
-                    // 所有者をコピー
-                    chown(systemFilePath.toUtf8().constData(),
-                          snapshotFileInfo.ownerId(), snapshotFileInfo.groupId());
-
-                    // パーミッションをコピー (POSIX stat + chmod)
-                    struct stat st;
-                    if (lstat(snapshotFilePath.toUtf8().constData(), &st) == 0) {
-                        chmod(systemFilePath.toUtf8().constData(), st.st_mode);
-                    }
-
-                    fileSuccess = true;
-                }
-                else if (snapshotFileInfo.exists()) {
-                    // typechanged の事前削除 (Direct経路のみ有効)
-                    if (removeOnTypechanged && changeType == "typechanged"
-                            && QFileInfo::exists(systemFilePath)) {
-                        std::error_code ec;
-                        std::filesystem::remove_all(systemFilePath.toStdString(), ec);
-                        if (ec) {
-                            qWarning() << logTag << ": Failed to remove before copy"
-                                       << systemFilePath << ec.message().c_str();
-                            allSuccess = false;
-                            continue;
+                    else {
+                        const int dirFd = qsnapper::security::safeOpenDirectory(systemFilePath);
+                        if (dirFd < 0) {
+                            qWarning() << logTag << ": Failed to open directory safely"
+                                       << systemFilePath << strerror(errno);
+                            fileSuccess = false;
+                        }
+                        else {
+                            // パーミッションをコピー (snapshot から lstat した stat を、live dir の fd に対して fchown/fchmod)
+                            struct stat st;
+                            if (qsnapper::security::safeLstat(snapshotFilePath, &st)) {
+                                const bool mustPreserveMetadata = (::geteuid() == 0);
+                                bool metadataOk = true;
+                                if (::fchown(dirFd, st.st_uid, st.st_gid) < 0) {
+                                    qWarning() << logTag << ": Failed to preserve directory owner"
+                                               << systemFilePath << strerror(errno);
+                                    metadataOk = !mustPreserveMetadata;
+                                }
+                                if (::fchmod(dirFd, st.st_mode & 07777) < 0) {
+                                    qWarning() << logTag << ": Failed to preserve directory mode"
+                                               << systemFilePath << strerror(errno);
+                                    metadataOk = metadataOk && !mustPreserveMetadata;
+                                }
+                                ::close(dirFd);
+                                fileSuccess = metadataOk;
+                            }
+                            else {
+                                ::close(dirFd);
+                                fileSuccess = false;
+                            }
                         }
                     }
-
+                }
+                else if (hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode)) {
                     // 通常ファイルの場合 (useReflink=trueならFICLONEを先行試行)
                     fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, useReflink);
                     if (!fileSuccess) {
@@ -1584,7 +1689,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                     }
                 }
                 else {
-                    qWarning() << logTag << ": Source not found in snapshot:" << snapshotFilePath;
+                    qWarning() << logTag << ": Source not restorable from snapshot:" << snapshotFilePath;
                     fileSuccess = false;
                 }
             }
@@ -1602,7 +1707,11 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
             bool isReadOnly = false;
             if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK && isReadOnly) {
                 qWarning() << logTag << ": Root subvolume became read-only after restore, restoring rw";
-                btrfs_util_set_subvolume_read_only("/", false);
+                const auto rwResult = btrfs_util_set_subvolume_read_only("/", false);
+                if (rwResult != BTRFS_UTIL_OK) {
+                    qCritical() << logTag << ": Failed to restore root subvolume rw state:" << rwResult;
+                    allSuccess = false;
+                }
             }
         }
 
@@ -1641,7 +1750,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
 }
 
 /**
- * @brief 通常ファイルをコピー (sendfile + 権限・所有者・タイムスタンプ保持)
+    * @brief 通常ファイルをコピー (safeOpenRegularFile* + sendfile + fd-based 所有者/権限/タイムスタンプ保持)
  *
  * tryReflink=trueの場合、まずioctl(FICLONE)を試行し、
  * btrfs CoW (reflink)が使用可能であれば高速コピー、失敗時はsendfileにフォールバック
@@ -1650,7 +1759,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
  */
 bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst, bool tryReflink)
 {
-    int srcFd = open(src.toUtf8().constData(), O_RDONLY);
+    int srcFd = qsnapper::security::safeOpenRegularFileRead(src);
     if (srcFd < 0) {
         qWarning() << "copyRegularFile: Failed to open source:" << src << strerror(errno);
         return false;
@@ -1663,7 +1772,7 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
         return false;
     }
 
-    int dstFd = open(dst.toUtf8().constData(), O_WRONLY | O_CREAT | O_TRUNC, srcStat.st_mode);
+    int dstFd = qsnapper::security::safeOpenRegularFileWrite(dst, srcStat.st_mode & 07777);
     if (dstFd < 0) {
         qWarning() << "copyRegularFile: Failed to open destination:" << dst << strerror(errno);
         close(srcFd);
@@ -1672,12 +1781,12 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
 
     bool copied = false;
 
-    // Step 1: reflink (btrfs CoW)を試行
+    // Step 1: reflink (btrfs CoW) を試行
     if (tryReflink) {
         if (ioctl(dstFd, FICLONE, srcFd) == 0) {
             copied = true;
         }
-        // FICLONE 失敗時は sendfile にフォールバック
+        // FICLONE失敗時はsendfileにフォールバック
     }
 
     // Step 2: sendfileでデータコピー
@@ -1692,62 +1801,111 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
                 close(srcFd);
                 return false;
             }
+            if (written == 0) {
+                qWarning() << "copyRegularFile: sendfile reached EOF before expected byte count";
+                close(dstFd);
+                close(srcFd);
+                return false;
+            }
             remaining -= written;
         }
     }
 
     // 所有者を保持 (cp --preserve=all)
+    const bool mustPreserveMetadata = (::geteuid() == 0);
     if (fchown(dstFd, srcStat.st_uid, srcStat.st_gid) < 0) {
-        // root権限でのみ成功する
-        // 失敗は警告のみ
-        qWarning() << "copyRegularFile: fchown failed (non-fatal):" << strerror(errno);
+        qWarning() << "copyRegularFile: fchown failed" << strerror(errno);
+        if (mustPreserveMetadata) {
+            close(dstFd);
+            close(srcFd);
+            return false;
+        }
     }
 
     // タイムスタンプを保持
     struct timespec ts[2];
     ts[0] = srcStat.st_atim;
     ts[1] = srcStat.st_mtim;
-    futimens(dstFd, ts);
+    if (futimens(dstFd, ts) < 0) {
+        qWarning() << "copyRegularFile: futimens failed" << strerror(errno);
+        if (mustPreserveMetadata) {
+            close(dstFd);
+            close(srcFd);
+            return false;
+        }
+    }
 
     close(dstFd);
     close(srcFd);
     return true;
 }
 
-/**
- * @brief シンボリックリンクをコピー (readlink → symlink + lchown + タイムスタンプ)
+    /**
+    * @brief シンボリックリンクをコピー (readlinkat → symlinkat → fchownat(AT_SYMLINK_NOFOLLOW) + utimensat(AT_SYMLINK_NOFOLLOW))
+ *
+ * copySymlinkは、リンク先自体を保持しつつ、名前の変更やメタデータの更新を信頼できる親ディレクトリファイルへの参照に固定するため、
+ * 中間にある親ディレクトリでのライブパスシンボリックリンクの置換によって、最終的な操作がリダイレクトされることはない
  *
  * "cp -d --preserve=all --no-preserve=xattr"のシンボリックリンク版
  */
 bool SnapshotOperations::copySymlink(const QString &src, const QString &dst)
 {
-    char buf[PATH_MAX];
-    ssize_t len = readlink(src.toUtf8().constData(), buf, sizeof(buf) - 1);
-    if (len < 0) {
+    QByteArray linkTarget;
+    if (!qsnapper::security::safeReadLinkNoFollow(src, &linkTarget)) {
         qWarning() << "copySymlink: readlink failed:" << src << strerror(errno);
         return false;
     }
-    buf[len] = '\0';
 
-    // 既存ファイル/リンクを先に削除
-    std::filesystem::remove(std::filesystem::path(dst.toStdString()));
+    QString temporaryPath;
+    bool createdTemporaryLink = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-link"), attempt);
+        if (qsnapper::security::safeCreateSymlinkNoFollow(linkTarget, temporaryPath)) {
+            createdTemporaryLink = true;
+            break;
+        }
 
-    if (symlink(buf, dst.toUtf8().constData()) < 0) {
-        qWarning() << "copySymlink: symlink failed:" << dst << strerror(errno);
+        if (errno != EEXIST) {
+            qWarning() << "copySymlink: symlink(temp) failed:" << temporaryPath << strerror(errno);
+            return false;
+        }
+    }
+
+    if (!createdTemporaryLink) {
+        qWarning() << "copySymlink: failed to allocate temporary link path:" << dst;
         return false;
     }
 
-    // 所有者を保持 (lchown = リンク自体の所有者を変更)
-    struct stat srcStat;
-    if (lstat(src.toUtf8().constData(), &srcStat) == 0) {
-        lchown(dst.toUtf8().constData(), srcStat.st_uid, srcStat.st_gid);
+    if (!qsnapper::security::safeRenamePathNoFollow(temporaryPath, dst)) {
+        const int renameErrno = errno;
+        qsnapper::security::safeRemoveAll(temporaryPath);
+        qWarning() << "copySymlink: rename failed:" << dst << strerror(renameErrno);
+        return false;
     }
 
-    // タイムスタンプを保持 (l utimes 相当)
-    struct timespec ts[2];
-    ts[0] = srcStat.st_atim;
-    ts[1] = srcStat.st_mtim;
-    utimensat(AT_FDCWD, dst.toUtf8().constData(), ts, AT_SYMLINK_NOFOLLOW);
+    struct stat srcStat;
+    if (qsnapper::security::safeLstat(src, &srcStat)) {
+        struct timespec ts[2];
+        ts[0] = srcStat.st_atim;
+        ts[1] = srcStat.st_mtim;
+
+        bool ownerUpdated = false;
+        bool timesUpdated = false;
+        if (!qsnapper::security::safeSetSymlinkMetadataNoFollow(dst,
+                                                                srcStat.st_uid,
+                                                                srcStat.st_gid,
+                                                                ts,
+                                                                &ownerUpdated,
+                                                                &timesUpdated)) {
+            if (!ownerUpdated) {
+                qWarning() << "copySymlink: fchownat failed (non-fatal):" << dst << strerror(errno);
+            }
+
+            if (!timesUpdated) {
+                qWarning() << "copySymlink: utimensat failed (non-fatal):" << dst << strerror(errno);
+            }
+        }
+    }
 
     return true;
 }

@@ -1,21 +1,6 @@
 // tst_configname.cpp
-// レイヤA-1: validateConfigName() の単体テスト (テスト計画 §2 A-1)
-//
-// 検査対象インタフェース (src/dbusservice/inputvalidator.h):
-//
-//   namespace qsnapper::security {
-//       // configName が安全か判定する。
-//       // 仕様:
-//       //   - 許容文字: [A-Za-z0-9_.-] (ASCII allowlist)
-//       //   - 空文字列は拒否
-//       //   - 先頭が '-' は拒否 (snapperのCLIオプション誤解釈防止)
-//       //   - "." / ".." (完全一致) は明示的に拒否
-//       //   - 制御文字 (Unicode C0 / DEL / C1) と非ASCII文字は allowlist から自然に除外
-//       //   - 長さ上限 255 (NAME_MAX準拠)
-//       bool validateConfigName(const QString &name);
-//   }
-//
-// テスト計画 §2 A-1 の13ケース + Round 2 レビュー追加分 (C0/DEL/C1境界の7ケース) に対応。
+// validateConfigName() の単体テスト。
+// 契約の詳細は src/dbusservice/inputvalidator.h を参照。
 
 #include <QtTest/QtTest>
 #include <QString>

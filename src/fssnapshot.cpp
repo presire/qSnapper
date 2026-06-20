@@ -3,8 +3,8 @@
 /**
  * @brief FsSnapshotオブジェクトを構築
  *
- * スナップショットのメタデータを保持するデータクラスのコンストラクタ。
- * Snapperから取得したスナップショット情報をQtオブジェクトとして管理する。
+ * スナップショットのメタデータを保持するデータクラスのコンストラクタ
+ * Snapperから取得したスナップショット情報をQtオブジェクトとして管理する
  *
  * @param number スナップショット番号
  * @param snapshotType スナップショットタイプ (Single/Pre/Post)
@@ -40,8 +40,8 @@ FsSnapshot::FsSnapshot(int number,
 /**
  * @brief スナップショットタイプを文字列で取得
  *
- * スナップショットタイプの列挙値を人間が読める文字列形式に変換する。
- * QMLバインディングで使用される。
+ * スナップショットタイプの列挙値を人間が読める文字列形式に変換する
+ * QMLバインディングで使用される
  *
  * @return スナップショットタイプ文字列 ("single", "pre", "post")
  */
@@ -53,8 +53,8 @@ QString FsSnapshot::snapshotTypeString() const
 /**
  * @brief クリーンアップアルゴリズムを文字列で取得
  *
- * クリーンアップアルゴリズムの列挙値を文字列形式に変換する。
- * QMLバインディングで使用される。
+ * クリーンアップアルゴリズムの列挙値を文字列形式に変換する
+ * QMLバインディングで使用される
  *
  * @return クリーンアップアルゴリズム文字列 ("number", "timeline", または空文字列)
  */
@@ -66,10 +66,10 @@ QString FsSnapshot::cleanupAlgoString() const
 /**
  * @brief スナップショットが重要とマークされているかチェック
  *
- * ユーザデータマップ内の"important"キーの値が"yes"かどうかを判定する。
- * 重要なスナップショットはUI上で特別な表示がされる。
+ * ユーザデータマップ内の"important"キーの値が"yes"かどうかを判定する
+ * 重要なスナップショットはUI上で特別な表示がされる
  *
- * @return 重要なスナップショットの場合true、それ以外はfalse
+ * @return 重要なスナップショットの場合: true、それ以外: false
  */
 bool FsSnapshot::isImportant() const
 {
@@ -79,12 +79,11 @@ bool FsSnapshot::isImportant() const
 /**
  * @brief スナップショットタイプ列挙値を文字列に変換
  *
- * SnapshotType列挙値をSnapperが使用する文字列形式に変換する静的ヘルパー関数。
+ * SnapshotType列挙値をSnapperが使用する文字列形式に変換する静的ヘルパー関数
  *
  * @param type 変換するスナップショットタイプ
  *
- * @return スナップショットタイプ文字列 ("single", "pre", "post")、
- *         不明な値の場合は空文字列
+ * @return スナップショットタイプ文字列 ("single", "pre", "post")、不明な値の場合は空文字列
  */
 QString FsSnapshot::snapshotTypeToString(SnapshotType type)
 {
@@ -102,13 +101,12 @@ QString FsSnapshot::snapshotTypeToString(SnapshotType type)
 /**
  * @brief 文字列をスナップショットタイプ列挙値に変換
  *
- * Snapperから取得した文字列をSnapshotType列挙値に変換する静的ヘルパー関数。
- * 不明な文字列が渡された場合はデフォルトでSingleを返す。
+ * Snapperから取得した文字列をSnapshotType列挙値に変換する静的ヘルパー関数
+ * 不明な文字列が渡された場合はデフォルトでSingleを返す
  *
  * @param str 変換する文字列 ("single", "pre", "post")
  *
- * @return 対応するSnapshotType列挙値、
- *         不明な文字列の場合はSnapshotType::Single
+ * @return 対応するSnapshotType列挙値、不明な文字列の場合はSnapshotType::Single
  */
 FsSnapshot::SnapshotType FsSnapshot::stringToSnapshotType(const QString &str)
 {
@@ -125,13 +123,12 @@ FsSnapshot::SnapshotType FsSnapshot::stringToSnapshotType(const QString &str)
 /**
  * @brief クリーンアップアルゴリズム列挙値を文字列に変換
  *
- * CleanupAlgorithm列挙値をSnapperが使用する文字列形式に変換する静的ヘルパー関数。
- * None値の場合は空文字列を返す。
+ * CleanupAlgorithm列挙値をSnapperが使用する文字列形式に変換する静的ヘルパー関数
+ * None値の場合は空文字列を返す
  *
  * @param algo 変換するクリーンアップアルゴリズム
  *
- * @return クリーンアップアルゴリズム文字列 ("number", "timeline")、
- *         Noneの場合は空文字列
+ * @return クリーンアップアルゴリズム文字列 ("number", "timeline")、Noneの場合は空文字列
  */
 QString FsSnapshot::cleanupAlgorithmToString(CleanupAlgorithm algo)
 {
@@ -149,13 +146,12 @@ QString FsSnapshot::cleanupAlgorithmToString(CleanupAlgorithm algo)
 /**
  * @brief 文字列をクリーンアップアルゴリズム列挙値に変換
  *
- * Snapperから取得した文字列をCleanupAlgorithm列挙値に変換する静的ヘルパー関数。
- * 不明な文字列または空文字列が渡された場合はNoneを返す。
+ * Snapperから取得した文字列をCleanupAlgorithm列挙値に変換する静的ヘルパー関数
+ * 不明な文字列または空文字列が渡された場合はNoneを返す
  *
  * @param str 変換する文字列 ("number", "timeline")
  *
- * @return 対応するCleanupAlgorithm列挙値、
- *         不明な文字列の場合はCleanupAlgorithm::None
+ * @return 対応するCleanupAlgorithm列挙値、不明な文字列の場合はCleanupAlgorithm::None
  */
 FsSnapshot::CleanupAlgorithm FsSnapshot::stringToCleanupAlgorithm(const QString &str)
 {

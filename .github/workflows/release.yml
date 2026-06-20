@@ -43,7 +43,7 @@ jobs:
             qt6-base-devel qt6-declarative-devel \
             qt6-quickcontrols2-devel qt6-linguist-devel \
             polkit-devel libpolkit-qt6-1-devel libsnapper-devel \
-            libbtrfsutil-devel selinux-policy-devel
+            libbtrfsutil-devel selinux-policy-devel scdoc
 
       - name: Build
         run: |
@@ -86,7 +86,7 @@ jobs:
             qt6-base-devel qt6-declarative-devel \
             qt6-quickcontrols2-devel qt6-linguist-devel \
             polkit-devel libpolkit-qt6-1-devel libsnapper-devel \
-            libbtrfsutil-devel selinux-policy-devel
+            libbtrfsutil-devel selinux-policy-devel scdoc
 
       - name: Build
         run: |
@@ -128,7 +128,7 @@ jobs:
             qt6-qtbase-devel qt6-qtdeclarative-devel \
             qt6-qttools-devel \
             polkit-devel polkit-qt6-1-devel snapper-devel \
-            btrfs-progs-devel selinux-policy-devel
+            btrfs-progs-devel selinux-policy-devel scdoc
 
       - name: Build
         run: |
@@ -169,7 +169,7 @@ jobs:
           apt-get install -y --no-install-recommends \
             cmake make g++ pkg-config file dpkg-dev \
             qt6-base-dev qt6-declarative-dev qt6-tools-dev \
-            libpolkit-qt6-1-dev libsnapper-dev libboost-dev libbtrfs-dev libbtrfsutil-dev
+            libpolkit-qt6-1-dev libsnapper-dev libboost-dev libbtrfs-dev libbtrfsutil-dev scdoc
 
       - name: Build
         run: |

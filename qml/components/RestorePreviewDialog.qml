@@ -6,7 +6,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QSnapper 1.0
 
-Dialog {
+BorderedDialog {
     id: root
 
     property string configName: "root"               // Snapper設定名
@@ -700,7 +700,7 @@ Dialog {
     }
 
     // ファイル復元確認ダイアログ
-    Dialog {
+    BorderedDialog {
         id: confirmRestoreDialog
         title: qsTr("Confirmation")
         anchors.centerIn: Overlay.overlay
@@ -806,7 +806,7 @@ Dialog {
     }
 
     // 復元進捗表示ダイアログ
-    Dialog {
+    BorderedDialog {
         id: progressDialog
         title: qsTr("Restoring Files")
         anchors.centerIn: Overlay.overlay
@@ -900,7 +900,7 @@ Dialog {
     }
 
     // 個別ファイル復元確認ダイアログ
-    Dialog {
+    BorderedDialog {
         id: confirmSingleRestoreDialog
         title: qsTr("Confirmation")
         anchors.centerIn: Overlay.overlay
@@ -959,7 +959,7 @@ Dialog {
     }
 
     // 復元成功ダイアログ
-    Dialog {
+    BorderedDialog {
         id: successDialog
         title: qsTr("Success")
         anchors.centerIn: Overlay.overlay
@@ -1000,7 +1000,7 @@ Dialog {
     }
 
     // 復元失敗ダイアログ
-    Dialog {
+    BorderedDialog {
         id: restoreFailDialog
         title: qsTr("Restore Failed")
         anchors.centerIn: Overlay.overlay

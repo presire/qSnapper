@@ -194,3 +194,10 @@ QColor ThemeManager::successColor() const
 {
     return getColor(LightColors::success, DarkColors::success);
 }
+
+// ダイアログ枠色
+
+QColor ThemeManager::dialogBorderColor() const
+{
+    return getColor(LightColors::dialogBorder, DarkColors::dialogBorder);
+}

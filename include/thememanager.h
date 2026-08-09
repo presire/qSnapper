@@ -29,6 +29,9 @@ class ThemeManager : public QObject
     Q_PROPERTY(QColor importantColor READ importantColor NOTIFY themeChanged)
     Q_PROPERTY(QColor successColor READ successColor NOTIFY themeChanged)
 
+    // ダイアログ枠色
+    Q_PROPERTY(QColor dialogBorderColor READ dialogBorderColor NOTIFY themeChanged)
+
 public:
     enum ThemeMode {
         Light,
@@ -65,6 +68,9 @@ public:
     QColor importantColor() const;
     QColor successColor() const;
 
+    // ダイアログ枠色
+    QColor dialogBorderColor() const;
+
 signals:
     void themeModeChanged();
     void isDarkChanged();
@@ -98,6 +104,8 @@ private:
         static constexpr const char* error           = "#F44336";
         static constexpr const char* important       = "#FFC107";
         static constexpr const char* success         = "#4CAF50";
+
+        static constexpr const char* dialogBorder    = "#9E9E9E";
     };
 
     // ダークモードのカラーパレット
@@ -116,6 +124,8 @@ private:
         static constexpr const char* error           = "#EF5350";
         static constexpr const char* important       = "#FFCA28";
         static constexpr const char* success         = "#66BB6A";
+
+        static constexpr const char* dialogBorder    = "#616161";
     };
 };
 

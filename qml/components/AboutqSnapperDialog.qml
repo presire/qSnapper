@@ -4,7 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+BorderedDialog {
     id: root
     title: qsTr("About qSnapper")
     modal: true

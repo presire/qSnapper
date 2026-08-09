@@ -6,7 +6,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QSnapper 1.0
 
-Dialog {
+BorderedDialog {
     id: root
     modal: true
     width: {
@@ -236,7 +236,7 @@ Dialog {
     }
 
     // システムロールバック確認ダイアログ
-    Dialog {
+    BorderedDialog {
         id: confirmDialog
         title: qsTr("Confirmation")
         anchors.centerIn: Overlay.overlay
@@ -307,7 +307,7 @@ Dialog {
     }
 
     // ロールバック成功ダイアログ
-    Dialog {
+    BorderedDialog {
         id: successDialog
         title: qsTr("Success")
         anchors.centerIn: Overlay.overlay
@@ -331,7 +331,7 @@ Dialog {
     }
 
     // ロールバックエラーダイアログ
-    Dialog {
+    BorderedDialog {
         id: errorDialog
         title: qsTr("Error")
         anchors.centerIn: Overlay.overlay

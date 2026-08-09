@@ -5,7 +5,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QSnapper 1.0
 
-Dialog {
+BorderedDialog {
     id: root
 
     property var snapshotListModel: null

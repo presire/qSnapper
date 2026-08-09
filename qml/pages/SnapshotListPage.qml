@@ -357,7 +357,7 @@ Page {
     }
 
     // スナップショット作成ダイアログ
-    Dialog {
+    BorderedDialog {
         id: createSnapshotDialog
         title: qsTr("Create Snapshot")
         anchors.centerIn: Overlay.overlay
@@ -496,7 +496,7 @@ Page {
     }
 
     // 削除確認ダイアログ
-    Dialog {
+    BorderedDialog {
         id: deleteConfirmDialog
         title: qsTr("Confirmation")
         anchors.centerIn: Overlay.overlay
@@ -555,7 +555,7 @@ Page {
     }
 
     // 削除処理中のウェイト表示ダイアログ
-    Dialog {
+    BorderedDialog {
         id: deletingBusyDialog
         title: qsTr("Please wait")
         anchors.centerIn: Overlay.overlay
@@ -603,7 +603,7 @@ Page {
     }
 
     // エラーダイアログ
-    Dialog {
+    BorderedDialog {
         id: errorDialog
         title: qsTr("Error")
         anchors.centerIn: Overlay.overlay

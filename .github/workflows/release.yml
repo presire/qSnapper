@@ -117,7 +117,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     container:
-      image: fedora:43
+      image: fedora:44
     steps:
       - uses: actions/checkout@v4
 
@@ -147,12 +147,12 @@ jobs:
         run: |
           cd build
           for f in *.rpm; do
-            mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-fc43.x86_64.rpm"
+            mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-fc44.x86_64.rpm"
           done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: qsnapper-${{ needs.validate.outputs.version }}-fc43.x86_64.rpm
+          name: qsnapper-${{ needs.validate.outputs.version }}-fc44.x86_64.rpm
           path: build/*.rpm
 
   build-deb:

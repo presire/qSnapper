@@ -12,8 +12,73 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QHash>
+#include <QSet>
+#include <QSharedPointer>
 #include <algorithm>
 #include "filechangemodel.h"
+
+namespace {
+
+/**
+ * @brief 解析済みの変更レコードを保持する
+ */
+struct ChangeInfo
+{
+    QString path;
+    FileChangeItem::ChangeType type;
+    QString statusFlags;
+    bool isDirectory;
+};
+
+/**
+ * @brief レガシーの変更レコードからステータスとパスを抽出する
+ *
+ * 最初の空白区切りだけを消費するため、パス内の空白はそのまま保持する。
+ *
+ * @param line 改行を除いた変更レコード
+ * @param info 解析結果の格納先
+ * @return 有効なレコードを解析できた場合はtrue
+ */
+bool parseChangeRecord(const QString &line, ChangeInfo *info)
+{
+    const int separatorStart = line.indexOf(QRegularExpression(QStringLiteral("\\s+")));
+    if (separatorStart <= 0) {
+        return false;
+    }
+
+    int pathStart = separatorStart;
+    while (pathStart < line.size() && line.at(pathStart).isSpace()) {
+        ++pathStart;
+    }
+    if (pathStart >= line.size()) {
+        return false;
+    }
+
+    const QString filePath = line.mid(pathStart);
+    info->statusFlags = line.left(separatorStart);
+    info->path = filePath.endsWith('/') ? filePath.left(filePath.size() - 1) : filePath;
+    info->isDirectory = filePath.endsWith('/');
+    return !info->path.isEmpty();
+}
+
+/**
+ * @brief パスの親ディレクトリを集合へ追加する
+ *
+ * @param path 正規化済みの絶対パス
+ * @param parentPaths 親パスを格納する集合
+ */
+void collectParentPaths(const QString &path, QSet<QString> *parentPaths)
+{
+    int separator = path.indexOf('/', 1);
+    while (separator > 0) {
+        parentPaths->insert(path.left(separator));
+        separator = path.indexOf('/', separator + 1);
+    }
+}
+
+} // namespace
 
 // ============================================================================
 // FileChangeItem Implementation
@@ -338,13 +403,16 @@ void FileChangeModel::loadChanges()
     m_loading = true;
     emit loadingChanged();
 
+    const auto requestTimer = QSharedPointer<QElapsedTimer>::create();
+    requestTimer->start();
+
     // 比較モードに応じて D-Bus メソッドを選択
     QDBusPendingCall pendingCall = m_betweenMode
         ? m_dbusInterface->asyncCall("GetFileChangesBetween", m_configName, m_compareNumber1, m_compareNumber2)
         : m_dbusInterface->asyncCall("GetFileChanges", m_configName, m_snapshotNumber);
     QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pendingCall, this);
 
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, requestTimer](QDBusPendingCallWatcher *w) {
         w->deleteLater();
 
         QDBusPendingReply<QString> reply = *w;
@@ -356,6 +424,8 @@ void FileChangeModel::loadChanges()
             emit errorOccurred(QString("Failed to get file changes: %1").arg(reply.error().message()));
             return;
         }
+
+        const qint64 dbusWaitMs = requestTimer->elapsed();
 
         QString output = reply.value();
         if (output.isEmpty()) {
@@ -371,61 +441,8 @@ void FileChangeModel::loadChanges()
         m_hasChanges = true;
         emit hasChangesChanged();
 
-        QStringList changes = output.split('\n', Qt::SkipEmptyParts);
-
-        // 重複チェックと詳細分析
-        QSet<QString> uniquePaths;
-        QSet<QString> dirPaths;
-        QSet<QString> filePathSet;
-
-        for (const QString &line : changes) {
-            QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-            if (parts.size() >= 2) {
-                QString path = parts[1];
-                QString normalizedPath = path.endsWith('/') ? path.left(path.length() - 1) : path;
-
-                uniquePaths.insert(normalizedPath);
-
-                if (path.endsWith('/')) {
-                    dirPaths.insert(normalizedPath);
-                }
-                else {
-                    filePathSet.insert(normalizedPath);
-                }
-            }
-        }
-
-        // 親子関係を分析して、ファイルパスだがディレクトリとして扱うべきパスを特定
-        QSet<QString> pathsWithChildren;
-        for (const QString &fp : filePathSet) {
-            for (const QString &otherPath : uniquePaths) {
-                if (otherPath != fp && otherPath.startsWith(fp + "/")) {
-                    pathsWithChildren.insert(fp);
-                    break;
-                }
-            }
-        }
-
-        // pathsWithChildrenの情報をsetupModelDataに渡す
-        QStringList processedChanges;
-        for (const QString &line : changes) {
-            QStringList parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-            if (parts.size() >= 2) {
-                QString path = parts[1];
-                QString normalizedPath = path.endsWith('/') ? path.left(path.length() - 1) : path;
-
-                // 子要素を持つパスの場合は、末尾にスラッシュを追加
-                if (pathsWithChildren.contains(normalizedPath) && !path.endsWith('/')) {
-                    QString modifiedLine = parts[0] + " " + path + "/";
-                    processedChanges.append(modifiedLine);
-                }
-                else {
-                    processedChanges.append(line);
-                }
-            }
-        }
-
-        setupModelData(processedChanges);
+        setupModelData(output, m_flatMode);
+        qInfo() << "FileChangeModel timing: dbusWait=" << dbusWaitMs << "ms";
 
         // ローディング状態OFF
         m_loading = false;
@@ -740,139 +757,111 @@ QHash<int, QByteArray> FileChangeModel::roleNames() const
  * ファイル変更リストからツリー構造のモデルデータを構築する
  * 重複を除外し、ディレクトリ階層を適切に生成
  *
- * @param changes ファイル変更リスト
+ * @param changeOutput Snapperから返された改行区切りの変更出力
+ * @param flatMode trueの場合はフラット表示用に構築する
  */
-void FileChangeModel::setupModelData(const QStringList &changes)
+void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
 {
-    beginResetModel();
-    clearModel();
+    QElapsedTimer parsePreparationTimer;
+    parsePreparationTimer.start();
+
+    QVector<ChangeInfo> changes;
+    QSet<QString> seenPaths;
+    QSet<QString> parentPaths;
+    const QStringList lines = changeOutput.split('\n', Qt::SkipEmptyParts);
+    changes.reserve(lines.size());
+
+    for (const QString &line : lines) {
+        ChangeInfo info;
+        if (!parseChangeRecord(line, &info) || seenPaths.contains(info.path)) {
+            continue;
+        }
+
+        info.type = parseChangeType(info.statusFlags.at(0));
+        seenPaths.insert(info.path);
+        collectParentPaths(info.path, &parentPaths);
+        changes.append(info);
+    }
+
+    QVector<ChangeInfo> treeChanges = changes;
+    if (!flatMode) {
+        std::sort(treeChanges.begin(), treeChanges.end(), [](const ChangeInfo &left, const ChangeInfo &right) {
+            return left.path < right.path;
+        });
+    }
+    const qint64 parsePreparationMs = parsePreparationTimer.elapsed();
+
+    QElapsedTimer detachedTreeConstructionTimer;
+    detachedTreeConstructionTimer.start();
+    FileChangeItem *newRootItem = new FileChangeItem("", FileChangeItem::Modified);
 
     // --- フラットモード: 2 スナップショット比較ダイアログ用 ---
     // ListViewは、QAbstractItemModelのルート直下しか反復しないため、各変更をm_rootItemの直接の子として1行ずつ追加する
     // 中間ディレクトリは生成せず、重複除去のみ行う
-    if (m_flatMode) {
-        QSet<QString> seen;
-        for (const QString &line : changes) {
-            if (line.isEmpty()) {
-                continue;
-            }
-
-            QRegularExpression re("\\s+");
-            QStringList parts = line.split(re, Qt::SkipEmptyParts);
-            if (parts.size() < 2) {
-                continue;
-            }
-
-            const QString statusChars = parts[0];
-            const QString filePath    = parts[1];
-            const bool    isDirectory    = filePath.endsWith('/');
-            const QString normalizedPath = isDirectory ? filePath.left(filePath.length() - 1) : filePath;
-            if (seen.contains(normalizedPath)) {
-                continue;
-            }
-            seen.insert(normalizedPath);
-
-            FileChangeItem::ChangeType type = parseChangeType(statusChars.at(0));
-            FileChangeItem *item = new FileChangeItem(filePath, type, statusChars, m_rootItem);
-            m_rootItem->appendChild(item);
+    if (flatMode) {
+        for (const ChangeInfo &info : changes) {
+            const QString itemPath = info.isDirectory ? info.path + "/" : info.path;
+            FileChangeItem *item = new FileChangeItem(itemPath, info.type, info.statusFlags, newRootItem);
+            newRootItem->appendChild(item);
         }
-        endResetModel();
-        return;
     }
 
-    // --- ツリーモード (従来): 対カレント比較 / 復元UI用 ---
-    // アイテムマップ：正規化パス (スラッシュなし) --> FileChangeItem
-    QMap<QString, FileChangeItem*> itemMap;
-    itemMap[""] = m_rootItem;
+    else {
+        // --- ツリーモード (従来): 対カレント比較 / 復元UI用 ---
+        // アイテムマップ：正規化パス (スラッシュなし) --> FileChangeItem
+        QHash<QString, FileChangeItem*> itemMap;
+        itemMap[""] = newRootItem;
 
-    // 全変更をパースして、重複を除外
-    struct ChangeInfo {
-        QString path;           // スラッシュなしの正規化パス
-        FileChangeItem::ChangeType type;
-        QString statusFlags;    // 詳細ステータスフラグ (例: "cpu..")
-        bool isDirectory;
-    };
+        // 変更リストをパス順に処理してツリーを構築する。親パスは解析時に収集済みであり、
+        // 全パスの接頭辞を総当たりする必要はない。
+        for (const ChangeInfo &info : treeChanges) {
+            QStringList pathParts = info.path.split('/', Qt::SkipEmptyParts);
+            QString currentPath = "";
+            FileChangeItem *parentItem = newRootItem;
 
-    // パスをキーにして重複を除外 (最初に出現したもののみ保持)
-    QMap<QString, ChangeInfo> uniqueChanges;
+            for (int i = 0; i < pathParts.size(); ++i) {
+                QString part = pathParts[i];
+                currentPath += "/" + part;
 
-    // まず全変更を解析し、重複を除外
-    for (const QString &line : changes) {
-        if (line.isEmpty())
-            continue;
+                bool isLastPart = (i == pathParts.size() - 1);
 
-        // フォーマット: "+.... /path/to/file"
-        QRegularExpression re("\\s+");
-        QStringList parts = line.split(re, Qt::SkipEmptyParts);
-        if (parts.size() < 2) {
-            continue;
-        }
-
-        QString statusChars = parts[0];
-        QString filePath = parts[1];
-
-        // ディレクトリの場合は末尾のスラッシュを判定
-        bool isDirectory = filePath.endsWith('/');
-        QString normalizedPath = isDirectory ? filePath.left(filePath.length() - 1) : filePath;
-
-        // 既に処理済みの場合はスキップ
-        if (uniqueChanges.contains(normalizedPath)) {
-            continue;
-        }
-
-        // 最初のステータス文字を使用
-        FileChangeItem::ChangeType type = parseChangeType(statusChars.at(0));
-
-        ChangeInfo info;
-        info.path = normalizedPath;
-        info.type = type;
-        info.statusFlags = statusChars;
-        info.isDirectory = isDirectory;
-        uniqueChanges[normalizedPath] = info;
-    }
-
-    // 重複除外後の変更リストを処理してツリーを構築
-    for (auto it = uniqueChanges.begin(); it != uniqueChanges.end(); ++it) {
-        const ChangeInfo &info = it.value();
-
-        QStringList pathParts = info.path.split('/', Qt::SkipEmptyParts);
-        QString currentPath = "";
-        FileChangeItem *parentItem = m_rootItem;
-
-        for (int i = 0; i < pathParts.size(); ++i) {
-            QString part = pathParts[i];
-            currentPath += "/" + part;
-
-            bool isLastPart = (i == pathParts.size() - 1);
-
-            if (isLastPart) {
-                // 最終パート：変更があったファイルまたはディレクトリ
-
-                // 既にこのパスがitemMapに存在するかチェック
-                if (!itemMap.contains(currentPath)) {
-                    // 新規アイテムを作成
-                    QString itemPath = info.isDirectory ? (currentPath + "/") : currentPath;
-                    FileChangeItem *item = new FileChangeItem(itemPath, info.type, info.statusFlags, parentItem);
-                    parentItem->appendChild(item);
-
-                    // itemMapに登録 (ディレクトリかファイルかに関わらず)
-                    itemMap[currentPath] = item;
+                if (isLastPart) {
+                    // 最終パート：変更があったファイルまたはディレクトリ
+                    if (!itemMap.contains(currentPath)) {
+                        const bool isDirectory = info.isDirectory || parentPaths.contains(info.path);
+                        QString itemPath = isDirectory ? (currentPath + "/") : currentPath;
+                        FileChangeItem *item = new FileChangeItem(itemPath, info.type, info.statusFlags, parentItem);
+                        parentItem->appendChild(item);
+                        itemMap[currentPath] = item;
+                    }
+                }
+                else {
+                    // 中間ディレクトリの処理
+                    if (!itemMap.contains(currentPath)) {
+                        FileChangeItem *dirItem = new FileChangeItem(currentPath + "/", FileChangeItem::Modified, QString(), parentItem);
+                        parentItem->appendChild(dirItem);
+                        itemMap[currentPath] = dirItem;
+                    }
+                    parentItem = itemMap[currentPath];
                 }
             }
-            else {
-                // 中間ディレクトリの処理
-                if (!itemMap.contains(currentPath)) {
-                    // まだ作成されていない中間ディレクトリを作成
-                    FileChangeItem *dirItem = new FileChangeItem(currentPath + "/", FileChangeItem::Modified, QString(), parentItem);
-                    parentItem->appendChild(dirItem);
-                    itemMap[currentPath] = dirItem;
-                }
-                parentItem = itemMap[currentPath];
-            }
         }
     }
 
+    const qint64 detachedTreeConstructionMs = detachedTreeConstructionTimer.elapsed();
+    QElapsedTimer modelPublicationTimer;
+    modelPublicationTimer.start();
+    FileChangeItem *oldRootItem = m_rootItem;
+    beginResetModel();
+    m_rootItem = newRootItem;
     endResetModel();
+    const qint64 modelPublicationMs = modelPublicationTimer.elapsed();
+    delete oldRootItem;
+
+    qInfo() << "FileChangeModel timing: responseParsePreparation=" << parsePreparationMs
+            << "ms detachedTreeConstruction=" << detachedTreeConstructionMs
+            << "ms modelResetPublication=" << modelPublicationMs
+            << "ms records=" << changes.size();
 }
 
 /**

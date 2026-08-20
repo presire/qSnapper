@@ -93,7 +93,6 @@ private:
 public:
 
 private:
-    void setupModelData(const QStringList &changes);
     void clearModel();
     FileChangeItem *getItem(const QModelIndex &index) const;
     FileChangeItem::ChangeType parseChangeType(const QChar &statusChar);
@@ -106,6 +105,17 @@ private:
     void processNextBatch();
     bool reconnectDbus();                    // D-Busサービスへの再接続を試みる
 
+protected:
+    /**
+     * @brief 変更レコードからモデルデータを構築する
+     *
+     * レガシーの改行区切りステータス出力を1回だけ解析し、指定した表示モードの
+     * モデルツリーを構築する。テストからもD-Busを介さずに検証できるよう保護する。
+     *
+     * @param changeOutput Snapperの変更出力
+     * @param flatMode trueの場合はフラットモデルを構築する
+     */
+    void setupModelData(const QString &changeOutput, bool flatMode);
 
 public:
     enum Roles {

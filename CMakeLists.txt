@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.5 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.6 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")

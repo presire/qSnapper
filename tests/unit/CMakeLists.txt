@@ -65,9 +65,42 @@ target_link_libraries(tst_filesystemhelpers PRIVATE
 set_target_properties(tst_filesystemhelpers PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filesystemhelpers COMMAND tst_filesystemhelpers)
 
+# --- tst_filechangemodel ---
+add_executable(tst_filechangemodel
+    tst_filechangemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangemodel.cpp
+    ${CMAKE_SOURCE_DIR}/include/filechangemodel.h
+)
+target_include_directories(tst_filechangemodel PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_filechangemodel PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Test
+)
+set_target_properties(tst_filechangemodel PROPERTIES AUTOMOC ON)
+add_test(NAME tst_filechangemodel COMMAND tst_filechangemodel)
+
+# --- tst_comparisoncache ---
+# ComparisonCache<T> はヘッダオンリのテンプレートなので、テスト本体以外のソース不要
+add_executable(tst_comparisoncache
+    tst_comparisoncache.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/comparisoncache.h
+)
+target_include_directories(tst_comparisoncache PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_comparisoncache PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_comparisoncache PROPERTIES AUTOMOC ON)
+add_test(NAME tst_comparisoncache COMMAND tst_comparisoncache)
+
 # ASan/UBSan を全テストに適用 (Debugビルド時に-DQSNAPPER_TEST_SANITIZE=ONで)
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers)
+    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers tst_filechangemodel tst_comparisoncache)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

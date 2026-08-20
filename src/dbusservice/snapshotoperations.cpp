@@ -445,6 +445,9 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
             return false;
         }
 
+        // 設定変更前にComparisonキャッシュを無効化 (mount/Filesが古い設定状態に依存しないように)
+        m_comparisonCache.clear();
+
         std::map<std::string, std::string> info;
         for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
             info[it.key().toStdString()] = it.value().toStdString();
@@ -562,6 +565,9 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
         // libsnapperのSnapperオブジェクトは構築時にスナップショット一覧を読み込み、
         // 外部で作成された新規スナップショットを自動で取り込まないため、一覧更新時にはforceReloadでインスタンスを作り直す必要がある
         if (!m_snapper || m_currentConfig != configName || forceReload) {
+            // Snapper差し替え前にキャッシュを無効化し、
+            // 古いSnapperを指すComparisonが残らない (mount/Filesの寿命が古Snapperに依存する) ようにする
+            m_comparisonCache.clear();
             m_snapper.reset(new snapper::Snapper(configName.toStdString(), "/"));
             m_currentConfig = configName;
         }
@@ -759,6 +765,9 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
             return QString();
         }
 
+        // スナップショット作成 (スナップショット一覧の変化) 前にComparisonキャッシュを無効化
+        m_comparisonCache.clear();
+
         snapper::SCD scd;
         scd.description = description.toStdString();
         scd.cleanup = cleanup.toStdString();
@@ -881,6 +890,9 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
             return false;
         }
 
+        // スナップショット属性変更前にComparisonキャッシュを無効化
+        m_comparisonCache.clear();
+
         snapper::SMD smd;
         smd.description = description.toStdString();
         smd.cleanup     = cleanup.toStdString();
@@ -941,6 +953,9 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
             return false;
         }
 
+        // スナップショット削除 (スナップショット一覧の変化) 前にComparisonキャッシュを無効化
+        m_comparisonCache.clear();
+
 #if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
         snapper::Plugins::Report report;
         snapper->deleteSnapshot(snapshot, report);
@@ -993,7 +1008,10 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
             return false;
         }
 
-        // "sudo snapper rollback N"と同等の挙動を再現する
+        // ロールバックはスナップショット一覧・現在状態を変化させるためComparisonキャッシュを無効化
+        m_comparisonCache.clear();
+
+        // "sudo snapper rollback N"と同等の挙動を再現する。
         //
         // CLI (client/snapper/cmd-rollback.cc) はambitを以下で判定する:
         //   - previous_defaultがread-only --> TRANSACTIONAL
@@ -1131,8 +1149,17 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
 
         // Comparisonオブジェクトを作成してファイル変更を取得
         // snapshot1からsnapshot2への変更を取得
-        snapper::Comparison comparison(snapper, snapshot1, snapshot2, false);
-        const snapper::Files &files = comparison.getFiles();
+        // mount=trueでComparisonを構築し、後続する詳細取得APIがmountを再利用できるようにする
+        // Refresh戦略: 一覧取得時に前回キャッシュを破棄して最新状態を反映する
+        using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
+        auto *comparison = m_comparisonCache.get(
+            {*cfg, snapshotNumber, std::nullopt},
+            CachePolicy::Refresh,
+            [&](const ComparisonCache<snapper::Comparison>::Key &) {
+                return std::unique_ptr<snapper::Comparison>(
+                    new snapper::Comparison(snapper, snapshot1, snapshot2, true));
+            });
+        const snapper::Files &files = comparison->getFiles();
 
         QString output;
         for (auto it = files.begin(); it != files.end(); ++it) {
@@ -1200,8 +1227,17 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
             return QString();
         }
 
-        snapper::Comparison comparison(snapper, snapshot1, snapshot2, false);
-        const snapper::Files &files = comparison.getFiles();
+        // mount=trueでComparisonを構築し、後続する詳細取得APIがmountを再利用できるようにする
+        // Refresh戦略: 一覧取得時に前回キャッシュを破棄して最新状態を反映する
+        using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
+        auto *comparison = m_comparisonCache.get(
+            {*cfg, number1, number2},
+            CachePolicy::Refresh,
+            [&](const ComparisonCache<snapper::Comparison>::Key &) {
+                return std::unique_ptr<snapper::Comparison>(
+                    new snapper::Comparison(snapper, snapshot1, snapshot2, true));
+            });
+        const snapper::Files &files = comparison->getFiles();
 
         QString output;
         for (auto it = files.begin(); it != files.end(); ++it) {
@@ -1270,8 +1306,17 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
             return QString();
         }
 
-        snapper::Comparison comparison(snapper, snapshot1, snapshot2, true);
-        const snapper::Files &files = comparison.getFiles();
+        // Reuse戦略: キーが一致すればリスト取得時に構築したmount有効Comparisonを再利用し、
+        // ミス時は新規構築 (mount=true) してキャッシュに格納する
+        using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
+        auto *comparison = m_comparisonCache.get(
+            {*cfg, number1, number2},
+            CachePolicy::Reuse,
+            [&](const ComparisonCache<snapper::Comparison>::Key &) {
+                return std::unique_ptr<snapper::Comparison>(
+                    new snapper::Comparison(snapper, snapshot1, snapshot2, true));
+            });
+        const snapper::Files &files = comparison->getFiles();
 
         auto fileIt = files.findAbsolutePath(filePath.toStdString());
         if (fileIt == files.end()) {
@@ -1370,9 +1415,18 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
             return QString();
         }
 
-        // Comparisonオブジェクトを1回だけ作成 (スナップショットマウントも1回のみ) 
-        snapper::Comparison comparison(snapper, snapshot1, snapshot2, true);
-        const snapper::Files &files = comparison.getFiles();
+        // Reuse戦略: キーが一致すればリスト取得時に構築したmount有効Comparisonを再利用し、
+        // ミス時は新規構築 (mount=true) してキャッシュに格納する
+        // Comparisonオブジェクトは1回だけ作成 (スナップショットマウントも1回のみ)
+        using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
+        auto *comparison = m_comparisonCache.get(
+            {*cfg, snapshotNumber, std::nullopt},
+            CachePolicy::Reuse,
+            [&](const ComparisonCache<snapper::Comparison>::Key &) {
+                return std::unique_ptr<snapper::Comparison>(
+                    new snapper::Comparison(snapper, snapshot1, snapshot2, true));
+            });
+        const snapper::Files &files = comparison->getFiles();
 
         auto fileIt = files.findAbsolutePath(filePath.toStdString());
         if (fileIt == files.end()) {
@@ -1531,6 +1585,9 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
             sendErrorReply(QDBusError::Failed, "Snapshot not found");
             return false;
         }
+
+        // 復元操作は現在システム状態を変化させるためComparisonキャッシュを無効化
+        m_comparisonCache.clear();
 
         // スナップショットをマウント
         snapshot1->mountFilesystemSnapshot(true);

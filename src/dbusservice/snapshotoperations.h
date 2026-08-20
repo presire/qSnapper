@@ -9,9 +9,11 @@
 #include <QTimer>
 #include <memory>
 #include <optional>
+#include "comparisoncache.h"
 
 namespace snapper {
     class Snapper;
+    class Comparison;
 }
 
 class SnapshotOperations : public QObject, protected QDBusContext
@@ -27,6 +29,9 @@ private:
      */
     static constexpr int IdleTimeoutMs = 5 * 60 * 1000;
     std::unique_ptr<snapper::Snapper> m_snapper;        // 現在のSnapperインスタンス
+    // m_comparisonCache は m_snapper の後に宣言 (デストラクション順序:
+    // Comparisonが所有するmounts/FilesがSnapperより先に破棄されるようにするため)
+    ComparisonCache<snapper::Comparison> m_comparisonCache;
     QString m_currentConfig;                            // 現在選択中のSnapper設定名
     QTimer m_idleTimer;                                 // アイドルタイムアウト用タイマ
 

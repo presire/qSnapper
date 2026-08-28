@@ -123,8 +123,9 @@ QHash<int, QByteArray> SnapshotListModel::roleNames() const
 /**
  * @brief スナップショット一覧を再読み込み
  *
- * SnapperServiceから最新のスナップショット一覧を取得し、
- * モデルの内容を更新する。既存のスナップショットオブジェクトは全て削除され、新しいデータで置き換えられる
+ * SnapperServiceから最新のスナップショット一覧を取得し、モデルの内容を更新する
+ * 既存のスナップショットオブジェクトは全て削除され、新しいデータで置き換えられる
+ *
  * QMLから呼び出し可能なメソッド
  */
 void SnapshotListModel::refresh()
@@ -143,6 +144,7 @@ void SnapshotListModel::refresh()
  * 独立した単一のスナップショットを作成する
  * SnapperServiceを通じてD-Busサービスにリクエストを送信する
  * 作成結果はシグナル経由で通知される
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
@@ -159,6 +161,7 @@ void SnapshotListModel::createSingleSnapshot(const QString &description, const Q
  * 後でPostスナップショットとペアにして差分管理に使用できる
  * SnapperServiceを通じてD-Busサービスにリクエストを送信する
  * 作成結果はシグナル経由で通知される
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
@@ -175,6 +178,7 @@ void SnapshotListModel::createPreSnapshot(const QString &description, const QVar
  * PreとPostのペアにより、操作前後の差分を管理できる
  * SnapperServiceを通じてD-Busサービスにリクエストを送信する
  * 作成結果はシグナル経由で通知される
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
@@ -197,7 +201,8 @@ void SnapshotListModel::modifySnapshot(int number,
     if (success) {
         refresh();
         emit snapshotModified(number);
-    } else {
+    }
+    else {
         emit snapshotModificationFailed(number, tr("Failed to modify snapshot #%1").arg(number));
     }
 }
@@ -209,6 +214,7 @@ void SnapshotListModel::modifySnapshot(int number,
  * この操作は破壊的で、ロールバック後は再起動が必要となる
  * SnapperServiceを通じてD-Busサービスにリクエストを送信する
  * 実行結果はシグナル経由で通知される
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param number ロールバック先のスナップショット番号
@@ -224,6 +230,7 @@ void SnapshotListModel::rollbackSnapshot(int number)
  * スナップショット番号を指定して単一のスナップショットを削除する
  * SnapperServiceを通じてD-Busサービスにリクエストを送信する
  * 削除結果はシグナル経由で通知される
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param number 削除するスナップショット番号
@@ -239,6 +246,7 @@ void SnapshotListModel::deleteSnapshot(int number)
  * スナップショット番号のリストを受け取り、各スナップショットを順次削除する
  * 成功数と失敗数をカウントし、全ての削除処理完了後にシグナルで通知する
  * 処理完了後、スナップショット一覧を自動的に再読み込みする
+ *
  * QMLから呼び出し可能なメソッド
  *
  * @param numbers 削除するスナップショット番号のリスト (QVariant配列)

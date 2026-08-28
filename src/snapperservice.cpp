@@ -160,8 +160,8 @@ bool SnapperService::isConfigured()
 QStringList SnapperService::configs()
 {
     // 注意:
-    // ここで 遅延refreshConfigs() を呼ぶと、プロパティゲッター評価中にconfigsChangedシグナルが送信され、QML側でbinding loopとして検出される
-    // 初回取得はQMLのComponent.onCompletedから明示的に refreshConfigs() を呼ぶ契約とする
+    // ここで 遅延refreshConfigs()を呼ぶと、プロパティゲッター評価中にconfigsChangedシグナルが送信され、QML側でbinding loopとして検出される
+    // 初回取得はQMLのComponent.onCompletedから明示的にrefreshConfigs()を呼ぶ契約とする
     return m_configs;
 }
 
@@ -396,8 +396,7 @@ bool SnapperService::rollback(int number)
     if (!reply.isValid()) {
         qCCritical(snapperLog) << "Failed to rollback snapshot via D-Bus:"
                                << reply.error().message();
-        emit rollbackFailed(tr("Failed to rollback snapshot: %1")
-                           .arg(reply.error().message()));
+        emit rollbackFailed(tr("Failed to rollback snapshot: %1").arg(reply.error().message()));
         return false;
     }
 

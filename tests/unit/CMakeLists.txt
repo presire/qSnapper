@@ -98,9 +98,41 @@ target_link_libraries(tst_comparisoncache PRIVATE
 set_target_properties(tst_comparisoncache PROPERTIES AUTOMOC ON)
 add_test(NAME tst_comparisoncache COMMAND tst_comparisoncache)
 
+# --- tst_restoremanifest ---
+add_executable(tst_restoremanifest
+    tst_restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.h
+)
+target_include_directories(tst_restoremanifest PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_restoremanifest PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_restoremanifest PROPERTIES AUTOMOC ON)
+add_test(NAME tst_restoremanifest COMMAND tst_restoremanifest)
+
+# --- tst_restoreplanexecutor ---
+add_executable(tst_restoreplanexecutor
+    tst_restoreplanexecutor.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+)
+target_include_directories(tst_restoreplanexecutor PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_restoreplanexecutor PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_restoreplanexecutor PROPERTIES AUTOMOC ON)
+add_test(NAME tst_restoreplanexecutor COMMAND tst_restoreplanexecutor)
+
 # ASan/UBSan を全テストに適用 (Debugビルド時に-DQSNAPPER_TEST_SANITIZE=ONで)
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers tst_filechangemodel tst_comparisoncache)
+    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restoreplanexecutor)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

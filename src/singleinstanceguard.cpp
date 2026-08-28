@@ -40,6 +40,7 @@ SingleInstanceGuard::~SingleInstanceGuard()
     if (m_server) {
         m_server->close();
     }
+
     if (m_lockFile) {
         m_lockFile->unlock();
     }
@@ -65,7 +66,7 @@ QString SingleInstanceGuard::lockFilePath() const
 {
     QString runtimeDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     if (runtimeDir.isEmpty()) {
-        // RuntimeLocation が使えない環境では /tmp フォールバックを許容する
+        // RuntimeLocationが使えない環境では /tmp フォールバックを許容する
         // これはroot権限境界ではなく、GUIクライアント側の単一インスタンス制御であり、
         // lock名もUID単位で分離されるため、ここではgraceful degradationを優先する
         // ただし /tmp は本来の理想配置ではないため、通常運用ではXDG_RUNTIME_DIRを優先する
@@ -109,6 +110,7 @@ bool SingleInstanceGuard::tryAcquire()
         // 既存インスタンスにraise要求を送信
         const qint64 expectedBytes = qstrlen(kRaiseMessage);
         const qint64 writtenBytes = probe.write(kRaiseMessage);
+
         if (writtenBytes != expectedBytes) {
             qWarning() << "SingleInstanceGuard: failed to queue raise request:"
                        << probe.errorString();
@@ -117,6 +119,7 @@ bool SingleInstanceGuard::tryAcquire()
             qWarning() << "SingleInstanceGuard: failed to deliver raise request:"
                        << probe.errorString();
         }
+
         probe.disconnectFromServer();
         return false;
     }

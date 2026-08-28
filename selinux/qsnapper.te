@@ -1,4 +1,4 @@
-module qsnapper 1.3.3;
+module qsnapper 1.3.7;
 
 ########################################
 # qSnapper SELinux Policy Module
@@ -130,6 +130,7 @@ require {
     attribute file_type;
     attribute exec_type;
     attribute domain;
+    attribute can_change_object_identity;
 
     role unconfined_r;
     role system_r;
@@ -137,9 +138,9 @@ require {
     # Object classes
     class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack setfscreate siginh };
     class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint execmod watch watch_reads relabelfrom relabelto };
-    class dir { getattr setattr open read write search add_name remove_name create rmdir ioctl mounton watch watch_reads relabelfrom relabelto };
-    class lnk_file { getattr read create unlink relabelfrom relabelto };
-    class fifo_file { getattr open read write create unlink ioctl relabelfrom relabelto };
+    class dir { getattr setattr open read write search add_name remove_name create rmdir rename ioctl mounton watch watch_reads relabelfrom relabelto };
+    class lnk_file { getattr setattr read create unlink rename relabelfrom relabelto };
+    class fifo_file { getattr open read write create unlink rename ioctl relabelfrom relabelto };
     class sock_file { getattr setattr open read write create unlink rename relabelfrom relabelto };
     class chr_file { getattr open read write ioctl map };
     class blk_file { getattr open read write ioctl };
@@ -169,6 +170,14 @@ type qsnapper_tmpfs_t;
 
 typeattribute qsnapper_t domain;
 typeattribute qsnapper_dbus_t domain;
+
+# 復元エンジンはsnapshot側のSELinux contextをそのままlive側へ書き戻す。
+# base policyには
+#   constrain file { create relabelfrom relabelto } (u1 == u2 or (t1 == can_change_object_identity));
+# という制約があり、qsnapper_dbus_t (system_u) から unconfined_u 等の異なるSELinux userを持つ
+# contextへrelabelするにはこの属性が必要になる (setfiles_t / rpm_t / bootloader_t と同じ扱い)。
+# qsnapper_dbus_tは元々全file_typeへの書き込み権を持つため、実効的な権限拡大にはならない
+typeattribute qsnapper_dbus_t can_change_object_identity;
 typeattribute qsnapper_exec_t exec_type, file_type;
 typeattribute qsnapper_dbus_exec_t exec_type, file_type;
 typeattribute qsnapper_tmp_t file_type;
@@ -545,17 +554,17 @@ allow qsnapper_dbus_t var_lib_t:file { getattr open read write create unlink ren
 allow qsnapper_dbus_t var_lib_t:lnk_file { getattr read create unlink };
 
 # Snapshot directory management - /.snapshots (unlabeled_t or fs_t on Btrfs)
-allow qsnapper_dbus_t unlabeled_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl mounton };
+allow qsnapper_dbus_t unlabeled_t:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl mounton };
 allow qsnapper_dbus_t unlabeled_t:file { getattr setattr open read write create unlink rename link };
-allow qsnapper_dbus_t unlabeled_t:lnk_file { getattr read create unlink };
-allow qsnapper_dbus_t unlabeled_t:fifo_file { getattr open read write create unlink };
+allow qsnapper_dbus_t unlabeled_t:lnk_file { getattr setattr read create unlink rename };
+allow qsnapper_dbus_t unlabeled_t:fifo_file { getattr open read write create unlink rename };
 allow qsnapper_dbus_t unlabeled_t:sock_file { getattr open read write create unlink };
 allow qsnapper_dbus_t unlabeled_t:blk_file { getattr open read write ioctl };
 allow qsnapper_dbus_t unlabeled_t:chr_file { getattr open read write ioctl };
 allowxperm qsnapper_dbus_t unlabeled_t:dir ioctl { 0x9400-0x94ff };
-allow qsnapper_dbus_t fs_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl mounton };
+allow qsnapper_dbus_t fs_t:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl mounton };
 allow qsnapper_dbus_t fs_t:file { getattr setattr open read write create unlink rename link };
-allow qsnapper_dbus_t fs_t:lnk_file { getattr read create unlink };
+allow qsnapper_dbus_t fs_t:lnk_file { getattr setattr read create unlink rename };
 allow qsnapper_dbus_t fs_t:filesystem { getattr mount unmount };
 allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 
@@ -563,10 +572,17 @@ allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 # restore engine and must read AND write any file under any label
 # (cupsd_rw_etc_t, NetworkManager_etc_t, passwd_file_t, *_exec_t, *_etc_t, ...).
 # Granting via file_type/exec_type attributes avoids enumerating every type.
-allow qsnapper_dbus_t file_type:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl relabelfrom relabelto };
+#
+# rename: 復元エンジンはlive側を一時名で作成してからrenameat()で原子的に差し替える
+#         (copySymlinkBeneathRoot) ほか、typechangedのlive pathをrenameat()で退避する
+#         (movePathAsideBeneathRoot)。差し替え対象はfileだけでなくdir / lnk_file /
+#         fifo_fileにもなるため、全classへrenameが必要になる
+# setattr (lnk_file): symlink自体のowner / timesを
+#         fchownat() / utimensat() のAT_SYMLINK_NOFOLLOWで復元するために必要
+allow qsnapper_dbus_t file_type:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:file { getattr setattr open read write append create unlink rename link map lock ioctl relabelfrom relabelto };
-allow qsnapper_dbus_t file_type:lnk_file { getattr read create unlink relabelfrom relabelto };
-allow qsnapper_dbus_t file_type:fifo_file { getattr open read write create unlink relabelfrom relabelto };
+allow qsnapper_dbus_t file_type:lnk_file { getattr setattr read create unlink rename relabelfrom relabelto };
+allow qsnapper_dbus_t file_type:fifo_file { getattr open read write create unlink rename relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:sock_file { getattr open read write create unlink relabelfrom relabelto };
 allow qsnapper_dbus_t exec_type:file { getattr setattr open read write create unlink rename link map lock ioctl relabelfrom relabelto };
 

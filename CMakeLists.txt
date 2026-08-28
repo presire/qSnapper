@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.6 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.7 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -20,6 +20,14 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml QuickControls2 DBus LinguistTools)
 find_package(PolkitQt6-1 REQUIRED)
+
+# D-Busサービスはpolkitの非同期認可API (polkit_authority_check_authorization) を
+# 直接使用する。polkit-qt6-1の非同期APIはシングルトンのシグナル1本しか持たず、
+# 完了通知に要求識別子が含まれないため、同時実行時にどのD-Bus呼び出しの結果か
+# を判別できず、rootサービスでは認可の取り違えに繋がるため使用しない。
+# polkit-gobject-1はPolkitQt6-1が内部で依存しており、追加の配布要件は生じない
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(POLKIT_GOBJECT REQUIRED IMPORTED_TARGET polkit-gobject-1)
 
 qt6_standard_project_setup()
 
@@ -129,12 +137,16 @@ set(DBUS_SERVICE_SOURCES
     src/dbusservice/snapshotoperations.cpp
     src/dbusservice/inputvalidator.cpp
     src/dbusservice/filesystemhelpers.cpp
+    src/dbusservice/restoremanifest.cpp
+    src/dbusservice/restoreplanexecutor.cpp
 )
 
 set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
     src/dbusservice/inputvalidator.h
     src/dbusservice/filesystemhelpers.h
+    src/dbusservice/restoremanifest.h
+    src/dbusservice/restoreplanexecutor.h
 )
 
 qt6_add_executable(qsnapper-dbus-service
@@ -146,6 +158,7 @@ target_link_libraries(qsnapper-dbus-service PRIVATE
     Qt6::Core
     Qt6::DBus
     PolkitQt6-1::Core
+    PkgConfig::POLKIT_GOBJECT
     snapper
     btrfsutil
 )
@@ -246,6 +259,7 @@ if(QSNAPPER_BUILD_TESTS)
     message(STATUS "Unit tests: ENABLED (sanitizers=${QSNAPPER_TEST_SANITIZE})")
     enable_testing()
     add_subdirectory(tests/unit)
+    add_subdirectory(tests/integration)
 else()
     message(STATUS "Unit tests: DISABLED (enable with -DQSNAPPER_BUILD_TESTS=ON)")
 endif()

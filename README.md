@@ -121,7 +121,7 @@ sudo zypper install cmake gcc-c++ \
                     libsnapper-devel libbtrfsutil-devel scdoc
 ```
 
-**RHEL 9 / 10**
+**RHEL 9 / 10**  
 
 ```bash
 sudo dnf install cmake gcc-c++ \
@@ -129,6 +129,20 @@ sudo dnf install cmake gcc-c++ \
                  polkit-devel polkit-qt6-1-devel \
                  snapper-devel btrfs-progs-devel scdoc
 ```
+
+**Debian 13 (trixie)**  
+
+```bash
+sudo apt install cmake g++ make pkg-config \
+                 qt6-base-dev qt6-declarative-dev qt6-tools-dev \
+                 libpolkit-qt6-1-dev libpolkit-gobject-1-dev \
+                 libsnapper-dev libboost-dev libbtrfs-dev libbtrfsutil-dev scdoc
+```
+
+**Note:**  
+The D-Bus system service uses the polkit-gobject-1 API directly, and the build locates it via `pkg-config` (`polkit-gobject-1.pc`).  
+This module is shipped in `polkit-devel` on openSUSE and RHEL/Fedora,  
+and in `libpolkit-gobject-1-dev` on Debian (all listed above), so no additional package is required.  
 
 #### 2. Build and Install
 
@@ -149,9 +163,10 @@ sudo make install
   cmake -DCMAKE_INSTALL_PREFIX=/usr -DENABLE_SELINUX=ON ..
   ```
 
-  Enables SELinux Mandatory Access Control (MAC) policy module installation.
+  Enables SELinux Mandatory Access Control (MAC) policy module installation.  
 
-  **Requirements for SELinux:**
+  **Requirements for SELinux:**  
+
   - openSUSE / SUSE Linux Enterprise:
     ```bash
     sudo zypper install selinux-policy-devel policycoreutils
@@ -163,14 +178,14 @@ sudo make install
 
   See [selinux/README.md](selinux/README.md) for detailed SELinux configuration.
 
-- **Log Directory** (Optional, default: `/var/log/qsnapper`):
+- **Log Directory** (Optional, default: `/var/log/qsnapper`):  
   ```bash
   cmake -DCMAKE_INSTALL_PREFIX=/usr -DQSNAPPER_LOG_DIR=/path/to/log/dir ..
   ```
 
-  Changes the directory where the D-Bus service writes log files.
-  The log filename (`qsnapper-dbus.log`) cannot be changed.
-  If not specified, logs are written to `/var/log/qsnapper`.
+  Changes the directory where the D-Bus service writes log files.  
+  The log filename (`qsnapper-dbus.log`) cannot be changed.  
+  If not specified, logs are written to `/var/log/qsnapper`.  
 
 #### 3. Post-Installation Steps
 
@@ -246,7 +261,7 @@ qSnapper offers two restore methods, selectable from the restore confirmation di
 #### Restore Options
 
 - **Batch size** (1–1000, default: 100):  
-  Number of files processed per batch. Larger values may improve throughput; smaller values provide more granular progress feedback.  
+  Number of files submitted per staging chunk before the restore plan is frozen. Larger values may improve throughput; smaller values provide more granular progress feedback. A multi-file restore requires exactly one PolicyKit authorization at commit time, regardless of how many files or chunks are selected, with no re-prompt while the frozen plan executes.  
 
 During restoration, a real-time progress log displays each file as it is restored, with automatic scrolling.  
 

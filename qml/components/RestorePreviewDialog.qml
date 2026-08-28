@@ -129,11 +129,10 @@ BorderedDialog {
         }
 
         // 復元進捗更新ハンドラ
+        // シグナルは復元ファイル1件ごとに届くため、ここではバッファへ積むだけにする
+        // (1件ごとにUIを書き換えるとGUIスレッドが占有され、描画が更新されなくなる)
         onRestoreProgress: function(current, total, filePath) {
-            progressDialog.currentFile = filePath
-            progressDialog.currentProgress = current
-            progressDialog.totalProgress = total
-            progressDialog.restoreLog += filePath + "\n"
+            progressDialog.queueProgress(current, total, filePath)
         }
 
         // 復元完了ハンドラ
@@ -796,10 +795,7 @@ BorderedDialog {
         onAccepted: {
             // 復元対象のスナップショット番号を設定 (D-Bus RestoreFilesに使用される)
             fileChangeModel.snapshotNumber = confirmRestoreDialog.restoreTargetNumber
-            progressDialog.currentProgress = 0
-            progressDialog.totalProgress = 0
-            progressDialog.currentFile = ""
-            progressDialog.restoreLog = ""
+            progressDialog.resetProgress()
             progressDialog.open()
             fileChangeModel.restoreCheckedItems()
         }
@@ -827,7 +823,67 @@ BorderedDialog {
         property int currentProgress: 0              // 現在の進捗
         property int totalProgress: 0                // 総ファイル数
         property string currentFile: ""              // 現在処理中のファイル
-        property string restoreLog: ""               // 復元ログテキスト
+
+        // 進捗シグナルの保留分 (flushTimerで一括反映する)
+        property int pendingProgress: 0              // 最新の進捗
+        property int pendingTotal: 0                 // 最新の総ファイル数
+        property string pendingFile: ""              // 最新の処理中ファイル
+        property var pendingLines: []                // 未反映のログ行
+
+        // 保留分を一定間隔でUIへ反映する
+        // 保留が無くなったら停止し、次のqueueProgressで再開する
+        Timer {
+            id: flushTimer
+            interval: 100
+            repeat: true
+            onTriggered: {
+                if (progressDialog.pendingLines.length === 0) {
+                    flushTimer.stop()
+                    return
+                }
+                progressDialog.flushProgress()
+            }
+        }
+
+        // 受信した進捗をバッファへ蓄積する (UIへは反映しない)
+        function queueProgress(current, total, filePath) {
+            pendingProgress = current
+            pendingTotal = total
+            pendingFile = filePath
+            pendingLines.push(filePath)
+            if (!flushTimer.running) {
+                flushTimer.start()
+            }
+        }
+
+        // 保留中の進捗をUIへ一括反映する
+        function flushProgress() {
+            if (pendingLines.length === 0) {
+                return
+            }
+            // ProgressBarはvalueをtoの範囲へ丸めるため、totalProgressを先に更新する
+            totalProgress = pendingTotal
+            currentProgress = pendingProgress
+            currentFile = pendingFile
+            // textの全置換はドキュメント全体を再構築するため、増分のみ追記する
+            restoreLogArea.append(pendingLines.join("\n"))
+            pendingLines = []
+            // lengthはO(1)。text.lengthはドキュメント全体を文字列化するため使わない
+            restoreLogArea.cursorPosition = restoreLogArea.length
+        }
+
+        // 進捗表示とログを初期化する
+        function resetProgress() {
+            flushTimer.stop()
+            pendingProgress = 0
+            pendingTotal = 0
+            pendingFile = ""
+            pendingLines = []
+            currentProgress = 0
+            totalProgress = 0
+            currentFile = ""
+            restoreLogArea.clear()
+        }
 
         contentItem: ColumnLayout {
             spacing: 10
@@ -861,10 +917,11 @@ BorderedDialog {
                 ScrollBar.vertical.policy: ScrollBar.AsNeeded
                 ScrollBar.horizontal.policy: ScrollBar.AsNeeded
 
+                // テキストはflushProgress()がappend()で増分追記し、
+                // 最下行への自動スクロールもそこでcursorPositionを更新して行う
                 TextArea {
                     id: restoreLogArea
                     readOnly: true
-                    text: progressDialog.restoreLog
                     wrapMode: TextEdit.NoWrap
                     font.pixelSize: 11
                     font.family: "monospace"
@@ -873,11 +930,6 @@ BorderedDialog {
                         color: palette.base
                         border.color: palette.mid
                         border.width: 1
-                    }
-
-                    // 新しいテキスト追加時に最下行に自動スクロール
-                    onTextChanged: {
-                        cursorPosition = text.length
                     }
                 }
             }
@@ -950,7 +1002,7 @@ BorderedDialog {
         }
 
         onAccepted: {
-            progressDialog.currentProgress = 0
+            progressDialog.resetProgress()
             progressDialog.totalProgress = 1
             progressDialog.currentFile = rightPane.selectedFilePath
             progressDialog.open()

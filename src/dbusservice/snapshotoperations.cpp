@@ -7,8 +7,12 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QDebug>
-#include <PolkitQt1/Authority>
-#include <PolkitQt1/Subject>
+#include <QPointer>
+// glibのGDBusInterfaceInfo / GDBusObjectSkeletonは "signals" というメンバ名を持ち、
+// Qtの signals マクロと衝突する。polkitヘッダの取り込み中だけマクロを外す
+#undef signals
+#include <polkit/polkit.h>
+#define signals Q_SIGNALS
 #include <snapper/Snapper.h>
 #include <snapper/Snapshot.h>
 #include <snapper/Comparison.h>
@@ -27,6 +31,8 @@
 #include <pwd.h>
 #include <grp.h>
 #include <errno.h>
+#include <limits.h>
+#include <sys/xattr.h>
 #include "snapshotoperations.h"
 #include "inputvalidator.h"
 #include "filesystemhelpers.h"
@@ -55,11 +61,129 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 #endif
 
 // ============================================================================
+// Polkit非同期認可
+//
+// polkit-qt6-1の非同期API (Authority::checkAuthorization + checkAuthorizationFinished)
+// は使用しない。Authorityはシングルトンであり、完了シグナルはResult値しか運ばず、
+// 完了callbackのuser_dataもAuthority自身であるため、同時に2件の認可が進行すると
+// どのD-Bus呼び出しに対する結果なのかを判別できない (rootサービスでは
+// 「別要求の許可」を流用してしまう認可の取り違えに直結する)。
+// またcancellableとエラー状態がシングルトンで共有されており、1件の失敗が
+// 後続の全呼び出しを黙って落とす。
+//
+// polkitのGObject APIは呼び出しごとにGSimpleAsyncResultとuser_dataを確保するため、
+// 完了callbackを発行元の呼び出しへ厳密に対応付けられる。完了callbackは呼び出し時点の
+// thread-default GMainContext (=Qtのイベントループが回すdefault context) で発火する
+// ============================================================================
+
+namespace {
+
+    /**
+     * @brief polkit authorityをプロセス寿命の間だけ取得して再利用する
+     * @return 取得済みauthority、取得できなければnullptr
+     */
+    PolkitAuthority *polkitAuthorityInstance()
+    {
+        static PolkitAuthority *authority = []() -> PolkitAuthority * {
+            GError *error = nullptr;
+            PolkitAuthority *result = polkit_authority_get_sync(nullptr, &error);
+            if (!result) {
+                qCritical() << "Failed to obtain polkit authority:"
+                            << (error ? error->message : "unknown error");
+            }
+            if (error) {
+                g_error_free(error);
+            }
+            return result;
+        }();
+        return authority;
+    }
+
+    /**
+     * @brief 非同期認可1件分の状態 (polkitのuser_dataとして渡す)
+     */
+    struct AsyncAuthorization {
+        // サービスが先に破棄された場合に継続を実行しないためのguard
+        QPointer<SnapshotOperations> service;
+        std::function<void(bool)> continuation;
+    };
+
+    /**
+     * @brief polkit非同期認可の完了callback
+     *
+     * user_dataは本呼び出し専用に確保したAsyncAuthorizationであり、
+     * 他の認可要求の結果と混ざらない
+     *
+     * @param source 認可を行ったPolkitAuthority
+     * @param result 完了結果
+     * @param userData AsyncAuthorization* (本callbackが所有権を引き取る)
+     */
+    void asyncAuthorizationFinished(GObject *source,
+                                    GAsyncResult *result,
+                                    gpointer userData)
+    {
+        const std::unique_ptr<AsyncAuthorization> request(
+            static_cast<AsyncAuthorization *>(userData));
+
+        GError *error = nullptr;
+        PolkitAuthorizationResult *authorization =
+            polkit_authority_check_authorization_finish(
+                POLKIT_AUTHORITY(source), result, &error);
+
+        bool granted = false;
+        if (authorization) {
+            granted = polkit_authorization_result_get_is_authorized(authorization);
+            g_object_unref(authorization);
+        }
+        else {
+            qWarning() << "Polkit authorization check failed:"
+                       << (error ? error->message : "unknown error");
+        }
+        if (error) {
+            g_error_free(error);
+        }
+
+        // サービスが既に破棄されている場合は応答先も存在しない
+        if (request->service.isNull() || !request->continuation) {
+            return;
+        }
+        request->continuation(granted);
+    }
+
+}
+
+// ============================================================================
 // In-process unified diff (Myers diff algorithm)
 // "diff -u"コマンドの置き換え
 // ============================================================================
 
 namespace {
+
+    // 新規inodeへ差し替える復元経路で、snapshot側のSELinux labelを引き継ぐ。
+    // SELinux無効環境やlabel非対応FSではENODATA / ENOTSUPになるため、成否は非致命として扱う
+    void copySecurityContextBestEffort(int sourceFd, int destinationFd)
+    {
+        static constexpr const char *kSelinuxXattr = "security.selinux";
+
+        const ssize_t length = ::fgetxattr(sourceFd, kSelinuxXattr, nullptr, 0);
+        if (length <= 0) {
+            return;
+        }
+
+        QByteArray context(static_cast<qsizetype>(length), '\0');
+        const ssize_t read = ::fgetxattr(sourceFd, kSelinuxXattr, context.data(),
+                                         static_cast<size_t>(context.size()));
+        if (read <= 0) {
+            return;
+        }
+
+        context.truncate(static_cast<qsizetype>(read));
+        if (::fsetxattr(destinationFd, kSelinuxXattr, context.constData(),
+                        static_cast<size_t>(context.size()), 0) < 0) {
+            qWarning() << "copySecurityContextBestEffort: fsetxattr failed (non-fatal):"
+                       << strerror(errno);
+        }
+    }
 
     QString siblingTemporaryPath(const QString &path, const QString &tag, int attempt)
     {
@@ -67,14 +191,26 @@ namespace {
         const QString dirPath = slashIndex <= 0 ? QStringLiteral("/") : path.left(slashIndex);
         const QString baseName = slashIndex < 0 ? path : path.mid(slashIndex + 1);
 
-        return dirPath
-                + QLatin1Char('/')
-                + QLatin1Char('.')
-                + baseName
-                + QStringLiteral(".") + tag
+        // suffixはASCIIのみで構成されるため、文字数がそのままbyte数になる
+        const QString suffix = QStringLiteral(".") + tag
                 + QStringLiteral(".") + QString::number(QCoreApplication::applicationPid())
                 + QStringLiteral(".") + QString::number(QDateTime::currentMSecsSinceEpoch())
                 + QStringLiteral(".") + QString::number(attempt);
+
+        // leaf名はNAME_MAX (bytes) を超えられない。長いbase名はここで切り詰めるが、
+        // suffixのpid / ms / attemptにより一意性は保たれる。
+        // UTF-8の途中で切らないよう、収まるまで文字単位で削る
+        const qsizetype maxBaseBytes = static_cast<qsizetype>(NAME_MAX) - 1 - suffix.size();
+        QString trimmedBase = baseName;
+        while (!trimmedBase.isEmpty() && trimmedBase.toUtf8().size() > maxBaseBytes) {
+            trimmedBase.chop(1);
+        }
+
+        return dirPath
+                + QLatin1Char('/')
+                + QLatin1Char('.')
+                + trimmedBase
+                + suffix;
     }
 
     // live path 上の退避 rename も parent dirfd を固定した renameat() に寄せる。
@@ -367,6 +503,7 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
     : QObject(parent)
     , m_snapper(nullptr)
     , m_currentConfig("")
+    , m_restoreExecutor(m_restoreRegistry)
 {
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(IdleTimeoutMs);
@@ -375,6 +512,35 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
         QCoreApplication::quit();
     });
     m_idleTimer.start();
+
+    m_restoreExecutor.setEntryApplier(
+        [this](const QString &manifestId,
+               const qsnapper::restore::RestoreEntry &entry) {
+            return applyRestoreEntry(manifestId, entry);
+        });
+    m_restoreExecutor.setProgressSink(
+        [this](const QString &manifestId, int current, int total,
+               const QString &path) {
+            resetIdleTimer();
+            emit restorePlanProgress(manifestId, current, total,
+                                     QFileInfo(path).fileName());
+        });
+    m_restoreExecutor.setFinishedSink(
+        [this](const QString &manifestId,
+               qsnapper::restore::ManifestState terminal,
+               const QString &message) {
+            finishRestorePlan(manifestId, terminal, message);
+        });
+    m_restoreExecutor.setChunkScheduler(
+        [this](std::function<void()> chunk) {
+            QTimer::singleShot(0, this, [chunk]() { chunk(); });
+        });
+
+    m_ownerWatcher = new QDBusServiceWatcher(
+        QString(), QDBusConnection::systemBus(),
+        QDBusServiceWatcher::WatchForUnregistration, this);
+    connect(m_ownerWatcher, &QDBusServiceWatcher::serviceUnregistered,
+            this, &SnapshotOperations::handleRestoreOwnerUnregistered);
 }
 
 /**
@@ -384,16 +550,324 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
  */
 SnapshotOperations::~SnapshotOperations()
 {
+    const QStringList planIds = m_restorePlanOwners.keys();
+    for (const QString &manifestId : planIds) {
+        m_restoreExecutor.abandon(manifestId);
+    }
+
+    const QStringList executionIds = m_restoreExecutions.keys();
+    for (const QString &manifestId : executionIds) {
+        cleanupRestoreExecution(manifestId);
+    }
 }
 
 /**
  * @brief アイドルタイマをリセット
  *
  * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長する
+ *
+ * polkitプロンプトの応答待ちが1件でも残っている間はタイマを止めたままにする
+ * (プロンプトはタイムアウトを持たないため、認証中にアイドル終了してしまうと
+ *  ユーザがパスワードを入力した直後に呼び出しが失われる)
  */
 void SnapshotOperations::resetIdleTimer()
 {
+    if (m_pendingAuthorizations > 0) {
+        m_idleTimer.stop();
+        return;
+    }
     m_idleTimer.start();
+}
+
+/**
+ * @brief 現在のD-Bus呼び出し元unique nameを返す
+ * @return D-Bus呼び出し時はmessage sender、それ以外は空文字列
+ */
+QString SnapshotOperations::callerOwner() const
+{
+    return calledFromDBus() ? message().service() : QString();
+}
+
+/**
+ * @brief manifest操作エラーを情報漏洩しないD-Bus errorへ変換して送信する
+ * @param error registryが返したエラー
+ * @return 常にfalse
+ */
+bool SnapshotOperations::sendManifestError(
+    qsnapper::restore::ManifestError error)
+{
+    using qsnapper::restore::ManifestError;
+
+    QDBusError::ErrorType errorType = QDBusError::Failed;
+    QString messageText = QStringLiteral("Restore plan operation failed");
+
+    switch (error) {
+    case ManifestError::NotFound:
+    case ManifestError::OwnerMismatch:
+    case ManifestError::Expired:
+        errorType = QDBusError::AccessDenied;
+        messageText = QStringLiteral("Restore plan access denied");
+        break;
+    case ManifestError::WrongState:
+        errorType = QDBusError::Failed;
+        messageText = QStringLiteral("Restore plan is not in the required state");
+        break;
+    case ManifestError::AlreadyTerminal:
+        errorType = QDBusError::Failed;
+        messageText = QStringLiteral("Restore plan is already terminal");
+        break;
+    case ManifestError::CapacityExceeded:
+        errorType = QDBusError::InvalidArgs;
+        messageText = QStringLiteral("Restore plan capacity exceeded");
+        break;
+    case ManifestError::GlobalLimit:
+        errorType = QDBusError::LimitsExceeded;
+        messageText = QStringLiteral("Restore plan limit exceeded");
+        break;
+    case ManifestError::InvalidArgument:
+        errorType = QDBusError::InvalidArgs;
+        messageText = QStringLiteral("Invalid restore plan request");
+        break;
+    case ManifestError::None:
+        break;
+    }
+
+    replyError(errorType, messageText);
+    return false;
+}
+
+/**
+ * @brief manifest状態をD-Bus contractの小文字表現へ変換する
+ * @param state 変換対象状態
+ * @return contractで定義した状態文字列
+ */
+QString SnapshotOperations::restoreManifestStateString(
+    qsnapper::restore::ManifestState state)
+{
+    using qsnapper::restore::ManifestState;
+
+    switch (state) {
+    case ManifestState::Staging:
+        return QStringLiteral("staging");
+    case ManifestState::Frozen:
+        return QStringLiteral("frozen");
+    case ManifestState::Running:
+        return QStringLiteral("running");
+    case ManifestState::Completed:
+        return QStringLiteral("completed");
+    case ManifestState::Failed:
+        return QStringLiteral("failed");
+    case ManifestState::Cancelled:
+        return QStringLiteral("cancelled");
+    }
+    return QStringLiteral("failed");
+}
+
+/**
+ * @brief 復元方式をD-Bus contractの文字列表現へ変換する
+ * @param mode 変換対象方式
+ * @return yastまたはdirect
+ */
+QString SnapshotOperations::restoreModeString(
+    qsnapper::restore::RestoreMode mode)
+{
+    return mode == qsnapper::restore::RestoreMode::DirectCopy
+        ? QStringLiteral("direct")
+        : QStringLiteral("yast");
+}
+
+/**
+ * @brief RFC4180形式で必要なCSV fieldをquoteする
+ * @param field quote対象文字列
+ * @return CSVへ安全に埋め込めるfield
+ */
+QString SnapshotOperations::quoteRestoreStatusCsvField(const QString &field)
+{
+    if (!field.contains(QLatin1Char(','))
+            && !field.contains(QLatin1Char('"'))) {
+        return field;
+    }
+
+    QString escaped = field;
+    escaped.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+    return QLatin1Char('"') + escaped + QLatin1Char('"');
+}
+
+/**
+ * @brief execution contextに記録されたsnapshot mountを解除する
+ * @param execution mount元設定とsnapshot番号を持つcontext
+ */
+void SnapshotOperations::unmountRestoreExecution(
+    const RestoreExecution &execution)
+{
+    if (!execution.mounted) {
+        return;
+    }
+
+    try {
+        snapper::Snapper *snapper = getSnapper(execution.configName);
+        if (!snapper) {
+            qWarning() << "Staged restore: Failed to initialize Snapper for unmount";
+            return;
+        }
+
+        const snapper::Snapshots::const_iterator snapshot =
+            snapper->getSnapshots().find(execution.snapshotNumber);
+        if (snapshot == snapper->getSnapshots().end()) {
+            qWarning() << "Staged restore: Snapshot unavailable during unmount";
+            return;
+        }
+        snapshot->umountFilesystemSnapshot(true);
+    }
+    catch (const snapper::Exception &e) {
+        qWarning() << "Staged restore: Failed to unmount snapshot:" << e.what();
+    }
+    catch (const std::exception &e) {
+        qWarning() << "Staged restore: Unexpected unmount failure:" << e.what();
+    }
+    catch (...) {
+        qWarning() << "Staged restore: Unknown unmount failure";
+    }
+}
+
+/**
+ * @brief 指定manifestのmountを解除して実行contextを削除する
+ * @param manifestId cleanup対象manifest id
+ */
+void SnapshotOperations::cleanupRestoreExecution(const QString &manifestId)
+{
+    const auto execution = m_restoreExecutions.find(manifestId);
+    if (execution == m_restoreExecutions.end()) {
+        return;
+    }
+
+    const RestoreExecution context = execution.value();
+    unmountRestoreExecution(context);
+    if (execution->snapshotDirFd >= 0) {
+        ::close(execution->snapshotDirFd);
+        execution->snapshotDirFd = -1;
+    }
+    m_restoreExecutions.erase(execution);
+}
+
+/**
+ * @brief 復元後にroot subvolumeがread-onlyならrwへ戻す安全ネットを実行する
+ */
+void SnapshotOperations::restoreRootReadWriteSafetyNet()
+{
+    bool isReadOnly = false;
+    if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK
+            && isReadOnly) {
+        qWarning() << "Staged restore: Root subvolume became read-only after restore, restoring rw";
+        const auto result = btrfs_util_set_subvolume_read_only("/", false);
+        if (result != BTRFS_UTIL_OK) {
+            qCritical() << "Staged restore: Failed to restore root subvolume rw state:"
+                        << result;
+        }
+    }
+}
+
+/**
+ * @brief 終端計画の安全ネット・unmount・signal・registry削除を実行する
+ * @param manifestId 終端したmanifest id
+ * @param terminal 終端状態
+ * @param messageText 終端理由
+ */
+void SnapshotOperations::finishRestorePlan(
+    const QString &manifestId,
+    qsnapper::restore::ManifestState terminal,
+    const QString &messageText)
+{
+    restoreRootReadWriteSafetyNet();
+
+    const auto execution = m_restoreExecutions.find(manifestId);
+    if (execution != m_restoreExecutions.end()) {
+        unmountRestoreExecution(execution.value());
+        if (execution->snapshotDirFd >= 0) {
+            ::close(execution->snapshotDirFd);
+            execution->snapshotDirFd = -1;
+        }
+    }
+
+    emit restorePlanFinished(manifestId,
+                             restoreManifestStateString(terminal),
+                             messageText);
+
+    m_restoreExecutions.remove(manifestId);
+    m_restoreRegistry.remove(manifestId);
+    m_restorePlanOwners.remove(manifestId);
+    removeUnusedRestoreOwnerWatches();
+}
+
+/**
+ * @brief owner消失時に予約済み実行とmountとmanifestを全て破棄する
+ * @param owner unregisterされたD-Bus unique name
+ */
+void SnapshotOperations::handleRestoreOwnerUnregistered(const QString &owner)
+{
+    QStringList ownedPlanIds;
+    for (auto plan = m_restorePlanOwners.cbegin();
+         plan != m_restorePlanOwners.cend(); ++plan) {
+        if (plan.value() == owner) {
+            ownedPlanIds.append(plan.key());
+        }
+    }
+
+    for (const QString &manifestId : ownedPlanIds) {
+        m_restoreExecutor.abandon(manifestId);
+        cleanupRestoreExecution(manifestId);
+        m_restorePlanOwners.remove(manifestId);
+    }
+
+    m_restoreRegistry.removeByOwner(owner);
+    if (m_ownerWatcher && m_restoreRegistry.countForOwner(owner) == 0) {
+        m_ownerWatcher->removeWatchedService(owner);
+    }
+}
+
+/**
+ * @brief TTL purgeで消えたactive計画をabandonしmountもcleanupする
+ */
+void SnapshotOperations::purgeExpiredRestorePlans()
+{
+    m_restoreRegistry.purgeExpired();
+
+    const QStringList planIds = m_restorePlanOwners.keys();
+    for (const QString &manifestId : planIds) {
+        qsnapper::restore::ManifestError error =
+            qsnapper::restore::ManifestError::None;
+        const QString owner = m_restorePlanOwners.value(manifestId);
+        if (!m_restoreRegistry.status(manifestId, owner, &error)) {
+            // executorが同じ計画をもう1度終端しないよう先にabandonしてから、
+            // finishRestorePlanで終端する。
+            // ここでcleanupRestoreExecutionだけを呼ぶとrestorePlanFinishedが発火せず、
+            // クライアントは完了通知を永久に待ち続け、復元でread-onlyになった
+            // root subvolumeをrwへ戻す安全ネットも実行されない
+            m_restoreExecutor.abandon(manifestId);
+            finishRestorePlan(
+                manifestId, qsnapper::restore::ManifestState::Failed,
+                QStringLiteral("Restore plan expired before completion"));
+        }
+    }
+
+    removeUnusedRestoreOwnerWatches();
+}
+
+/**
+ * @brief manifestを持たないownerをservice watcherから除外する
+ */
+void SnapshotOperations::removeUnusedRestoreOwnerWatches()
+{
+    if (!m_ownerWatcher) {
+        return;
+    }
+
+    const QStringList watchedOwners = m_ownerWatcher->watchedServices();
+    for (const QString &owner : watchedOwners) {
+        if (m_restoreRegistry.countForOwner(owner) == 0) {
+            m_ownerWatcher->removeWatchedService(owner);
+        }
+    }
 }
 
 /**
@@ -434,14 +908,27 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
         return false;
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.configure")) {
-        return false;
-    }
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.configure"),
+        [this, config = *cfg, settings]() {
+            return writeSnapperConfigAuthorized(config, settings);
+        });
+}
 
+/**
+ * @brief 認可済みのWriteSnapperConfig本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @param settings 設定のキー/バリューマップ
+ * @return 成功時: true、失敗時: false
+ */
+bool SnapshotOperations::writeSnapperConfigAuthorized(
+    const QString &configName, const QMap<QString, QString> &settings)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
@@ -458,7 +945,7 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to write snapper config:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to write config: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to write config: %1").arg(e.what()));
         return false;
     }
 }
@@ -478,14 +965,24 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     if (!cfg) {
         return false;
     }
-    if (!checkAuthorization("com.presire.qsnapper.configure")) {
-        return false;
-    }
 
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.configure"),
+        [this, config = *cfg]() { return setupQuotaAuthorized(config); });
+}
+
+/**
+ * @brief 認可済みのSetupQuota本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @return 成功時: true、失敗時: false
+ */
+bool SnapshotOperations::setupQuotaAuthorized(const QString &configName)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
@@ -494,7 +991,7 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to setup quota:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to setup quota: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to setup quota: %1").arg(e.what()));
         return false;
     }
 }
@@ -513,7 +1010,7 @@ std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &co
 {
     const QString effective = configName.isEmpty() ? QStringLiteral("root") : configName;
     if (!qsnapper::security::validateConfigName(effective)) {
-        sendErrorReply(QDBusError::InvalidArgs,
+        replyError(QDBusError::InvalidArgs,
                        QStringLiteral("Invalid configName"));
         return std::nullopt;
     }
@@ -521,32 +1018,163 @@ std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &co
 }
 
 /**
- * @brief PolicyKitによる認証チェックを実行
+ * @brief 現在のD-Bus呼び出しの応答contextをcaptureする
  *
- * 指定されたアクションIDに対してユーザが権限を持っているかを確認する
- * 権限がない場合はD-Busエラー応答を送信する
+ * message()はスロットから戻ると無効になるため、認可待ちを跨ぐ経路では
+ * 本関数の戻り値を保持して応答する
  *
- * SubjectはSystemBusNameSubjectを用いる
- * UnixProcessSubject (PIDベース) はPIDがレース中に再割り当てされるTOCTOU脆弱性 (CVE-2013-4288) があり、polkit自身も非推奨としている
- * SystemBusNameSubjectはカーネルのD-Bus name-owner情報をpolkitdが参照するため、呼び出し元の取り違えが起きない
+ * @return capture済み応答context
+ */
+SnapshotOperations::CallReply SnapshotOperations::captureCallReply() const
+{
+    CallReply reply;
+    if (!calledFromDBus()) {
+        return reply;
+    }
+
+    reply.message = message();
+    reply.connection = connection();
+    reply.fromDBus = true;
+    return reply;
+}
+
+/**
+ * @brief 同期応答と遅延応答のどちらでも正しくD-Busエラーを返す
+ *
+ * @param type 返すD-Busエラー種別
+ * @param text エラーメッセージ
+ */
+void SnapshotOperations::replyError(QDBusError::ErrorType type, const QString &text)
+{
+    if (m_deferredReply) {
+        // 継続の中ではQDBusContextの呼び出しcontextが失われているため、
+        // capture済みmessageから直接エラー応答を組み立てて送出する
+        if (!m_deferredReply->replied && m_deferredReply->fromDBus) {
+            m_deferredReply->replied = true;
+            m_deferredReply->connection.send(
+                m_deferredReply->message.createErrorReply(type, text));
+        }
+        return;
+    }
+
+    sendErrorReply(type, text);
+}
+
+/**
+ * @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
+ */
+void SnapshotOperations::endPendingAuthorization()
+{
+    if (m_pendingAuthorizations > 0) {
+        --m_pendingAuthorizations;
+    }
+    resetIdleTimer();
+}
+
+/**
+ * @brief PolicyKitによる認可を要求する
+ *
+ * SubjectはSystemBusNameを用いる
+ * UnixProcess (PIDベース) はPIDがレース中に再割り当てされるTOCTOU脆弱性 (CVE-2013-4288) があり、polkit自身も非推奨としている
+ * SystemBusNameはカーネルのD-Bus name-owner情報をpolkitdが参照するため、呼び出し元の取り違えが起きない
+ *
+ * 対話を許可しない問い合わせを先に行う (高速経路)
+ * allow_active=yesやauth_admin_keepのキャッシュ済み認可はここで許可となり、プロンプトが出ないためevent loopはミリ秒しか止まらない
+ * 対話が必要な場合のみ非同期APIへ回す
+ * 同期版の対話呼び出しはタイムアウトを持たず、任意のローカルユーザが未応答のプロンプトを1つ開くだけでrootサービスのevent loop全体を無期限に凍結できるため使用しない
  *
  * @param actionId チェックするアクションID
- * @return 認証成功時: true、失敗時: false
+ * @param continuation 認可完了時に呼ぶ継続
+ * @return 即時許可 / 即時拒否 / 遅延のいずれか
  */
-bool SnapshotOperations::checkAuthorization(const QString &actionId)
+SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
+    const QString &actionId,
+    std::function<void(const CallReply &, bool)> continuation)
 {
     resetIdleTimer();
 
-    PolkitQt1::SystemBusNameSubject subject(message().service());
-    PolkitQt1::Authority::Result result = PolkitQt1::Authority::instance()->checkAuthorizationSync(
-        actionId, subject, PolkitQt1::Authority::AllowUserInteraction);
-
-    if (result == PolkitQt1::Authority::Yes) {
-        return true;
+    const CallReply reply = captureCallReply();
+    if (!reply.fromDBus || reply.message.service().isEmpty()) {
+        replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
+        return AuthorizationOutcome::Denied;
     }
 
-    sendErrorReply(QDBusError::AccessDenied, "Authorization failed");
-    return false;
+    PolkitAuthority *authority = polkitAuthorityInstance();
+    if (!authority) {
+        replyError(QDBusError::Failed,
+                   QStringLiteral("Authorization service is unavailable"));
+        return AuthorizationOutcome::Denied;
+    }
+
+    PolkitSubject *subject =
+        polkit_system_bus_name_new(reply.message.service().toUtf8().constData());
+    if (!subject) {
+        replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
+        return AuthorizationOutcome::Denied;
+    }
+
+    GError *error = nullptr;
+    PolkitAuthorizationResult *immediate = polkit_authority_check_authorization_sync(
+        authority, subject, actionId.toUtf8().constData(), nullptr,
+        POLKIT_CHECK_AUTHORIZATION_FLAGS_NONE, nullptr, &error);
+
+    bool authorized = false;
+    bool challenge = false;
+    if (immediate) {
+        authorized = polkit_authorization_result_get_is_authorized(immediate);
+        challenge = polkit_authorization_result_get_is_challenge(immediate);
+        g_object_unref(immediate);
+    }
+    else {
+        qWarning() << "Polkit authorization pre-check failed:"
+                   << (error ? error->message : "unknown error");
+    }
+    if (error) {
+        g_error_free(error);
+    }
+
+    if (authorized) {
+        g_object_unref(subject);
+        return AuthorizationOutcome::Granted;
+    }
+
+    if (!challenge) {
+        // 拒否が確定している (対話しても結果が変わらない) か、polkitdへ到達できなかった
+        g_object_unref(subject);
+        replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
+        return AuthorizationOutcome::Denied;
+    }
+
+    if (m_pendingAuthorizations >= MaxPendingAuthorizations) {
+        g_object_unref(subject);
+        replyError(QDBusError::LimitsExceeded,
+                   QStringLiteral("Too many pending authorization requests"));
+        return AuthorizationOutcome::Denied;
+    }
+
+    // 認可要求ごとに固有のuser_dataを渡し、完了結果が発行元の呼び出しへ
+    // 一意に紐づくようにする
+    auto *request = new AsyncAuthorization;
+    request->service = this;
+    request->continuation = [this, reply, continuation](bool granted) {
+        endPendingAuthorization();
+        continuation(reply, granted);
+    };
+
+    polkit_authority_check_authorization(
+        authority, subject, actionId.toUtf8().constData(), nullptr,
+        POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION, nullptr,
+        asyncAuthorizationFinished, request);
+
+    // polkit_authority_check_authorization()はsubjectを同期的にGVariant化するため、
+    // 呼び出し直後に解放してよい
+    g_object_unref(subject);
+
+    ++m_pendingAuthorizations;
+    setDelayedReply(true);
+    // プロンプト応答待ちの間にアイドル終了しないようタイマを止める
+    m_idleTimer.stop();
+    return AuthorizationOutcome::Deferred;
 }
 
 /**
@@ -670,10 +1298,17 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
  */
 QStringList SnapshotOperations::ListConfigs()
 {
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
-        return QStringList();
-    }
+    return authorizeThen<QStringList>(
+        QStringLiteral("com.presire.qsnapper.list-snapshots"),
+        [this]() { return listConfigsAuthorized(); });
+}
 
+/**
+ * @brief 認可済みのListConfigs本体
+ * @return 設定名の配列、失敗時は空配列
+ */
+QStringList SnapshotOperations::listConfigsAuthorized()
+{
     try {
         std::list<snapper::ConfigInfo> configList = snapper::Snapper::getConfigs("/");
         QStringList configs;
@@ -711,15 +1346,23 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.list-snapshots")) {
-        return QString();
-    }
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.list-snapshots"),
+        [this, config = *cfg]() { return listSnapshotsAuthorized(config); });
+}
 
+/**
+ * @brief 認可済みのListSnapshots本体
+ * @param configName 検証済みSnapper設定名
+ * @return CSV形式のスナップショット一覧、失敗時は空文字列
+ */
+QString SnapshotOperations::listSnapshotsAuthorized(const QString &configName)
+{
     try {
         // 一覧取得時は必ず再構築して外部で作成された最新スナップショットを反映する
-        snapper::Snapper *snapper = getSnapper(*cfg, /*forceReload=*/true);
+        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -727,7 +1370,7 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to list snapshots:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to list snapshots: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to list snapshots: %1").arg(e.what()));
         return QString();
     }
 }
@@ -754,14 +1397,30 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.create-snapshot")) {
-        return QString();
-    }
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.create-snapshot"),
+        [this, config = *cfg, type, description, preNumber, cleanup, userdata,
+         important]() {
+            return createSnapshotAuthorized(config, type, description, preNumber,
+                                            cleanup, userdata, important);
+        });
+}
 
+/**
+ * @brief 認可済みのCreateSnapshot本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @return 作成されたスナップショットのCSV情報、失敗時は空文字列
+ */
+QString SnapshotOperations::createSnapshotAuthorized(
+    const QString &configName, const QString &type, const QString &description,
+    int preNumber, const QString &cleanup,
+    const QMap<QString, QString> &userdata, bool important)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -798,7 +1457,7 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
         else if (snapType == snapper::POST && preNumber > 0) {
             snapper::Snapshots::const_iterator preSnap = snapper->getSnapshots().find(preNumber);
             if (preSnap == snapper->getSnapshots().end()) {
-                sendErrorReply(QDBusError::Failed, "Pre-snapshot not found");
+                replyError(QDBusError::Failed, "Pre-snapshot not found");
                 return QString();
             }
 #if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
@@ -844,7 +1503,7 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to create snapshot:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to create snapshot: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to create snapshot: %1").arg(e.what()));
         return QString();
     }
 }
@@ -873,20 +1532,34 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
         return false;
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.modify-snapshot")) {
-        return false;
-    }
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.modify-snapshot"),
+        [this, config = *cfg, number, description, cleanup, userdata]() {
+            return modifySnapshotAuthorized(config, number, description, cleanup,
+                                            userdata);
+        });
+}
 
+/**
+ * @brief 認可済みのModifySnapshot本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @return 成功時true、失敗時false
+ */
+bool SnapshotOperations::modifySnapshotAuthorized(
+    const QString &configName, int number, const QString &description,
+    const QString &cleanup, const QMap<QString, QString> &userdata)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
         snapper::Snapshots::iterator snapshot = snapper->getSnapshots().find(number);
         if (snapshot == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return false;
         }
 
@@ -912,7 +1585,7 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to modify snapshot:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to modify snapshot: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to modify snapshot: %1").arg(e.what()));
         return false;
     }
 }
@@ -920,7 +1593,7 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
 /**
  * @brief スナップショットを削除する (D-Busスロット)
  *
- * Polkit認証は毎回 checkAuthorization()に委ねる
+ * Polkit認可は毎回 beginAuthorization()に委ねる
  * 連続削除時の再入力はpolkitのauth_admin_keep設定により、short-lived cookieで抑止される
  *
  * @param configName 設定名
@@ -934,22 +1607,47 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
         return false;
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.delete-snapshot")) {
-        return false;
-    }
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.delete-snapshot"),
+        [this, config = *cfg, number]() {
+            return deleteSnapshotAuthorized(config, number);
+        });
+}
 
+/**
+ * @brief 認可済みのDeleteSnapshot本体
+ *
+ * @param configName 検証済み設定名
+ * @param number 削除対象スナップショット番号
+ * @return 成功時true
+ */
+bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
+                                                  int number)
+{
     resetIdleTimer();
 
+    // 実行中の復元計画が復元元として参照しているスナップショットは削除しない。
+    // pin済みdirfdがソース読み取りの同一性を保証するが、復元中の削除は
+    // 「認可時に存在した復元元」の消失につながるため、ここで明示的に拒否する
+    for (const RestoreExecution &executionItem : m_restoreExecutions) {
+        if (executionItem.configName == configName
+                && executionItem.snapshotNumber == number) {
+            replyError(QDBusError::Failed,
+                           QStringLiteral("Snapshot is in use by an active restore plan"));
+            return false;
+        }
+    }
+
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
         snapper::Snapshots::iterator snapshot = snapper->getSnapshots().find(number);
         if (snapshot == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return false;
         }
 
@@ -969,7 +1667,7 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to delete snapshot:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to delete snapshot: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to delete snapshot: %1").arg(e.what()));
         resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
@@ -990,21 +1688,34 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
         return false;
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
-        return false;
-    }
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
+        [this, config = *cfg, number]() {
+            return rollbackSnapshotAuthorized(config, number);
+        });
+}
 
+/**
+ * @brief 認可済みのRollbackSnapshot本体
+ *
+ * @param configName 検証済み設定名
+ * @param number ロールバック先のスナップショット番号
+ * @return 設定成功時: true、失敗時: false
+ */
+bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName,
+                                                    int number)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
         snapper::Snapshots &snapshots = snapper->getSnapshots();
         snapper::Snapshots::iterator target = snapshots.find(number);
         if (target == snapshots.end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return false;
         }
 
@@ -1106,7 +1817,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to rollback snapshot:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to rollback snapshot: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to rollback snapshot: %1").arg(e.what()));
         return false;
     }
 }
@@ -1126,14 +1837,28 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
     if (!cfg) {
         return QString();
     }
-    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
-        return QString();
-    }
 
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.view-diff"),
+        [this, config = *cfg, snapshotNumber]() {
+            return getFileChangesAuthorized(config, snapshotNumber);
+        });
+}
+
+/**
+ * @brief 認可済みのGetFileChanges本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @param snapshotNumber 比較元のスナップショット番号
+ * @return ファイル変更のステータスとパスの一覧、失敗時は空文字列
+ */
+QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
+                                                     int snapshotNumber)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -1143,7 +1868,7 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
         snapper::Snapshots::const_iterator snapshot2 = snapper->getSnapshotCurrent();
 
         if (snapshot1 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return QString();
         }
 
@@ -1153,7 +1878,7 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
         // Refresh戦略: 一覧取得時に前回キャッシュを破棄して最新状態を反映する
         using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
         auto *comparison = m_comparisonCache.get(
-            {*cfg, snapshotNumber, std::nullopt},
+            {configName, snapshotNumber, std::nullopt},
             CachePolicy::Refresh,
             [&](const ComparisonCache<snapper::Comparison>::Key &) {
                 return std::unique_ptr<snapper::Comparison>(
@@ -1191,7 +1916,7 @@ QString SnapshotOperations::GetFileChanges(const QString &configName, int snapsh
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file changes:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
         return QString();
     }
 }
@@ -1208,14 +1933,29 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
     if (!cfg) {
         return QString();
     }
-    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
-        return QString();
-    }
 
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.view-diff"),
+        [this, config = *cfg, number1, number2]() {
+            return getFileChangesBetweenAuthorized(config, number1, number2);
+        });
+}
+
+/**
+ * @brief 認可済みのGetFileChangesBetween本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @param number1 比較元スナップショット番号
+ * @param number2 比較先スナップショット番号
+ * @return ファイル変更のステータスとパスの一覧、失敗時は空文字列
+ */
+QString SnapshotOperations::getFileChangesBetweenAuthorized(
+    const QString &configName, int number1, int number2)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -1223,7 +1963,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
         snapper::Snapshots::const_iterator snapshot2 = snapper->getSnapshots().find(number2);
 
         if (snapshot1 == snapper->getSnapshots().end() || snapshot2 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return QString();
         }
 
@@ -1231,7 +1971,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
         // Refresh戦略: 一覧取得時に前回キャッシュを破棄して最新状態を反映する
         using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
         auto *comparison = m_comparisonCache.get(
-            {*cfg, number1, number2},
+            {configName, number1, number2},
             CachePolicy::Refresh,
             [&](const ComparisonCache<snapper::Comparison>::Key &) {
                 return std::unique_ptr<snapper::Comparison>(
@@ -1265,7 +2005,7 @@ QString SnapshotOperations::GetFileChangesBetween(const QString &configName, int
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file changes between snapshots:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
         return QString();
     }
 }
@@ -1283,18 +2023,34 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
     }
 
     if (!qsnapper::security::validateAbsoluteFilePath(filePath)) {
-        sendErrorReply(QDBusError::InvalidArgs, "Invalid file path");
+        replyError(QDBusError::InvalidArgs, "Invalid file path");
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
-        return QString();
-    }
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.view-diff"),
+        [this, config = *cfg, number1, number2, filePath]() {
+            return getFileDiffBetweenAuthorized(config, number1, number2,
+                                                filePath);
+        });
+}
 
+/**
+ * @brief 認可済みのGetFileDiffBetween本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @param number1 比較元スナップショット番号
+ * @param number2 比較先スナップショット番号
+ * @param filePath 検証済み対象ファイルの絶対path
+ * @return details部とdiff部をセパレータで分割した文字列
+ */
+QString SnapshotOperations::getFileDiffBetweenAuthorized(
+    const QString &configName, int number1, int number2, const QString &filePath)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -1302,7 +2058,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
         snapper::Snapshots::const_iterator snapshot2 = snapper->getSnapshots().find(number2);
 
         if (snapshot1 == snapper->getSnapshots().end() || snapshot2 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return QString();
         }
 
@@ -1310,7 +2066,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
         // ミス時は新規構築 (mount=true) してキャッシュに格納する
         using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
         auto *comparison = m_comparisonCache.get(
-            {*cfg, number1, number2},
+            {configName, number1, number2},
             CachePolicy::Reuse,
             [&](const ComparisonCache<snapper::Comparison>::Key &) {
                 return std::unique_ptr<snapper::Comparison>(
@@ -1369,7 +2125,7 @@ QString SnapshotOperations::GetFileDiffBetween(const QString &configName, int nu
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file diff between snapshots:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to get file diff: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to get file diff: %1").arg(e.what()));
         return QString();
     }
 }
@@ -1392,18 +2148,33 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
     }
 
     if (!qsnapper::security::validateAbsoluteFilePath(filePath)) {
-        sendErrorReply(QDBusError::InvalidArgs, "Invalid file path");
+        replyError(QDBusError::InvalidArgs, "Invalid file path");
         return QString();
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.view-diff")) {
-        return QString();
-    }
+    return authorizeThen<QString>(
+        QStringLiteral("com.presire.qsnapper.view-diff"),
+        [this, config = *cfg, snapshotNumber, filePath]() {
+            return getFileDiffAndDetailsAuthorized(config, snapshotNumber,
+                                                   filePath);
+        });
+}
 
+/**
+ * @brief 認可済みのGetFileDiffAndDetails本体
+ *
+ * @param configName 検証済みSnapper設定名
+ * @param snapshotNumber 比較元のスナップショット番号
+ * @param filePath 検証済み対象ファイルの絶対path
+ * @return details部とdiff部をセパレータで分割した文字列
+ */
+QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
+    const QString &configName, int snapshotNumber, const QString &filePath)
+{
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
         }
 
@@ -1411,7 +2182,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
         snapper::Snapshots::const_iterator snapshot2 = snapper->getSnapshotCurrent();
 
         if (snapshot1 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return QString();
         }
 
@@ -1420,7 +2191,7 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
         // Comparisonオブジェクトは1回だけ作成 (スナップショットマウントも1回のみ)
         using CachePolicy = ComparisonCache<snapper::Comparison>::Policy;
         auto *comparison = m_comparisonCache.get(
-            {*cfg, snapshotNumber, std::nullopt},
+            {configName, snapshotNumber, std::nullopt},
             CachePolicy::Reuse,
             [&](const ComparisonCache<snapper::Comparison>::Key &) {
                 return std::unique_ptr<snapper::Comparison>(
@@ -1480,9 +2251,474 @@ QString SnapshotOperations::GetFileDiffAndDetails(const QString &configName, int
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file diff and details:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to get file diff and details: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to get file diff and details: %1").arg(e.what()));
         return QString();
     }
+}
+
+/**
+ * @brief ownerに束縛された空のstaged restore計画を開始する
+ * @param configName Snapper設定名
+ * @param snapshotNumber 復元元snapshot番号
+ * @param restoreMode yastまたはdirect
+ * @return 成功時manifest id
+ */
+QString SnapshotOperations::BeginRestorePlan(const QString &configName,
+                                             int snapshotNumber,
+                                             const QString &restoreMode)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return {};
+    }
+
+    const auto cfg = resolveConfigOrFail(configName);
+    if (!cfg) {
+        return {};
+    }
+
+    qsnapper::restore::RestoreMode mode;
+    if (restoreMode == QStringLiteral("yast")) {
+        mode = qsnapper::restore::RestoreMode::YastCompatible;
+    }
+    else if (restoreMode == QStringLiteral("direct")) {
+        mode = qsnapper::restore::RestoreMode::DirectCopy;
+    }
+    else {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Invalid restore mode"));
+        return {};
+    }
+
+    if (snapshotNumber <= 0) {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Invalid snapshot number"));
+        return {};
+    }
+
+    purgeExpiredRestorePlans();
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    const QString manifestId = m_restoreRegistry.createStaging(
+        owner, *cfg, snapshotNumber, mode, &error);
+    if (manifestId.isEmpty()) {
+        sendManifestError(error);
+        return {};
+    }
+
+    m_restorePlanOwners.insert(manifestId, owner);
+    if (m_ownerWatcher && !owner.isEmpty()
+            && !m_ownerWatcher->watchedServices().contains(owner)) {
+        m_ownerWatcher->addWatchedService(owner);
+    }
+    return manifestId;
+}
+
+/**
+ * @brief staging計画へ検証済みentry chunkを原子的に追加する
+ * @param manifestId owner束縛されたmanifest id
+ * @param filePaths 復元対象絶対path列
+ * @param changeTypes pathと対応する変更種別列
+ * @return chunk全体を追加できた場合true
+ */
+bool SnapshotOperations::StageRestoreEntries(
+    const QString &manifestId,
+    const QStringList &filePaths,
+    const QStringList &changeTypes)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return false;
+    }
+
+    // stagingは認可を要さないため、グローバル予算を消費する唯一の経路でもある。
+    // 失効済み計画をここで回収しておかないと、放置された計画が予算を占有し続け、
+    // 正規の利用者がGlobalLimitで弾かれる
+    purgeExpiredRestorePlans();
+
+    if (filePaths.size() != changeTypes.size()) {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Restore entry lists must have the same size"));
+        return false;
+    }
+    if (filePaths.isEmpty()) {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Restore entry chunk is empty"));
+        return false;
+    }
+    if (filePaths.size()
+            > qsnapper::restore::RestoreManifestRegistry::kMaxEntriesPerStageChunk) {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Restore entry chunk is too large"));
+        return false;
+    }
+
+    for (qsizetype index = 0; index < filePaths.size(); ++index) {
+        const QString &path = filePaths.at(index);
+        const QString &changeType = changeTypes.at(index);
+        const bool validChangeType = changeType == QStringLiteral("created")
+                || changeType == QStringLiteral("deleted")
+                || changeType == QStringLiteral("modified")
+                || changeType == QStringLiteral("typechanged");
+        QString relativePath;
+
+        if (!path.startsWith(QLatin1Char('/'))
+                || path == QStringLiteral("/.snapshots")
+                || path.startsWith(QStringLiteral("/.snapshots/"))
+                || !validChangeType
+                || !qsnapper::security::splitDestinationBeneathRoot(
+                    QStringLiteral("/"), path, &relativePath)) {
+            replyError(QDBusError::InvalidArgs,
+                           QStringLiteral("Invalid restore entry"));
+            return false;
+        }
+    }
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    if (!m_restoreRegistry.stageEntries(manifestId, owner, filePaths,
+                                        changeTypes, &error)) {
+        return sendManifestError(error);
+    }
+    return true;
+}
+
+/**
+ * @brief 計画をfreeze後に1度だけ認可し非同期実行を開始する
+ * @param manifestId owner束縛されたmanifest id
+ * @return 実行開始を受理した場合true
+ */
+bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return false;
+    }
+
+    // 復元はlive filesystemを書き換える排他的な操作である。
+    // 複数計画がchunk境界で交互実行されると最終状態が非決定になり、
+    // libsnapperのmount_user_requestがbool (カウンタではない) であることも
+    // 相まってmount管理が衝突し得るため、同時に1計画のみ実行を許す
+    if (!m_restoreExecutions.isEmpty()) {
+        replyError(QDBusError::Failed,
+                       QStringLiteral("Another restore plan is already running"));
+        return false;
+    }
+
+    purgeExpiredRestorePlans();
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    const auto status = m_restoreRegistry.status(manifestId, owner, &error);
+    if (!status) {
+        return sendManifestError(error);
+    }
+    if (status->state == qsnapper::restore::ManifestState::Completed
+            || status->state == qsnapper::restore::ManifestState::Failed
+            || status->state == qsnapper::restore::ManifestState::Cancelled) {
+        return sendManifestError(
+            qsnapper::restore::ManifestError::AlreadyTerminal);
+    }
+    if (status->state != qsnapper::restore::ManifestState::Staging) {
+        return sendManifestError(qsnapper::restore::ManifestError::WrongState);
+    }
+    if (status->totalEntries <= 0) {
+        return sendManifestError(
+            qsnapper::restore::ManifestError::InvalidArgument);
+    }
+    if (!m_restoreRegistry.freeze(manifestId, owner, &error)) {
+        return sendManifestError(error);
+    }
+
+    // 認可対象は凍結済みの不変計画である。
+    // 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が起こり得るため、
+    // 実際のmountとexecutor起動は継続側で状態を再検証してから行う
+    const AuthorizationOutcome outcome = beginAuthorization(
+        QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
+        [this, manifestId, owner](const CallReply &reply, bool granted) {
+            m_deferredReply = reply;
+            bool accepted = false;
+            if (granted) {
+                accepted = commitRestorePlanAuthorized(manifestId, owner);
+            }
+            else {
+                failRestorePlanAuthorization(manifestId, owner);
+                replyError(QDBusError::AccessDenied,
+                           QStringLiteral("Authorization failed"));
+            }
+
+            const bool alreadyReplied = m_deferredReply->replied;
+            m_deferredReply.reset();
+            if (!alreadyReplied) {
+                reply.connection.send(
+                    reply.message.createReply(QVariant::fromValue(accepted)));
+            }
+        });
+
+    switch (outcome) {
+    case AuthorizationOutcome::Granted:
+        return commitRestorePlanAuthorized(manifestId, owner);
+    case AuthorizationOutcome::Denied:
+        // beginAuthorizationがD-Busエラー応答を送出済み
+        failRestorePlanAuthorization(manifestId, owner);
+        return false;
+    case AuthorizationOutcome::Deferred:
+        break;
+    }
+    return false;
+}
+
+/**
+ * @brief 認可が得られなかった復元計画をFailedで終端する
+ * @param manifestId 対象manifest id
+ * @param owner 認可前にcaptureした呼び出し元unique name
+ */
+void SnapshotOperations::failRestorePlanAuthorization(const QString &manifestId,
+                                                      const QString &owner)
+{
+    qsnapper::restore::ManifestError failureError =
+        qsnapper::restore::ManifestError::None;
+    m_restoreRegistry.markFailed(
+        manifestId, owner, QStringLiteral("Authorization failed"),
+        &failureError);
+}
+
+/**
+ * @brief 認可済みのCommitRestorePlan本体
+ *
+ * 認可待ちの間にevent loopが回るため、凍結済み計画が生き残っている保証はない。
+ * mountやexecutor起動といった不可逆な操作の前に、以下を必ず再検証する:
+ *   - 他の計画が実行を開始していないこと (復元はlive filesystemへの排他操作)
+ *   - 計画がownerに束縛されたまま存在し、まだFrozenであること
+ *     (cancel / TTL失効 / owner消失は全てここで弾かれる)
+ *
+ * @param manifestId owner束縛されたmanifest id
+ * @param owner 認可前にcaptureした呼び出し元unique name
+ * @return 実行開始を受理した場合true
+ */
+bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
+                                                     const QString &owner)
+{
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+
+    // 認可待ちの間に別の計画がcommitされている可能性がある
+    if (!m_restoreExecutions.isEmpty()) {
+        failRestorePlanAuthorization(manifestId, owner);
+        replyError(QDBusError::Failed,
+                   QStringLiteral("Another restore plan is already running"));
+        return false;
+    }
+
+    // 認可待ちの間のcancel / TTL失効 / owner消失 / purgeを検出する
+    const auto status = m_restoreRegistry.status(manifestId, owner, &error);
+    if (!status) {
+        return sendManifestError(error);
+    }
+    if (status->state != qsnapper::restore::ManifestState::Frozen) {
+        return sendManifestError(qsnapper::restore::ManifestError::WrongState);
+    }
+
+    RestoreExecution execution;
+    execution.owner = owner;
+    execution.configName = status->configName;
+    execution.snapshotNumber = status->snapshotNumber;
+    execution.useReflink =
+        status->mode == qsnapper::restore::RestoreMode::DirectCopy;
+    execution.removeOnTypechanged = execution.useReflink;
+
+    try {
+        snapper::Snapper *snapper = getSnapper(execution.configName);
+        if (!snapper) {
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Failed to initialize restore source"),
+                &error);
+            replyError(QDBusError::Failed,
+                           QStringLiteral("Failed to prepare restore plan"));
+            return false;
+        }
+
+        const snapper::Snapshots::const_iterator snapshot =
+            snapper->getSnapshots().find(execution.snapshotNumber);
+        if (snapshot == snapper->getSnapshots().end()) {
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Restore source snapshot is unavailable"),
+                &error);
+            replyError(QDBusError::Failed,
+                           QStringLiteral("Failed to prepare restore plan"));
+            return false;
+        }
+
+        m_comparisonCache.clear();
+        snapshot->mountFilesystemSnapshot(true);
+        execution.mounted = true;
+        const QString snapshotDir = QString::fromStdString(snapshot->snapshotDir());
+        m_restoreExecutions.insert(manifestId, execution);
+        m_restoreExecutions[manifestId].snapshotDir = snapshotDir;
+
+        // ソースsnapshotをdirfdでpinする。
+        // 以降のソース読み取りは本fd相対で行うため、chunk境界でevent loopが回る間に
+        // path上のsnapshotが削除 / 同番号で再作成 / 差し替えられても、
+        // 認可時に参照したsnapshotそのものから復元し続ける
+        const int snapshotDirFd = ::open(snapshotDir.toUtf8().constData(),
+                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (snapshotDirFd < 0) {
+            qWarning() << "Staged restore: Failed to pin snapshot dir:"
+                       << strerror(errno);
+            cleanupRestoreExecution(manifestId);
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Failed to pin restore source"), &error);
+            replyError(QDBusError::Failed,
+                           QStringLiteral("Failed to prepare restore plan"));
+            return false;
+        }
+        m_restoreExecutions[manifestId].snapshotDirFd = snapshotDirFd;
+    }
+    catch (const snapper::Exception &e) {
+        qWarning() << "Staged restore preparation failed:" << e.what();
+        cleanupRestoreExecution(manifestId);
+        m_restoreRegistry.markFailed(
+            manifestId, owner, QStringLiteral("Failed to prepare restore source"),
+            &error);
+        replyError(QDBusError::Failed,
+                       QStringLiteral("Failed to prepare restore plan"));
+        return false;
+    }
+    catch (const std::exception &e) {
+        qWarning() << "Staged restore preparation failed unexpectedly:"
+                   << e.what();
+        cleanupRestoreExecution(manifestId);
+        m_restoreRegistry.markFailed(
+            manifestId, owner, QStringLiteral("Failed to prepare restore source"),
+            &error);
+        replyError(QDBusError::Failed,
+                       QStringLiteral("Failed to prepare restore plan"));
+        return false;
+    }
+    catch (...) {
+        qWarning() << "Staged restore preparation failed unexpectedly";
+        cleanupRestoreExecution(manifestId);
+        m_restoreRegistry.markFailed(
+            manifestId, owner, QStringLiteral("Failed to prepare restore source"),
+            &error);
+        replyError(QDBusError::Failed,
+                       QStringLiteral("Failed to prepare restore plan"));
+        return false;
+    }
+
+    if (!m_restoreExecutor.start(manifestId, owner, &error)) {
+        cleanupRestoreExecution(manifestId);
+        qsnapper::restore::ManifestError failureError =
+            qsnapper::restore::ManifestError::None;
+        m_restoreRegistry.markFailed(
+            manifestId, owner, QStringLiteral("Failed to start restore work"),
+            &failureError);
+        return sendManifestError(error);
+    }
+
+    return true;
+}
+
+/**
+ * @brief owner確認済みRunning計画のidle loopを再開する
+ * @param manifestId owner束縛されたmanifest id
+ * @return nudgeを受理した場合true
+ */
+bool SnapshotOperations::ContinueRestorePlan(const QString &manifestId)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return false;
+    }
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    if (!m_restoreExecutor.requestContinue(manifestId, owner, &error)) {
+        return sendManifestError(error);
+    }
+    return true;
+}
+
+/**
+ * @brief owner確認済み計画状態をRFC4180 escaping済みCSVで返す
+ * @param manifestId owner束縛されたmanifest id
+ * @return ManifestStatus field順のCSV、失敗時空文字列
+ */
+QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return {};
+    }
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    const auto status = m_restoreRegistry.status(manifestId, owner, &error);
+    if (!status) {
+        sendManifestError(error);
+        return {};
+    }
+
+    const QStringList fields{
+        status->id,
+        restoreManifestStateString(status->state),
+        QString::number(status->totalEntries),
+        QString::number(status->cursor),
+        QString::number(status->processed),
+        restoreModeString(status->mode),
+        quoteRestoreStatusCsvField(status->configName),
+        QString::number(status->snapshotNumber),
+        quoteRestoreStatusCsvField(status->lastError)
+    };
+    return fields.join(QLatin1Char(','));
+}
+
+/**
+ * @brief owner確認済み非終端計画へ境界cancellationを要求する
+ * @param manifestId owner束縛されたmanifest id
+ * @return cancellationを受理した場合true
+ */
+bool SnapshotOperations::CancelRestorePlan(const QString &manifestId)
+{
+    resetIdleTimer();
+
+    const QString owner = callerOwner();
+    if (calledFromDBus() && owner.isEmpty()) {
+        replyError(QDBusError::AccessDenied,
+                       QStringLiteral("Restore plan caller is unavailable"));
+        return false;
+    }
+
+    qsnapper::restore::ManifestError error =
+        qsnapper::restore::ManifestError::None;
+    if (!m_restoreExecutor.requestCancel(manifestId, owner, &error)) {
+        return sendManifestError(error);
+    }
+    return true;
 }
 
 /**
@@ -1554,35 +2790,60 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         return false;
     }
 
-    if (!checkAuthorization("com.presire.qsnapper.rollback-snapshot")) {
-        return false;
-    }
-
+    // 入力検証は認可より前に行う。
+    // polkitプロンプトを出してから "No files specified" で蹴るUXを避けるとともに、
+    // 攻撃者が不正な入力でpolkitを浪費するのを防ぐ
     if (filePaths.isEmpty()) {
-        sendErrorReply(QDBusError::InvalidArgs, "No files specified for restore");
+        replyError(QDBusError::InvalidArgs, "No files specified for restore");
         return false;
     }
 
     if (filePaths.size() != changeTypes.size()) {
-        sendErrorReply(QDBusError::InvalidArgs, "filePaths and changeTypes must have the same size");
+        replyError(QDBusError::InvalidArgs, "filePaths and changeTypes must have the same size");
         return false;
     }
 
+    return authorizeThen<bool>(
+        QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
+        [this, config = *cfg, snapshotNumber, filePaths, changeTypes, useReflink,
+         removeOnTypechanged, logTag]() {
+            return restoreFilesAuthorized(config, snapshotNumber, filePaths,
+                                          changeTypes, useReflink,
+                                          removeOnTypechanged, logTag);
+        });
+}
+
+/**
+ * @brief 認可済みのrestoreFilesImpl本体
+ *
+ * configName / filePaths / changeTypes の検証はrestoreFilesImpl側で認可前に完了している
+ *
+ * @param configName 検証済みSnapper設定名
+ * @return 全ファイル成功時true
+ */
+bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
+                                                int snapshotNumber,
+                                                const QStringList &filePaths,
+                                                const QStringList &changeTypes,
+                                                bool useReflink,
+                                                bool removeOnTypechanged,
+                                                const char *logTag)
+{
     qInfo() << logTag << ": Starting restore for" << filePaths.size()
             << "files from snapshot" << snapshotNumber
             << "(useReflink=" << useReflink
             << ", removeOnTypechanged=" << removeOnTypechanged << ")";
 
     try {
-        snapper::Snapper *snapper = getSnapper(*cfg);
+        snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
-            sendErrorReply(QDBusError::Failed, "Failed to initialize Snapper");
+            replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
         }
 
         snapper::Snapshots::const_iterator snapshot1 = snapper->getSnapshots().find(snapshotNumber);
         if (snapshot1 == snapper->getSnapshots().end()) {
-            sendErrorReply(QDBusError::Failed, "Snapshot not found");
+            replyError(QDBusError::Failed, "Snapshot not found");
             return false;
         }
 
@@ -1673,23 +2934,29 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                 struct stat snapshotFileInfo;
                 const bool hasSnapshotFileInfo = qsnapper::security::safeLstat(snapshotFilePath, &snapshotFileInfo);
 
+                // live側を破壊する前に復元元の可用性と種別を確定させる。
+                // 先に退避・削除してから "Source not restorable" で失敗すると、
+                // 復元元が存在しないままlive側のデータだけが失われる
+                const bool sourceIsLink = hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
+                const bool sourceIsDirectory = hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
+                const bool sourceIsRegular = hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
+                if (!sourceIsLink && !sourceIsDirectory && !sourceIsRegular) {
+                    qWarning() << logTag << ": Source not restorable from snapshot:" << snapshotFilePath;
+                    allSuccess = false;
+                    continue;
+                }
+
+                QString detachedPath;
                 if (removeOnTypechanged && changeType == "typechanged") {
-                    QString detachedPath;
                     if (!movePathAsideNoFollow(systemFilePath, &detachedPath)) {
                         qWarning() << logTag << ": Failed to move existing path aside before restore"
                                    << systemFilePath << strerror(errno);
                         allSuccess = false;
                         continue;
                     }
-                    if (!detachedPath.isEmpty() && !qsnapper::security::safeRemoveAll(detachedPath)) {
-                        qWarning() << logTag << ": Failed to remove detached path before restore"
-                                   << detachedPath;
-                        allSuccess = false;
-                        continue;
-                    }
                 }
 
-                if (hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode)) {
+                if (sourceIsLink) {
                     // シンボリックリンクの場合
                     fileSuccess = copySymlink(snapshotFilePath, systemFilePath);
                     if (!fileSuccess) {
@@ -1697,7 +2964,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                                    << "to" << systemFilePath;
                     }
                 }
-                else if (hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode)) {
+                else if (sourceIsDirectory) {
             // ディレクトリの場合: safeMkpath + safeOpenDirectory で取得した dirFd に対して fchown/fchmod
             if (!qsnapper::security::safeMkpath(systemFilePath)) {
                         qWarning() << logTag << ": Failed to safely create directory"
@@ -1737,7 +3004,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                         }
                     }
                 }
-                else if (hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode)) {
+                else {
                     // 通常ファイルの場合 (useReflink=trueならFICLONEを先行試行)
                     fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, useReflink);
                     if (!fileSuccess) {
@@ -1745,9 +3012,21 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
                                    << "to" << systemFilePath;
                     }
                 }
-                else {
-                    qWarning() << logTag << ": Source not restorable from snapshot:" << snapshotFilePath;
-                    fileSuccess = false;
+
+                // 退避物の破棄は復元成功後にのみ行う。
+                // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない。
+                // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
+                if (!detachedPath.isEmpty()) {
+                    if (fileSuccess) {
+                        if (!qsnapper::security::safeRemoveAll(detachedPath)) {
+                            qWarning() << logTag << ": Failed to remove detached path after restore"
+                                       << detachedPath;
+                        }
+                    }
+                    else if (!qsnapper::security::safeRenamePathNoFollow(detachedPath, systemFilePath)) {
+                        qCritical() << logTag << ": Failed to reattach live path after a failed restore."
+                                    << "Previous content is preserved at:" << detachedPath;
+                    }
                 }
             }
 
@@ -1789,19 +3068,19 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         if (!allSuccess) {
             QString errorMsg = QString("Failed to restore %1 out of %2 files")
                     .arg(total - successCount).arg(total);
-            sendErrorReply(QDBusError::Failed, errorMsg);
+            replyError(QDBusError::Failed, errorMsg);
         }
 
         return allSuccess;
     }
     catch (const snapper::Exception &e) {
         qWarning() << logTag << " failed:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Failed to restore files: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Failed to restore files: %1").arg(e.what()));
         return false;
     }
     catch (const std::exception &e) {
         qWarning() << logTag << " unexpected error:" << e.what();
-        sendErrorReply(QDBusError::Failed, QString("Unexpected error: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QString("Unexpected error: %1").arg(e.what()));
         return false;
     }
 }
@@ -1960,6 +3239,420 @@ bool SnapshotOperations::copySymlink(const QString &src, const QString &dst)
 
             if (!timesUpdated) {
                 qWarning() << "copySymlink: utimensat failed (non-fatal):" << dst << strerror(errno);
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
+ * @brief live pathをroot配下で再解決して一時的な兄弟pathへ退避する
+ * @param path 退避対象の絶対path
+ * @param movedPath 実際の退避先。対象不存在時は空文字列
+ * @return 退避または対象不存在時true
+ */
+bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
+                                                  QString *movedPath)
+{
+    if (movedPath) {
+        movedPath->clear();
+    }
+
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const QString candidate = siblingTemporaryPath(
+            path, QStringLiteral("qsnapper-old"), attempt);
+        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(
+                QStringLiteral("/"), path, candidate)) {
+            if (movedPath) {
+                *movedPath = candidate;
+            }
+            return true;
+        }
+
+        if (errno == ENOENT) {
+            return true;
+        }
+        if (errno == EEXIST || errno == ENOTEMPTY) {
+            continue;
+        }
+        return false;
+    }
+
+    errno = EEXIST;
+    return false;
+}
+
+/**
+ * @brief executor callbackから単一の凍結済みentryをlive filesystemへ適用する
+ * @param manifestId 実行contextを選択するmanifest id
+ * @param entry 適用対象entry
+ * @return entry全体の適用成功時true
+ */
+bool SnapshotOperations::applyRestoreEntry(
+    const QString &manifestId,
+    const qsnapper::restore::RestoreEntry &entry)
+{
+    const auto execution = m_restoreExecutions.constFind(manifestId);
+    if (execution == m_restoreExecutions.cend()) {
+        qWarning() << "Staged restore: Missing execution context";
+        return false;
+    }
+    const RestoreExecution context = execution.value();
+    if (context.snapshotDirFd < 0) {
+        qWarning() << "Staged restore: Snapshot source fd is not pinned";
+        return false;
+    }
+
+    const bool validChangeType = entry.changeType == QStringLiteral("created")
+            || entry.changeType == QStringLiteral("deleted")
+            || entry.changeType == QStringLiteral("modified")
+            || entry.changeType == QStringLiteral("typechanged");
+    QString relativePath;
+    if (!entry.path.startsWith(QLatin1Char('/'))
+            || entry.path == QStringLiteral("/.snapshots")
+            || entry.path.startsWith(QStringLiteral("/.snapshots/"))
+            || !validChangeType
+            || !qsnapper::security::splitDestinationBeneathRoot(
+                QStringLiteral("/"), entry.path, &relativePath)) {
+        qWarning() << "Staged restore: Frozen entry failed execution-time validation";
+        return false;
+    }
+
+    const QString snapshotFilePath = context.snapshotDir + entry.path;
+    if (!qsnapper::security::isPathWithinSnapshotRoot(
+            snapshotFilePath, context.snapshotDir)) {
+        qWarning() << "Staged restore: Source escaped snapshot root";
+        return false;
+    }
+
+    if (entry.changeType == QStringLiteral("created")) {
+        const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(
+            QStringLiteral("/"), entry.path);
+        if (!removed) {
+            qWarning() << "Staged restore: Failed to remove live path:"
+                       << strerror(errno);
+        }
+        return removed;
+    }
+
+    const int slashIndex = entry.path.lastIndexOf(QLatin1Char('/'));
+    const QString parentPath = slashIndex <= 0
+        ? QStringLiteral("/")
+        : entry.path.left(slashIndex);
+    if (parentPath != QStringLiteral("/")
+            && !qsnapper::security::safeCreateDirectoryBeneathRoot(
+                QStringLiteral("/"), parentPath, 0755)) {
+        qWarning() << "Staged restore: Failed to create live parent directory:"
+                   << strerror(errno);
+        return false;
+    }
+
+    // ソースの種別判定はpin済みsnapshot dirfd相対で行う。
+    // 実行中にsnapshotDirのpath上で何が起きても、認可時にpinしたinodeを観測する
+    // (AT_SYMLINK_NOFOLLOWによりleafのsymlinkも展開しない)
+    struct stat snapshotFileInfo;
+    const bool hasSnapshotFileInfo = qsnapper::security::safeLstatAt(
+        context.snapshotDirFd, relativePath, &snapshotFileInfo);
+
+    // live側を破壊する前に復元元の可用性と種別を確定させる。
+    // 凍結・認可の時点でsnapshotDirを検証していても、認可から本entryの適用までには
+    // chunk境界でevent loopが回るため、その間に復元元snapshotが削除 / unmountされ得る。
+    // 先に退避・削除してから "Source is not restorable" で失敗すると、
+    // 復元元が存在しないままlive側のデータだけが失われる
+    const bool sourceIsLink =
+        hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
+    const bool sourceIsDirectory =
+        hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
+    const bool sourceIsRegular =
+        hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
+    if (!sourceIsLink && !sourceIsDirectory && !sourceIsRegular) {
+        qWarning() << "Staged restore: Source is not restorable";
+        return false;
+    }
+
+    QString detachedPath;
+    if (context.removeOnTypechanged
+            && entry.changeType == QStringLiteral("typechanged")) {
+        if (!movePathAsideBeneathRoot(entry.path, &detachedPath)) {
+            qWarning() << "Staged restore: Failed to move live path aside:"
+                       << strerror(errno);
+            return false;
+        }
+    }
+
+    bool applied = false;
+    if (sourceIsLink) {
+        applied = copySymlinkBeneathRoot(context.snapshotDirFd, relativePath,
+                                         entry.path);
+    }
+    else if (sourceIsDirectory) {
+        if (!qsnapper::security::safeCreateDirectoryBeneathRoot(
+                QStringLiteral("/"), entry.path, 0755)) {
+            qWarning() << "Staged restore: Failed to create live directory:"
+                       << strerror(errno);
+        }
+        else {
+            const int directoryFd =
+                qsnapper::security::safeOpenDirectoryBeneathRoot(
+                    QStringLiteral("/"), relativePath,
+                    /*createMissing=*/false, 0755);
+            if (directoryFd < 0) {
+                qWarning() << "Staged restore: Failed to open live directory:"
+                           << strerror(errno);
+            }
+            else {
+                const bool mustPreserveMetadata = (::geteuid() == 0);
+                bool metadataOk = true;
+                if (::fchown(directoryFd, snapshotFileInfo.st_uid,
+                             snapshotFileInfo.st_gid) < 0) {
+                    qWarning() << "Staged restore: Failed to preserve directory owner:"
+                               << strerror(errno);
+                    metadataOk = !mustPreserveMetadata;
+                }
+                if (::fchmod(directoryFd, snapshotFileInfo.st_mode & 07777) < 0) {
+                    qWarning() << "Staged restore: Failed to preserve directory mode:"
+                               << strerror(errno);
+                    metadataOk = metadataOk && !mustPreserveMetadata;
+                }
+                ::close(directoryFd);
+                applied = metadataOk;
+            }
+        }
+    }
+    else {
+        applied = copyRegularFileBeneathRoot(
+            context.snapshotDirFd, relativePath, entry.path, context.useReflink);
+    }
+
+    // 退避物の破棄は復元成功後にのみ行う。
+    // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない。
+    // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
+    if (!detachedPath.isEmpty()) {
+        if (applied) {
+            if (!qsnapper::security::safeRemoveAllBeneathRoot(
+                    QStringLiteral("/"), detachedPath)) {
+                qWarning() << "Staged restore: Failed to remove detached live path:"
+                           << strerror(errno);
+            }
+        }
+        else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
+                     QStringLiteral("/"), detachedPath, entry.path)) {
+            qCritical() << "Staged restore: Failed to reattach live path after a failed"
+                        << "restore. Previous content is preserved at:" << detachedPath;
+        }
+    }
+
+    return applied;
+}
+
+/**
+ * @brief live宛先をroot配下で再解決して通常ファイルをコピーする
+ *
+ * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や
+ * 稼働中のサービス) がETXTBSYで拒否されるため、同一ディレクトリの一時ファイルへ
+ * 書き出してから renameat() で差し替える (copySymlinkBeneathRootと同じ手法)。
+ * metadataは差し替え前に一時ファイルへ適用するため、live側から不完全な状態は観測されない
+ *
+ * @param sourceDirFd pin済みのsnapshot dirfd
+ * @param sourceRelativePath snapshotDirからの相対source path
+ * @param dst live filesystem上の絶対path
+ * @param tryReflink FICLONEを先行試行するか
+ * @return dataと必須metadataを適用して差し替えできた場合true
+ */
+bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
+                                                    const QString &sourceRelativePath,
+                                                    const QString &dst,
+                                                    bool tryReflink)
+{
+    const int srcFd = qsnapper::security::safeOpenRegularFileReadAt(
+        sourceDirFd, sourceRelativePath);
+    if (srcFd < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to open source:"
+                   << sourceRelativePath << strerror(errno);
+        return false;
+    }
+
+    struct stat srcStat;
+    if (::fstat(srcFd, &srcStat) < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to stat source:"
+                   << strerror(errno);
+        ::close(srcFd);
+        return false;
+    }
+
+    QString temporaryPath;
+    int dstFd = -1;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-copy"),
+                                             attempt);
+        dstFd = qsnapper::security::safeCreateRegularFileExclusiveBeneathRoot(
+            QStringLiteral("/"), temporaryPath, srcStat.st_mode & 07777);
+        if (dstFd >= 0) {
+            break;
+        }
+        if (errno != EEXIST) {
+            qWarning() << "copyRegularFileBeneathRoot: Failed to create temporary file:"
+                       << strerror(errno);
+            ::close(srcFd);
+            return false;
+        }
+    }
+
+    if (dstFd < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to allocate temporary file path";
+        ::close(srcFd);
+        return false;
+    }
+
+    // 差し替え前に失敗した場合、live側へ中途半端な一時ファイルを残さない
+    const auto abortCopy = [&]() {
+        ::close(dstFd);
+        ::close(srcFd);
+        qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"),
+                                                     temporaryPath);
+        return false;
+    };
+
+    bool copied = false;
+    if (tryReflink && ::ioctl(dstFd, FICLONE, srcFd) == 0) {
+        copied = true;
+    }
+
+    if (!copied) {
+        off_t offset = 0;
+        ssize_t remaining = srcStat.st_size;
+        while (remaining > 0) {
+            const ssize_t written = ::sendfile(dstFd, srcFd, &offset,
+                                               remaining);
+            if (written < 0) {
+                qWarning() << "copyRegularFileBeneathRoot: sendfile failed:"
+                           << strerror(errno);
+                return abortCopy();
+            }
+            if (written == 0) {
+                qWarning() << "copyRegularFileBeneathRoot: sendfile reached EOF before expected byte count";
+                return abortCopy();
+            }
+            remaining -= written;
+        }
+    }
+
+    // O_CREAT時のmodeはumaskで削られるため、snapshot側のmodeを明示的に適用する
+    if (::fchmod(dstFd, srcStat.st_mode & 07777) < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: fchmod failed"
+                   << strerror(errno);
+        return abortCopy();
+    }
+
+    const bool mustPreserveMetadata = (::geteuid() == 0);
+    if (::fchown(dstFd, srcStat.st_uid, srcStat.st_gid) < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: fchown failed"
+                   << strerror(errno);
+        if (mustPreserveMetadata) {
+            return abortCopy();
+        }
+    }
+
+    // 新規inodeへ差し替えるため、live側の既存labelは引き継がれない。
+    // snapshot側のlabelを明示的にコピーする
+    copySecurityContextBestEffort(srcFd, dstFd);
+
+    struct timespec times[2];
+    times[0] = srcStat.st_atim;
+    times[1] = srcStat.st_mtim;
+    if (::futimens(dstFd, times) < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: futimens failed"
+                   << strerror(errno);
+        if (mustPreserveMetadata) {
+            return abortCopy();
+        }
+    }
+
+    ::close(dstFd);
+    ::close(srcFd);
+
+    if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
+            QStringLiteral("/"), temporaryPath, dst)) {
+        const int renameErrno = errno;
+        qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"),
+                                                     temporaryPath);
+        qWarning() << "copyRegularFileBeneathRoot: rename failed:"
+                   << strerror(renameErrno);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief live宛先をroot配下で再解決してsymlinkをコピーする
+ * @param src snapshot内の読み取り元path
+ * @param dst live filesystem上の絶対path
+ * @return symlinkを作成できた場合true
+ */
+bool SnapshotOperations::copySymlinkBeneathRoot(int sourceDirFd,
+                                                const QString &sourceRelativePath,
+                                                const QString &dst)
+{
+    QByteArray linkTarget;
+    if (!qsnapper::security::safeReadLinkNoFollowAt(sourceDirFd, sourceRelativePath,
+                                                    &linkTarget)) {
+        qWarning() << "copySymlinkBeneathRoot: readlink failed:"
+                   << sourceRelativePath << strerror(errno);
+        return false;
+    }
+
+    QString temporaryPath;
+    bool createdTemporaryLink = false;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        temporaryPath = siblingTemporaryPath(
+            dst, QStringLiteral("qsnapper-link"), attempt);
+        if (qsnapper::security::safeCreateSymlinkNoFollowBeneathRoot(
+                QStringLiteral("/"), linkTarget, temporaryPath)) {
+            createdTemporaryLink = true;
+            break;
+        }
+        if (errno != EEXIST) {
+            qWarning() << "copySymlinkBeneathRoot: symlink(temp) failed:"
+                       << strerror(errno);
+            return false;
+        }
+    }
+
+    if (!createdTemporaryLink) {
+        qWarning() << "copySymlinkBeneathRoot: Failed to allocate temporary link path";
+        return false;
+    }
+
+    if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
+            QStringLiteral("/"), temporaryPath, dst)) {
+        const int renameErrno = errno;
+        qsnapper::security::safeRemoveAllBeneathRoot(
+            QStringLiteral("/"), temporaryPath);
+        qWarning() << "copySymlinkBeneathRoot: rename failed:"
+                   << strerror(renameErrno);
+        return false;
+    }
+
+    struct stat srcStat;
+    if (qsnapper::security::safeLstatAt(sourceDirFd, sourceRelativePath, &srcStat)) {
+        struct timespec times[2];
+        times[0] = srcStat.st_atim;
+        times[1] = srcStat.st_mtim;
+
+        bool ownerUpdated = false;
+        bool timesUpdated = false;
+        if (!qsnapper::security::safeSetSymlinkMetadataNoFollowBeneathRoot(
+                QStringLiteral("/"), dst, srcStat.st_uid, srcStat.st_gid,
+                times, &ownerUpdated, &timesUpdated)) {
+            if (!ownerUpdated) {
+                qWarning() << "copySymlinkBeneathRoot: fchownat failed (non-fatal):"
+                           << strerror(errno);
+            }
+            if (!timesUpdated) {
+                qWarning() << "copySymlinkBeneathRoot: utimensat failed (non-fatal):"
+                           << strerror(errno);
             }
         }
     }

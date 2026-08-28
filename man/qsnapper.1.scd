@@ -1,4 +1,4 @@
-qsnapper(1) "June 2026" "qSnapper 1.3.6"
+qsnapper(1) "June 2026" "qSnapper 1.3.7"
 
 # NAME
 
@@ -122,8 +122,11 @@ selected changes carefully before confirming.
 	causes compatibility issues.
 
 Both modes accept a *batch size* (1–1000, default 100) controlling how many
-files are processed per internal batch. Larger values may improve throughput;
-smaller values provide more granular progress feedback.
+files are submitted per staging chunk before the restore plan is frozen.
+Larger values may improve throughput; smaller values provide more granular
+progress feedback. Regardless of how many files or chunks are selected, a
+multi-file restore requires exactly one PolicyKit authorization at commit
+time, with no re-prompt while the frozen plan executes.
 
 # CONFIGURATION
 

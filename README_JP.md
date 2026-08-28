@@ -130,6 +130,19 @@ sudo dnf install cmake gcc-c++ \
                  snapper-devel btrfs-progs-devel scdoc
 ```
 
+**Debian 13 (trixie)**  
+
+```bash
+sudo apt install cmake g++ make pkg-config \
+                 qt6-base-dev qt6-declarative-dev qt6-tools-dev \
+                 libpolkit-qt6-1-dev libpolkit-gobject-1-dev \
+                 libsnapper-dev libboost-dev libbtrfs-dev libbtrfsutil-dev scdoc
+```
+
+**Note:**  
+D-Busシステムサービスはpolkit-gobject-1 APIを直接使用しており、ビルド時には `pkg-config` (`polkit-gobject-1.pc`) で検出されます。  
+このモジュールはopenSUSEおよびRHEL/Fedoraでは `polkit-devel` に、Debianでは `libpolkit-gobject-1-dev` に同梱されているため (上記コマンドに既に含まれています)、追加のパッケージは不要です。  
+
 #### 2. ビルドとインストール
 
 ```bash
@@ -251,7 +264,7 @@ qSnapperは2つの復元方式を提供しており、復元確認ダイアロ�
 #### 復元オプション
 
 - **バッチサイズ** (1〜1000、デフォルト: 100):  
-  1バッチあたりの処理ファイル数です。値を大きくするとスループットが向上する場合があります。値を小さくするとより細かな進捗表示が得られます。  
+  復元計画がfreezeされる前に、1つのstaging chunkとして送信するファイル数です。値を大きくするとスループットが向上する場合があります。値を小さくするとより細かな進捗表示が得られます。選択したファイル数やchunk数に関わらず、複数ファイルの復元にはcommit時に一度だけPolicyKit認証が必要であり、frozen計画の実行中に再認証を求められることはありません。  
 
 復元中は、リアルタイムの進捗ログに各ファイルの復元状況が自動スクロール付きで表示されます。  
 

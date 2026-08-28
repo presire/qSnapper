@@ -77,6 +77,48 @@
       <arg name="changeTypes" type="as" direction="in"/>
       <arg name="success" type="b" direction="out"/>
     </method>
+    <!--
+      Staged restore (single-authorization path).
+      Pre-freeze methods (BeginRestorePlan, StageRestoreEntries) only collect
+      bounded chunks; no Polkit authorization happens until CommitRestorePlan
+      freezes the plan and authorizes exactly once. Post-freeze methods
+      (ContinueRestorePlan, GetRestorePlanStatus, CancelRestorePlan) accept
+      ONLY a manifest identifier — never a path, change type, config name,
+      snapshot number, or restore mode — so a frozen plan cannot be mutated
+      after the single authorization. restoreMode is the string "yast" or
+      "direct".
+      statusCsv field order mirrors ManifestStatus in restoremanifest.h:
+        id, state, totalEntries, cursor, processed, mode, configName,
+        snapshotNumber, lastError
+    -->
+    <method name="BeginRestorePlan">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="snapshotNumber" type="i" direction="in"/>
+      <arg name="restoreMode" type="s" direction="in"/>
+      <arg name="manifestId" type="s" direction="out"/>
+    </method>
+    <method name="StageRestoreEntries">
+      <arg name="manifestId" type="s" direction="in"/>
+      <arg name="filePaths" type="as" direction="in"/>
+      <arg name="changeTypes" type="as" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="CommitRestorePlan">
+      <arg name="manifestId" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="ContinueRestorePlan">
+      <arg name="manifestId" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="GetRestorePlanStatus">
+      <arg name="manifestId" type="s" direction="in"/>
+      <arg name="statusCsv" type="s" direction="out"/>
+    </method>
+    <method name="CancelRestorePlan">
+      <arg name="manifestId" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
     <method name="IsConfigured">
       <arg name="configured" type="b" direction="out"/>
     </method>
@@ -94,6 +136,17 @@
       <arg name="current" type="i"/>
       <arg name="total" type="i"/>
       <arg name="filePath" type="s"/>
+    </signal>
+    <signal name="restorePlanProgress">
+      <arg name="manifestId" type="s"/>
+      <arg name="current" type="i"/>
+      <arg name="total" type="i"/>
+      <arg name="filePath" type="s"/>
+    </signal>
+    <signal name="restorePlanFinished">
+      <arg name="manifestId" type="s"/>
+      <arg name="terminalState" type="s"/>
+      <arg name="message" type="s"/>
     </signal>
   </interface>
 </node>

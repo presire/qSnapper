@@ -8,6 +8,7 @@
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusInterface>
+#include <QDBusServiceWatcher>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
@@ -35,7 +36,7 @@ struct ChangeInfo
 /**
  * @brief レガシーの変更レコードからステータスとパスを抽出する
  *
- * 最初の空白区切りだけを消費するため、パス内の空白はそのまま保持する。
+ * 最初の空白区切りだけを消費するため、パス内の空白はそのまま保持する
  *
  * @param line 改行を除いた変更レコード
  * @param info 解析結果の格納先
@@ -79,6 +80,286 @@ void collectParentPaths(const QString &path, QSet<QString> *parentPaths)
 }
 
 } // namespace
+
+// ============================================================================
+// RestorePlanTransport / SystemBusRestorePlanTransport Implementation
+// ============================================================================
+
+RestorePlanTransport::~RestorePlanTransport() = default;
+
+/**
+ * @brief RestorePlanTransportのsystem bus実装
+ *
+ * com.presire.qsnapper.Operations のstaged restoreメソッド群を非同期で呼び出す。
+ * Polkit認証はcommitPlan()の呼び出し時にサーバ側で1度だけ行われるため、
+ * beginPlan() / stageEntries() は認証なしで呼び出せる。
+ */
+class SystemBusRestorePlanTransport : public QObject, public RestorePlanTransport
+{
+public:
+    /**
+     * @brief SystemBusRestorePlanTransportを構築する
+     *
+     * @param parent 親QObject (未指定の場合は呼び出し側がdeleteする)
+     */
+    explicit SystemBusRestorePlanTransport(QObject *parent = nullptr)
+        : QObject(parent)
+    {
+    }
+
+    /**
+     * @brief staging計画の作成を要求する
+     *
+     * @param configName Snapper設定名
+     * @param snapshotNumber スナップショット番号
+     * @param restoreMode 復元方式 ("yast" または "direct")
+     * @param done 結果コールバック (ok, manifestId, error)
+     */
+    void beginPlan(const QString &configName, int snapshotNumber, const QString &restoreMode,
+                   std::function<void(bool ok, const QString &manifestId, const QString &error)> done) override
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "BeginRestorePlan"
+        );
+        message << configName << snapshotNumber << restoreMode;
+
+        callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<QString> reply = *watcher;
+            if (reply.isError()) {
+                done(false, QString(), reply.error().message());
+                return;
+            }
+            // 空のマニフェストIDはサーバ側での計画作成失敗を示す
+            const QString manifestId = reply.value();
+            done(!manifestId.isEmpty(), manifestId,
+                 manifestId.isEmpty() ? QStringLiteral("Restore plan was rejected") : QString());
+        });
+    }
+
+    /**
+     * @brief staging計画へ検証済みエントリのチャンクを追加する
+     *
+     * @param manifestId 対象計画のマニフェストID
+     * @param paths エントリのパスリスト
+     * @param changeTypes パスに対応する変更タイプリスト
+     * @param done 結果コールバック (ok, error)
+     */
+    void stageEntries(const QString &manifestId, const QStringList &paths, const QStringList &changeTypes,
+                      std::function<void(bool ok, const QString &error)> done) override
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "StageRestoreEntries"
+        );
+        message << manifestId << paths << changeTypes;
+
+        callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<bool> reply = *watcher;
+            if (reply.isError()) {
+                done(false, reply.error().message());
+            }
+            else if (!reply.value()) {
+                done(false, QStringLiteral("Restore entries were rejected"));
+            }
+            else {
+                done(true, QString());
+            }
+        });
+    }
+
+    /**
+     * @brief 計画を凍結して認証と実行を開始させる
+     *
+     * @param manifestId 対象計画のマニフェストID
+     * @param done 結果コールバック (ok, error)
+     */
+    void commitPlan(const QString &manifestId,
+                    std::function<void(bool ok, const QString &error)> done) override
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "CommitRestorePlan"
+        );
+        message << manifestId;
+
+        callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<bool> reply = *watcher;
+            if (reply.isError()) {
+                done(false, reply.error().message());
+            }
+            else if (!reply.value()) {
+                done(false, QStringLiteral("Restore plan commit was rejected"));
+            }
+            else {
+                done(true, QString());
+            }
+        });
+    }
+
+    /**
+     * @brief 計画のキャンセルを要求する
+     *
+     * @param manifestId 対象計画のマニフェストID
+     * @param done 結果コールバック (ok, error)
+     */
+    void cancelPlan(const QString &manifestId,
+                    std::function<void(bool ok, const QString &error)> done) override
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "CancelRestorePlan"
+        );
+        message << manifestId;
+
+        callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<bool> reply = *watcher;
+            if (reply.isError()) {
+                done(false, reply.error().message());
+            }
+            else if (!reply.value()) {
+                done(false, QStringLiteral("Restore plan cancel was rejected"));
+            }
+            else {
+                done(true, QString());
+            }
+        });
+    }
+
+    /**
+     * @brief 計画の状態をCSV形式で問い合わせる
+     *
+     * @param manifestId 対象計画のマニフェストID
+     * @param done 結果コールバック (ok, statusCsv, error)
+     */
+    void requestStatus(const QString &manifestId,
+                       std::function<void(bool ok, const QString &statusCsv, const QString &error)> done) override
+    {
+        QDBusMessage message = QDBusMessage::createMethodCall(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "GetRestorePlanStatus"
+        );
+        message << manifestId;
+
+        callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<QString> reply = *watcher;
+            if (reply.isError()) {
+                done(false, QString(), reply.error().message());
+                return;
+            }
+            // 空の返り値はサーバ側での問い合わせ失敗を示す
+            const QString statusCsv = reply.value();
+            done(!statusCsv.isEmpty(), statusCsv,
+                 statusCsv.isEmpty() ? QStringLiteral("Restore plan status was rejected") : QString());
+        });
+    }
+
+    /**
+     * @brief 復元計画の進捗/完了シグナルとサービス消失通知を受信側に登録する
+     *
+     * @param receiver 復元計画スロットとonRestorePlanServiceVanishedスロットを持つQObject
+     * @return すべてのシグナル登録に成功した場合はtrue
+     */
+    bool subscribePlanSignals(QObject *receiver) override
+    {
+        const bool progressOk = QDBusConnection::systemBus().connect(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "restorePlanProgress",
+            receiver,
+            SLOT(onRestorePlanProgress(QString,int,int,QString))
+        );
+        const bool finishedOk = QDBusConnection::systemBus().connect(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "restorePlanFinished",
+            receiver,
+            SLOT(onRestorePlanFinished(QString,QString,QString))
+        );
+        if (!m_serviceWatcher) {
+            m_serviceWatcher = new QDBusServiceWatcher(
+                QStringLiteral("com.presire.qsnapper.Operations"),
+                QDBusConnection::systemBus(),
+                QDBusServiceWatcher::WatchForUnregistration,
+                this
+            );
+        }
+        disconnect(m_serviceWatcher, SIGNAL(serviceUnregistered(QString)),
+                   receiver, SLOT(onRestorePlanServiceVanished()));
+        const bool watcherOk = connect(
+            m_serviceWatcher,
+            SIGNAL(serviceUnregistered(QString)),
+            receiver,
+            SLOT(onRestorePlanServiceVanished())
+        );
+        return progressOk && finishedOk && watcherOk;
+    }
+
+    /**
+     * @brief 復元計画の進捗/完了シグナルとサービス消失通知の受信を解除する
+     *
+     * @param receiver 登録解除するQObject
+     */
+    void unsubscribePlanSignals(QObject *receiver) override
+    {
+        QDBusConnection::systemBus().disconnect(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "restorePlanProgress",
+            receiver,
+            SLOT(onRestorePlanProgress(QString,int,int,QString))
+        );
+        QDBusConnection::systemBus().disconnect(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "restorePlanFinished",
+            receiver,
+            SLOT(onRestorePlanFinished(QString,QString,QString))
+        );
+        if (m_serviceWatcher) {
+            disconnect(m_serviceWatcher, SIGNAL(serviceUnregistered(QString)),
+                       receiver, SLOT(onRestorePlanServiceVanished()));
+        }
+    }
+
+private:
+    QDBusServiceWatcher *m_serviceWatcher = nullptr;
+
+    /**
+     * @brief 復元計画メソッドを非同期で呼び出す (タイムアウトなし)
+     *
+     * watcherはthisの子として管理されるため、transportの破棄時に未完了のコールバックが発火することはない
+     *
+     * @param message 送信するメソッドコール
+     * @param handler watcherの完了時に呼び出すハンドラ
+     */
+    void callPlanMethod(const QDBusMessage &message,
+                        std::function<void(QDBusPendingCallWatcher *watcher)> handler)
+    {
+        QDBusPendingCall pendingCall = QDBusConnection::systemBus().asyncCall(message, -1);
+        QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pendingCall, this);
+
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [handler, watcher](QDBusPendingCallWatcher *w) {
+            Q_UNUSED(w);
+            handler(watcher);
+            watcher->deleteLater();
+        });
+    }
+};
 
 // ============================================================================
 // FileChangeItem Implementation
@@ -237,7 +518,15 @@ FileChangeModel::FileChangeModel(QObject *parent)
     , m_dbusInterface(nullptr)
     , m_hasChanges(false)
     , m_loading(false)
-    , m_currentBatchIndex(0)
+    , m_defaultRestorePlanTransport(nullptr)
+    , m_restorePlanTransport(nullptr)
+    , m_planNextStageIndex(0)
+    , m_planCommitted(false)
+    , m_planActive(false)
+    , m_planSignalsSubscribed(false)
+    , m_planCancelRequested(false)
+    , m_planTotalFiles(0)
+    , m_planLastProgress(0)
     , m_totalFilesCount(0)
     , m_processedFilesCount(0)
     , m_restoreHasError(false)
@@ -263,6 +552,10 @@ FileChangeModel::FileChangeModel(QObject *parent)
     if (!m_dbusInterface->isValid()) {
         qWarning() << "Failed to connect to D-Bus service:" << QDBusConnection::systemBus().lastError().message();
     }
+
+    // 復元計画 (staged restore) 用のtransportを構築する
+    m_defaultRestorePlanTransport = new SystemBusRestorePlanTransport();
+    m_restorePlanTransport = m_defaultRestorePlanTransport;
 }
 
 /**
@@ -314,6 +607,8 @@ bool FileChangeModel::reconnectDbus()
 FileChangeModel::~FileChangeModel()
 {
     delete m_rootItem;
+    // 既定のtransportのみ所有して破棄する (テスト注入分は所有権なし)
+    delete m_defaultRestorePlanTransport;
 }
 
 /**
@@ -333,6 +628,94 @@ void FileChangeModel::onRestoreProgress(int current, int total, const QString &f
     int overallTotal = m_totalFilesCount;
 
     emit restoreProgress(overallCurrent, overallTotal, filePath);
+}
+
+/**
+ * @brief 復元計画の進捗スロット (staged restore用)
+ *
+ * サーバ側manifestが送る進捗シグナルを受信し、元の選択全体を基準に単調な進捗として再送出する
+ * サーバのtotal値は契約上同じ値だが、UIへは計画開始時に固定した総数を必ず通知する
+ *
+ * 実行中の計画以外のマニフェストIDを持つシグナルは無視される
+ *
+ * @param manifestId 進捗を報告してきた計画のマニフェストID
+ * @param current 処理済みエントリ数 (manifest全体基準)
+ * @param total マニフェストの総エントリ数
+ * @param filePath 現在処理中のファイルのベース名
+ */
+void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int current, int total, const QString &filePath)
+{
+    // 実行中の計画以外のシグナルは無視する
+    if (!m_planActive || m_planManifestId != manifestId) {
+        return;
+    }
+
+    Q_UNUSED(total);
+
+    const int boundedCurrent = qBound(0, current, m_planTotalFiles);
+    m_planLastProgress = qMax(m_planLastProgress, boundedCurrent);
+    emit restoreProgress(m_planLastProgress, m_planTotalFiles, filePath);
+}
+
+/**
+ * @brief 復元計画の完了スロット (staged restore用)
+ *
+ * サーバ側manifestが送る終端シグナルを受信し、シグナル受信を解除してから復元完了を通知する
+ * terminalStateが"completed"の場合のみ成功扱いになる
+ *
+ * 実行中の計画以外のマニフェストIDを持つシグナルは無視される
+ *
+ * @param manifestId 完了した計画のマニフェストID
+ * @param terminalState 終端状態 ("completed" / "failed" / "cancelled")
+ * @param message サーバ側からの追加メッセージ
+ */
+void FileChangeModel::onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message)
+{
+    // 実行中の計画以外のシグナルは無視する
+    if (!m_planActive || m_planManifestId != manifestId) {
+        return;
+    }
+
+    m_planActive = false;
+    if (m_planSignalsSubscribed) {
+        m_restorePlanTransport->unsubscribePlanSignals(this);
+        m_planSignalsSubscribed = false;
+    }
+
+    const bool completed = (terminalState == QStringLiteral("completed"));
+    if (!completed) {
+        qWarning() << "Restore plan finished with state:" << terminalState << message;
+    }
+
+    // 状態を先にリセットしてから完了を通知する (完了ハンドラからの再開始に備える)
+    resetRestorePlanState();
+    emit restoreCompleted(completed);
+}
+
+/**
+ * @brief 復元サービスの消失を失敗として処理する
+ *
+ * サービス消失後のcancelPlan呼び出しはD-Bus活性化で不要なサービス再起動を招くため、
+ * 登録解除以外のtransport呼び出しは行わない。
+ */
+void FileChangeModel::onRestorePlanServiceVanished()
+{
+    if (!m_planActive) {
+        return;
+    }
+
+    m_planActive = false;
+    if (m_planSignalsSubscribed) {
+        m_restorePlanTransport->unsubscribePlanSignals(this);
+        m_planSignalsSubscribed = false;
+    }
+
+    qWarning() << "Restore service stopped unexpectedly during an active restore plan";
+
+    // 状態を先にリセットしてから完了を通知する (完了ハンドラからの再開始に備える)
+    resetRestorePlanState();
+    emit errorOccurred(tr("The restore service stopped unexpectedly"));
+    emit restoreCompleted(false);
 }
 
 /**
@@ -805,7 +1188,6 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
             newRootItem->appendChild(item);
         }
     }
-
     else {
         // --- ツリーモード (従来): 対カレント比較 / 復元UI用 ---
         // アイテムマップ：正規化パス (スラッシュなし) --> FileChangeItem
@@ -1104,7 +1486,68 @@ QString FileChangeModel::changeTypeToString(FileChangeItem::ChangeType type)
 }
 
 /**
- * @brief チェック済みアイテムを changeType 付きで再帰収集する
+ * @brief 復元計画に送出するパスを正規化する
+ *
+ * 末尾のスラッシュを除去し、連続するスラッシュを単一にまとめる
+ * サーバ側はこれらを許容するが、正規化して送ることでmanifestの内容を安定させる
+ *
+ * @param path 正規化対象のパス
+ * @return 正規化済みのパス
+ */
+QString FileChangeModel::normalizeRestorePlanPath(const QString &path)
+{
+    QString normalized = path;
+    while (normalized.size() > 1 && normalized.endsWith('/')) {
+        normalized.chop(1);
+    }
+    static const QRegularExpression repeatedSlashes(QStringLiteral("/{2,}"));
+    normalized.replace(repeatedSlashes, QStringLiteral("/"));
+    return normalized;
+}
+
+/**
+ * @brief 復元計画に送出できるエントリかどうかを判定する
+ *
+ * サーバ側 (StageRestoreEntries) は1件でも不正なエントリがあるとチャンク全体を拒否するため、
+ * クライアント側で同じ規則を先に検査して不正エントリを除外する (レガシーのRestoreFiles*が不正エントリを黙ってスキップしていた挙動に合わせる)
+ *
+ * @param path 正規化済みのパス
+ * @param changeType 変更タイプ文字列
+ * @return 送出可能な場合はtrue
+ */
+bool FileChangeModel::isValidRestorePlanEntry(const QString &path, const QString &changeType)
+{
+    if (!path.startsWith('/')) {
+        return false;
+    }
+    if (path == QStringLiteral("/.snapshots") || path.startsWith(QStringLiteral("/.snapshots/"))) {
+        return false;
+    }
+    if (changeType != QStringLiteral("created") && changeType != QStringLiteral("deleted")
+            && changeType != QStringLiteral("modified") && changeType != QStringLiteral("typechanged")) {
+        return false;
+    }
+
+    // '.' / '..' 成分を含まないこと
+    const QStringList components = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    for (const QString &component : components) {
+        if (component == QLatin1String(".") || component == QLatin1String("..")) {
+            return false;
+        }
+    }
+
+    // 制御文字 (C0: U+0000..U+001F / DEL: U+007F / C1: U+0080..U+009F) を含まないこと
+    for (const QChar &ch : path) {
+        const ushort ucs = ch.unicode();
+        if (ucs <= 0x1F || ucs == 0x7F || (ucs >= 0x80 && ucs <= 0x9F)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief チェック済みアイテムをchangeType付きで再帰収集する
  *
  * ディレクトリは自身の変更と配下の変更を分けて扱い、
  * 最終的にRestoreFiles系APIへ渡せるpath / changeType配列を構築する
@@ -1158,35 +1601,41 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
 /**
  * @brief チェックされたアイテムを復元
  *
- * チェックされた全てのアイテムを復元する
- * 大量のファイルがある場合はバッチに分割して処理される
+ * チェックされた全てのアイテムを復元する (staged restore)
+ * 事前にエントリを上限付きチャンクへ分割して認証前にstagingし、全チャンクのstaging完了後にcommitを1度だけ呼び出す
+ * Polkitプロンプトはcommit時に1度だけ表示され、以降の進捗/完了はサーバ側manifestのシグナルで駆動される
  *
  * @return 復元処理が開始された場合: true、エラーの場合: false
  */
 bool FileChangeModel::restoreCheckedItems()
 {
-    // 両方のモードでchangeTypeを収集する (RestoreFiles() / RestoreFilesDirect() 共にchangeTypes必須)
+    // 両方のモードでchangeTypeを収集する (StageRestoreEntriesでchangeTypes必須)
     QStringList checkedPaths;
     QStringList checkedChangeTypes;
 
     collectCheckedItemsWithTypes(m_rootItem, checkedPaths, checkedChangeTypes);
-    // 重複除外 (パスとchangeTypeのペアを保持)
-    {
-        QSet<QString> seen;
-        QStringList uniquePaths;
-        QStringList uniqueChangeTypes;
-        for (int i = 0; i < checkedPaths.size(); ++i) {
-            if (!seen.contains(checkedPaths[i])) {
-                seen.insert(checkedPaths[i]);
-                uniquePaths.append(checkedPaths[i]);
-                uniqueChangeTypes.append(checkedChangeTypes[i]);
-            }
+
+    // 送信前にクライアント側で検証・正規化し、不正エントリを除外する
+    // 正規化後のパスで重複を除き、最初の出現順を維持する
+    QStringList planPaths;
+    QStringList planChangeTypes;
+    QSet<QString> seenPaths;
+    const int entryCount = qMin(checkedPaths.size(), checkedChangeTypes.size());
+    for (int i = 0; i < entryCount; ++i) {
+        const QString normalized = normalizeRestorePlanPath(checkedPaths.at(i));
+        if (!isValidRestorePlanEntry(normalized, checkedChangeTypes.at(i))) {
+            qWarning() << "Skipping invalid restore entry:" << checkedPaths.at(i);
+            continue;
         }
-        checkedPaths = uniquePaths;
-        checkedChangeTypes = uniqueChangeTypes;
+        if (seenPaths.contains(normalized)) {
+            continue;
+        }
+        seenPaths.insert(normalized);
+        planPaths.append(normalized);
+        planChangeTypes.append(checkedChangeTypes.at(i));
     }
 
-    if (checkedPaths.isEmpty()) {
+    if (planPaths.isEmpty()) {
         emit errorOccurred(tr("No files selected for restoration"));
         emit restoreCompleted(false);
         return false;
@@ -1198,143 +1647,289 @@ bool FileChangeModel::restoreCheckedItems()
         return false;
     }
 
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnectDbus()) {
-            emit errorOccurred("D-Bus connection failed");
-            emit restoreCompleted(false);
-            return false;
-        }
+    if (!m_restorePlanTransport) {
+        emit errorOccurred("D-Bus connection failed");
+        emit restoreCompleted(false);
+        return false;
     }
 
-    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)
-    // バッチの最初の RestoreFiles() / RestoreFilesDirect() 呼び出しで、
-    // Polkitがプロンプトを出し、以降はauth_admin_keepのcookieにより抑止される
-
-    // D-Busシグナルを接続して進捗を受信
-    bool connected = QDBusConnection::systemBus().connect(
-        "com.presire.qsnapper.Operations",
-        "/com/presire/qsnapper/Operations",
-        "com.presire.qsnapper.Operations",
-        "restoreProgress",
-        this,
-        SLOT(onRestoreProgress(int,int,QString))
-    );
-
-    if (!connected) {
-        qWarning() << "Failed to connect to restoreProgress signal";
+    // System Bus transportは、従来の復元経路と同じくサービス再接続を試みる
+    // テストtransportはD-Bus接続なしで実行できるよう、この確認を適用しない
+    if (m_restorePlanTransport == m_defaultRestorePlanTransport
+            && (!m_dbusInterface || !m_dbusInterface->isValid())
+            && !reconnectDbus()) {
+        emit errorOccurred("D-Bus connection failed");
+        emit restoreCompleted(false);
+        return false;
     }
 
-    // ファイルリストをバッチに分割して順次処理
-    m_restoreBatches.clear();
-    m_restoreBatchChangeTypes.clear();
-    m_currentBatchIndex = 0;
-    m_totalFilesCount = checkedPaths.size();
-    m_processedFilesCount = 0;
-    m_restoreHasError = false;
+    // 復元計画の状態を初期化する (前回実行の残留状態を消す)
+    m_planManifestId.clear();
+    m_planPaths = planPaths;
+    m_planChangeTypes = planChangeTypes;
+    m_planNextStageIndex = 0;
+    m_planCommitted = false;
+    m_planActive = true;
+    m_planSignalsSubscribed = false;
+    m_planCancelRequested = false;
+    m_planTotalFiles = planPaths.size();
+    m_planLastProgress = 0;
     m_cancelRequested = false;
+    m_totalFilesCount = planPaths.size();
+    m_processedFilesCount = 0;
 
-    const int batchSize = m_restoreBatchSize;
-    for (int i = 0; i < checkedPaths.size(); i += batchSize) {
-        QStringList batchPaths;
-        QStringList batchTypes;
-        for (int j = i; j < qMin(i + batchSize, checkedPaths.size()); ++j) {
-            batchPaths.append(checkedPaths[j]);
-            batchTypes.append(checkedChangeTypes[j]);
-        }
-        m_restoreBatches.append(batchPaths);
-        m_restoreBatchChangeTypes.append(batchTypes);
+    // 進捗/完了はサーバ側manifestのシグナルで駆動する
+    if (!m_restorePlanTransport->subscribePlanSignals(this)) {
+        m_restorePlanTransport->unsubscribePlanSignals(this);
+        resetRestorePlanState();
+        emit errorOccurred("D-Bus connection failed");
+        emit restoreCompleted(false);
+        return false;
     }
+    m_planSignalsSubscribed = true;
 
-    // 最初のバッチを処理
-    processNextBatch();
+    // 認証なしでstaging計画を開始する (Polkitプロンプトはcommit時に1度だけ出る)
+    const QString restoreMode = m_useDirectRestore ? QStringLiteral("direct") : QStringLiteral("yast");
+    m_restorePlanTransport->beginPlan(m_configName, m_snapshotNumber, restoreMode,
+                                      [this](bool ok, const QString &manifestId, const QString &error) {
+                                          onPlanBeginFinished(ok, manifestId, error);
+                                      });
 
     return true;
 }
 
 /**
- * @brief 次のバッチを処理
+ * @brief staging計画の作成結果を処理する
  *
- * 復元処理のバッチを順次処理する
- * 全てのバッチが完了すると、完了シグナルを発行する
+ * beginPlanの結果を受け、成功した場合は先頭チャンクのstagingを開始する
  *
- * キャンセルが要求された場合は、残りのバッチをスキップする
+ * @param ok 計画作成に成功した場合: true
+ * @param manifestId 作成された計画のマニフェストID
+ * @param error 失敗時のエラーメッセージ
  */
-void FileChangeModel::processNextBatch()
+void FileChangeModel::onPlanBeginFinished(bool ok, const QString &manifestId, const QString &error)
 {
-    // キャンセルが要求された場合は処理を中断
-    if (m_cancelRequested) {
-        QDBusConnection::systemBus().disconnect(
-            "com.presire.qsnapper.Operations",
-            "/com/presire/qsnapper/Operations",
-            "com.presire.qsnapper.Operations",
-            "restoreProgress",
-            this,
-            SLOT(onRestoreProgress(int,int,QString))
-        );
+    // beginの応答がキャンセル後に届いた場合も、発行済みmanifestをベストエフォートで破棄する
+    if (!m_planActive) {
+        if (m_cancelRequested && !manifestId.isEmpty()) {
+            m_restorePlanTransport->cancelPlan(manifestId,
+                                               [](bool ok, const QString &cancelError) {
+                                                   Q_UNUSED(ok);
+                                                   Q_UNUSED(cancelError);
+                                               });
+        }
+        return;
+    }
 
+    if (m_cancelRequested) {
+        if (!manifestId.isEmpty()) {
+            m_planManifestId = manifestId;
+            m_planCancelRequested = true;
+            m_planActive = false;
+            if (m_planSignalsSubscribed) {
+                m_restorePlanTransport->unsubscribePlanSignals(this);
+                m_planSignalsSubscribed = false;
+            }
+            m_restorePlanTransport->cancelPlan(m_planManifestId,
+                                               [](bool ok, const QString &cancelError) {
+                                                   Q_UNUSED(ok);
+                                                   Q_UNUSED(cancelError);
+                                               });
+        }
+        else {
+            m_planActive = false;
+            if (m_planSignalsSubscribed) {
+                m_restorePlanTransport->unsubscribePlanSignals(this);
+                m_planSignalsSubscribed = false;
+            }
+        }
+        resetRestorePlanState();
         emit restoreCompleted(false);
         return;
     }
 
-    if (m_currentBatchIndex >= m_restoreBatches.size()) {
-        // 全てのバッチが処理完了
-        QDBusConnection::systemBus().disconnect(
-            "com.presire.qsnapper.Operations",
-            "/com/presire/qsnapper/Operations",
-            "com.presire.qsnapper.Operations",
-            "restoreProgress",
-            this,
-            SLOT(onRestoreProgress(int,int,QString))
-        );
-
-        emit restoreCompleted(!m_restoreHasError);
+    if (!ok || manifestId.isEmpty()) {
+        if (!manifestId.isEmpty()) {
+            m_planManifestId = manifestId;
+        }
+        finishRestorePlanWithError(error.isEmpty() ? tr("Failed to begin restore plan") : error);
         return;
     }
 
-    QStringList batch = m_restoreBatches[m_currentBatchIndex];
+    m_planManifestId = manifestId;
+    stageNextPlanChunk();
+}
 
-    // 非同期呼び出しでファイルを処理 (タイムアウトなし)
-    QDBusMessage msg = QDBusMessage::createMethodCall(
-        "com.presire.qsnapper.Operations",
-        "/com/presire/qsnapper/Operations",
-        "com.presire.qsnapper.Operations",
-        m_useDirectRestore ? "RestoreFilesDirect" : "RestoreFiles"
-    );
-    QStringList batchChangeTypes = m_restoreBatchChangeTypes[m_currentBatchIndex];
-    msg << m_configName << m_snapshotNumber << batch << batchChangeTypes;
+/**
+ * @brief 次のチャンクをstagingする
+ *
+ * チャンクは必ず1件ずつ順次送出する (サーバ側は計画ごとに単一スレッドで処理するため、並列送出は行わない)
+ * 全チャンクのstagingが完了したらcommitを1度だけ呼び出して、計画を凍結する
+ */
+void FileChangeModel::stageNextPlanChunk()
+{
+    if (!m_planActive || m_cancelRequested || m_planCommitted) {
+        return;
+    }
 
-    QDBusPendingCall pendingCall = QDBusConnection::systemBus().asyncCall(msg, -1);
-    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pendingCall, this);
+    // サーバ側の1チャンク上限に合わせたチャンクサイズ
+    // (m_restoreBatchSizeは1..1000に丸め済みのため常に収まるが、念のためクランプする)
+    static constexpr int kMaxEntriesPerStageChunk = 5000;  // src/dbusservice/restoremanifest.hのkMaxEntriesPerStageChunkと同期
+    const int chunkSize = qBound(1, m_restoreBatchSize, kMaxEntriesPerStageChunk);
 
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, batch](QDBusPendingCallWatcher *w) {
-        QDBusPendingReply<bool> reply = *w;
+    if (m_planManifestId.isEmpty()) {
+        finishRestorePlanWithError(tr("Restore plan has no manifest id"));
+        return;
+    }
 
-        if (reply.isError()) {
-            qWarning() << "Failed to restore batch:" << reply.error().message();
-            m_restoreHasError = true;
-            // エラーが発生しても全てのバッチを処理する
-        }
-        else {
-            bool success = reply.value();
-            if (!success) {
-                m_restoreHasError = true;
-            }
-        }
+    if (m_planNextStageIndex >= m_planPaths.size()) {
+        // 全チャンクのstaging完了 -> 計画を凍結して認証と実行を開始する
+        commitRestorePlan();
+        return;
+    }
 
-        // バッチ完了後、処理済みファイル数を更新
-        m_processedFilesCount += batch.size();
+    const int chunkEnd = qMin(m_planNextStageIndex + chunkSize, m_planPaths.size());
+    QStringList chunkPaths;
+    QStringList chunkTypes;
+    for (int i = m_planNextStageIndex; i < chunkEnd; ++i) {
+        chunkPaths.append(m_planPaths.at(i));
+        chunkTypes.append(m_planChangeTypes.at(i));
+    }
 
-        // バッチ完了時に明示的に進捗を通知
-        emit restoreProgress(m_processedFilesCount, m_totalFilesCount,
-                             QString("Batch %1/%2 completed").arg(m_currentBatchIndex + 1).arg(m_restoreBatches.size()));
+    // チャンクの送出前にインデックスを進める (失敗時はフロー自体を中断するため巻き戻し不要)
+    m_planNextStageIndex = chunkEnd;
 
-        m_currentBatchIndex++;
+    m_restorePlanTransport->stageEntries(m_planManifestId, chunkPaths, chunkTypes,
+                                         [this](bool ok, const QString &error) {
+                                             onPlanStageFinished(ok, error);
+                                         });
+}
 
-        w->deleteLater();
+/**
+ * @brief チャンクのstaging結果を処理する
+ *
+ * 成功した場合は次のチャンクをstagingし、失敗した場合はフローを中断する
+ *
+ * @param ok stagingに成功した場合: true
+ * @param error 失敗時のエラーメッセージ
+ */
+void FileChangeModel::onPlanStageFinished(bool ok, const QString &error)
+{
+    if (!m_planActive || m_cancelRequested || m_planCommitted) {
+        return;
+    }
 
-        // 次のバッチを処理
-        processNextBatch();
-    });
+    if (!ok) {
+        finishRestorePlanWithError(error.isEmpty() ? tr("Failed to stage restore entries") : error);
+        return;
+    }
+
+    stageNextPlanChunk();
+}
+
+/**
+ * @brief 復元計画をcommit (凍結) する
+ *
+ * この呼び出しでサーバ側のPolkit認証が1度だけ行われ、認証後は実行がサーバ側で非同期に継続される
+ * 以降のUI更新はシグナル駆動になる
+ */
+void FileChangeModel::commitRestorePlan()
+{
+    if (!m_planActive || m_cancelRequested || m_planCommitted || m_planManifestId.isEmpty()) {
+        return;
+    }
+
+    // commit呼び出しを発行した時点で計画は凍結処理中とみなし、その間のcancelRestore()も実行中計画として扱う
+    m_planCommitted = true;
+    m_restorePlanTransport->commitPlan(m_planManifestId,
+                                       [this](bool ok, const QString &error) {
+                                           onPlanCommitFinished(ok, error);
+                                       });
+}
+
+/**
+ * @brief 復元計画のcommit結果を処理する
+ *
+ * commitに成功したらフローはシグナル待ちに移行する。失敗した場合は
+ * フローを中断する。
+ *
+ * @param ok commitに成功した場合: true
+ * @param error 失敗時のエラーメッセージ
+ */
+void FileChangeModel::onPlanCommitFinished(bool ok, const QString &error)
+{
+    if (!m_planActive) {
+        return;
+    }
+
+    if (!ok) {
+        finishRestorePlanWithError(error.isEmpty() ? tr("Failed to commit restore plan") : error);
+        return;
+    }
+
+    // 計画は凍結済み
+    // 以降はrestorePlanProgress / restorePlanFinishedで駆動される
+}
+
+/**
+ * @brief 復元計画をエラー完了させる
+ *
+ * エラー発生時は以降のtransport呼び出しを行わず (サーバ側に残ったstaging計画の破棄を促すベストエフォートのcancelPlanのみ例外)、
+ * シグナル受信を解除してエラーと完了を通知し、状態をリセットする
+ *
+ * @param message ユーザーに表示するエラーメッセージ
+ */
+void FileChangeModel::finishRestorePlanWithError(const QString &message)
+{
+    if (!m_planActive) {
+        return;
+    }
+
+    const QString manifestId = m_planManifestId;
+    RestorePlanTransport *transport = m_restorePlanTransport;
+    m_planActive = false;
+
+    // 以降の遅延コールバックやserver signalが完了通知を重ねないよう、transport呼び出しの前に購読を解除する
+    if (m_planSignalsSubscribed) {
+        transport->unsubscribePlanSignals(this);
+        m_planSignalsSubscribed = false;
+    }
+
+    // マニフェストIDが既に発行されている場合は、サーバ側に残った計画をエージング任せにせず破棄させる (ベストエフォート)
+    if (!manifestId.isEmpty() && !m_planCancelRequested) {
+        m_planCancelRequested = true;
+        transport->cancelPlan(manifestId,
+                              [](bool ok, const QString &cancelError) {
+                                  Q_UNUSED(ok);
+                                  Q_UNUSED(cancelError);
+                              });
+    }
+
+    qWarning() << "Restore plan failed:" << message;
+
+    // 状態を先にリセットしてから完了を通知する (完了ハンドラからの再開始に備える)
+    resetRestorePlanState();
+    emit errorOccurred(message);
+    emit restoreCompleted(false);
+}
+
+/**
+ * @brief 復元計画の実行状態をリセットする
+ *
+ * 次回のrestoreCheckedItems()がクリーンな状態から開始できるようにする
+ */
+void FileChangeModel::resetRestorePlanState()
+{
+    m_planManifestId.clear();
+    m_planPaths.clear();
+    m_planChangeTypes.clear();
+    m_planNextStageIndex = 0;
+    m_planCommitted = false;
+    m_planActive = false;
+    m_planSignalsSubscribed = false;
+    m_planCancelRequested = false;
+    m_planTotalFiles = 0;
+    m_planLastProgress = 0;
 }
 
 /**
@@ -1403,7 +1998,6 @@ void FileChangeModel::collectCheckedItems(FileChangeItem *parent, QStringList &p
             else {
                 // 子要素がないアイテム
                 // パスと変更タイプから判断
-
                 if (!itemPath.isEmpty() && itemPath != "/") {
                     paths.append(itemPath);
                 }
@@ -1470,11 +2064,69 @@ void FileChangeModel::collectAllFilesRecursive(FileChangeItem *parent, QStringLi
  *
  * 復元処理のキャンセルを要求する
  *
- * 現在実行中のバッチは完了するが、次のバッチ以降はスキップされる
- * 既に復元されたファイルやディレクトリはそのまま残る
+ * キャンセルはサーバ側の次のチャンク境界で反映されるため、既に復元されたファイルやディレクトリはそのまま残る
+ *
+ * 復元計画がcommit済みの場合はcancelPlanを送った後、終端シグナル (restorePlanFinished) を待ってから完了を通知する
+ * staging中 (commit前) の場合は以降のチャンク送出を停止し、ベストエフォートで計画を破棄してローカルで完了扱いにする
+ * 実行中の計画がない場合は従来どおりフラグの設定のみ行う
  */
 void FileChangeModel::cancelRestore()
 {
     m_cancelRequested = true;
     qWarning() << "Restore operation cancel requested";
+
+    if (!m_planActive) {
+        // 復元計画が実行中でない場合はフラグのみ設定する
+        return;
+    }
+
+    if (m_planCommitted) {
+        // commit済み:
+        // サーバ側のチャンク境界でキャンセルが効く
+        // 完了はrestorePlanFinishedシグナルで判定するため、ここでは楽観的に完了しない
+        if (!m_planCancelRequested && !m_planManifestId.isEmpty()) {
+            m_planCancelRequested = true;
+            m_restorePlanTransport->cancelPlan(m_planManifestId,
+                                               [](bool ok, const QString &error) {
+                                                   Q_UNUSED(ok);
+                                                   Q_UNUSED(error);
+                                                   // キャンセル要求の結果は終端シグナルで扱う
+                                               });
+        }
+        return;
+    }
+
+    // staging中 (commit前):
+    // 以降のチャンクは送出せず、ベストエフォートで計画を破棄してローカルで完了扱いにする
+    const QString manifestId = m_planManifestId;
+    m_planActive = false;
+    if (m_planSignalsSubscribed) {
+        m_restorePlanTransport->unsubscribePlanSignals(this);
+        m_planSignalsSubscribed = false;
+    }
+
+    if (!manifestId.isEmpty() && !m_planCancelRequested) {
+        m_planCancelRequested = true;
+        m_restorePlanTransport->cancelPlan(manifestId,
+                                           [](bool ok, const QString &error) {
+                                               Q_UNUSED(ok);
+                                               Q_UNUSED(error);
+                                               // 破棄結果はUI状態に影響しない (ローカル完了扱いのため)
+                                           });
+    }
+    resetRestorePlanState();
+    emit restoreCompleted(false);
+}
+
+/**
+ * @brief テスト専用に復元計画transportを差し替える
+ *
+ * 所有権は移らないため、差し込んだtransportは呼び出し側が管理する
+ * 既定のSystem Bus実装は破棄せず、ポインタのみ差し替える
+ *
+ * @param transport 差し込むtransport (nullptrの場合は既定のtransportへ戻す)
+ */
+void FileChangeModel::setRestorePlanTransportForTesting(RestorePlanTransport *transport)
+{
+    m_restorePlanTransport = transport ? transport : m_defaultRestorePlanTransport;
 }

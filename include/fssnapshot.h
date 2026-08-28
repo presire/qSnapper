@@ -6,33 +6,42 @@
 #include <QString>
 #include <QVariantMap>
 
+/**
+ * @brief ファイルシステムスナップショットのメタデータを保持するクラス
+ *
+ * Snapperが管理するスナップショット1件分の情報をQObjectとしてラップし、QMLからプロパティとして参照可能にする
+ * スナップショット番号、種別、タイムスタンプ、ユーザ、クリーンアップ設定、説明および任意のユーザデータを保持する
+ */
 class FsSnapshot : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(int number READ number CONSTANT)
-    Q_PROPERTY(SnapshotType snapshotType READ snapshotType CONSTANT)
-    Q_PROPERTY(int previousNumber READ previousNumber CONSTANT)
-    Q_PROPERTY(QDateTime timestamp READ timestamp CONSTANT)
-    Q_PROPERTY(QString user READ user CONSTANT)
-    Q_PROPERTY(CleanupAlgorithm cleanupAlgo READ cleanupAlgo CONSTANT)
-    Q_PROPERTY(QString description READ description CONSTANT)
-    Q_PROPERTY(QVariantMap userdata READ userdata CONSTANT)
+    Q_PROPERTY(int number READ number CONSTANT)                         // スナップショット番号
+    Q_PROPERTY(SnapshotType snapshotType READ snapshotType CONSTANT)    // スナップショット種別
+    Q_PROPERTY(int previousNumber READ previousNumber CONSTANT)         // 紐付け元スナップショット番号
+    Q_PROPERTY(QDateTime timestamp READ timestamp CONSTANT)             // 作成日時
+    Q_PROPERTY(QString user READ user CONSTANT)                         // 作成ユーザ名
+    Q_PROPERTY(CleanupAlgorithm cleanupAlgo READ cleanupAlgo CONSTANT)  // クリーンアップアルゴリズム
+    Q_PROPERTY(QString description READ description CONSTANT)           // 説明文
+    Q_PROPERTY(QVariantMap userdata READ userdata CONSTANT)             // ユーザデータマップ
 
 public:
+    // スナップショット種別を表す列挙型
     enum class SnapshotType {
-        Single,
-        Pre,
-        Post
+        Single,     // 単発スナップショット
+        Pre,        // 変更前の事前スナップショット
+        Post        // 変更後の事後スナップショット
     };
     Q_ENUM(SnapshotType)
 
+    // クリーンアップアルゴリズムを表す列挙型
     enum class CleanupAlgorithm {
-        None,
-        Number,
-        Timeline
+        None,       // クリーンアップなし
+        Number,     // 番号ベースで古いスナップショットを削除
+        Timeline    // タイムラインに基づいて削除
     };
     Q_ENUM(CleanupAlgorithm)
 
+    // コンストラクタ
     explicit FsSnapshot(int number,
                        SnapshotType snapshotType,
                        int previousNumber,
@@ -41,35 +50,43 @@ public:
                        CleanupAlgorithm cleanupAlgo,
                        const QString &description,
                        const QVariantMap &userdata = QVariantMap(),
-                       QObject *parent = nullptr);
+                       QObject *parent = nullptr); // FsSnapshotを構築する
 
-    int number() const { return m_number; }
-    SnapshotType snapshotType() const { return m_snapshotType; }
-    int previousNumber() const { return m_previousNumber; }
-    QDateTime timestamp() const { return m_timestamp; }
-    QString user() const { return m_user; }
-    CleanupAlgorithm cleanupAlgo() const { return m_cleanupAlgo; }
-    QString description() const { return m_description; }
-    QVariantMap userdata() const { return m_userdata; }
+    // プロパティゲッター
+    int number() const { return m_number; }                         // スナップショット番号を取得する
+    SnapshotType snapshotType() const { return m_snapshotType; }    // スナップショット種別を取得する
+    int previousNumber() const { return m_previousNumber; }         // 紐付け元スナップショット番号を取得する
+    QDateTime timestamp() const { return m_timestamp; }             // 作成日時を取得する
+    QString user() const { return m_user; }                         // 作成ユーザ名を取得する
+    CleanupAlgorithm cleanupAlgo() const { return m_cleanupAlgo; }  // クリーンアップアルゴリズムを取得する
+    QString description() const { return m_description; }           // 説明文を取得する
+    QVariantMap userdata() const { return m_userdata; }             // ユーザデータマップを取得する
 
-    Q_INVOKABLE QString snapshotTypeString() const;
-    Q_INVOKABLE QString cleanupAlgoString() const;
-    Q_INVOKABLE bool isImportant() const;
+    // インスタンスメソッド (QML公開・判定)
+    Q_INVOKABLE QString snapshotTypeString() const;                 // スナップショット種別を文字列で取得する
+    Q_INVOKABLE QString cleanupAlgoString() const;                  // クリーンアップアルゴリズムを文字列で取得する
+    Q_INVOKABLE bool isImportant() const;                           // 重要フラグが立っているか判定する
 
-    static QString snapshotTypeToString(SnapshotType type);
-    static SnapshotType stringToSnapshotType(const QString &str);
-    static QString cleanupAlgorithmToString(CleanupAlgorithm algo);
-    static CleanupAlgorithm stringToCleanupAlgorithm(const QString &str);
+    // 静的変換ユーティリティ
+    static QString snapshotTypeToString(SnapshotType type);                 // スナップショット種別を文字列に変換する
+    static SnapshotType stringToSnapshotType(const QString &str);           // 文字列をスナップショット種別に変換する
+    static QString cleanupAlgorithmToString(CleanupAlgorithm algo);         // クリーンアップアルゴリズムを文字列に変換する
+    static CleanupAlgorithm stringToCleanupAlgorithm(const QString &str);   // 文字列をクリーンアップアルゴリズムに変換する
 
 private:
-    int m_number;                        // スナップショット番号
-    SnapshotType m_snapshotType;         // スナップショットタイプ (Single/Pre/Post)
-    int m_previousNumber;                // 前のスナップショット番号 (Postの場合のみ有効)
-    QDateTime m_timestamp;               // スナップショット作成日時
-    QString m_user;                      // スナップショット作成ユーザ名
-    CleanupAlgorithm m_cleanupAlgo;      // クリーンアップアルゴリズム (None/Number/Timeline)
-    QString m_description;               // スナップショットの説明文
-    QVariantMap m_userdata;              // カスタムユーザデータマップ
+    // 識別情報
+    int m_number;                   // スナップショット番号
+    SnapshotType m_snapshotType;    // スナップショット種別 (Single/Pre/Post)
+    int m_previousNumber;           // 紐付け元スナップショット番号 (Postの場合のみ有効)
+
+    // 作成情報
+    QDateTime m_timestamp;          // スナップショット作成日時
+    QString m_user;                 // スナップショット作成ユーザ名
+
+    // メタデータ
+    CleanupAlgorithm m_cleanupAlgo; // クリーンアップアルゴリズム (None/Number/Timeline)
+    QString m_description;          // スナップショットの説明文
+    QVariantMap m_userdata;         // カスタムユーザデータマップ
 };
 
 #endif // FSSNAPSHOT_H

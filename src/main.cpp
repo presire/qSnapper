@@ -11,6 +11,7 @@
 #include <QMap>
 #include <QDebug>
 #include <QQuickWindow>
+#include <QWindow>
 #include "fssnapshot.h"
 #include "snapperservice.h"
 #include "snapshotlistmodel.h"
@@ -18,6 +19,7 @@
 #include "thememanager.h"
 #include "snapshotgroupmodel.h"
 #include "singleinstanceguard.h"
+#include "windowstatemanager.h"
 
 int main(int argc, char *argv[])
 {
@@ -107,6 +109,10 @@ int main(int argc, char *argv[])
     // KDE Plasma 6のorg.kde.desktopスタイルがQMLのPaletteを無視する問題を回避する
     QQuickStyle::setStyle("Fusion");
 
+    // メインウィンドウのサイズと最大化状態を永続化するマネージャ
+    // app.exec()の間ずっと生存させる必要があるため、ここで生成する
+    WindowStateManager windowState(&app);
+
     // QMLエンジンの生成とルートコンポーネントのロード
     QQmlApplicationEngine engine;
 
@@ -121,6 +127,11 @@ int main(int argc, char *argv[])
 
     if (engine.rootObjects().isEmpty()) {
         return -1;
+    }
+
+    // 保存済みのウィンドウサイズと最大化状態を復元する
+    if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first())) {
+        windowState.restore(window);
     }
 
     // 別プロセスから二重起動要求を受けた場合にウィンドウを前面化

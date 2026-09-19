@@ -45,6 +45,7 @@ set(SOURCES
     src/thememanager.cpp
     src/snapshotgroupmodel.cpp
     src/singleinstanceguard.cpp
+    src/windowstatemanager.cpp
 )
 
 set(HEADERS
@@ -56,6 +57,7 @@ set(HEADERS
     include/thememanager.h
     include/snapshotgroupmodel.h
     include/singleinstanceguard.h
+    include/windowstatemanager.h
 )
 
 qt6_add_executable(qsnapper ${SOURCES} ${HEADERS})

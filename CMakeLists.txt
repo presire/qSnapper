@@ -25,7 +25,9 @@ find_package(PolkitQt6-1 REQUIRED)
 # 直接使用する。polkit-qt6-1の非同期APIはシングルトンのシグナル1本しか持たず、
 # 完了通知に要求識別子が含まれないため、同時実行時にどのD-Bus呼び出しの結果か
 # を判別できず、rootサービスでは認可の取り違えに繋がるため使用しない。
-# polkit-gobject-1はPolkitQt6-1が内部で依存しており、追加の配布要件は生じない
+# polkit-gobject-1の.pcはopenSUSE/Fedoraではpolkit-develに含まれる一方、
+# Debianではlibpolkit-gobject-1-devが必須 (libpolkit-qt6-1-devはこれに依存しないため
+# ビルド環境では明示的なインストールが必要。CIのDebianジョブの依存リストを参照)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POLKIT_GOBJECT REQUIRED IMPORTED_TARGET polkit-gobject-1)
 

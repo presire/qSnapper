@@ -425,6 +425,16 @@ allow unconfined_t qsnapper_t:dbus send_msg;
 allow qsnapper_t init_t:fd use;
 allow qsnapper_t unconfined_t:fd use;
 
+# SingleInstanceGuard (QLockFile) stale-lock detection.
+# QLockFile::isApparentlyStale() -> isProcessRunning() probes the PID recorded
+# in qsnapper-<UID>.lock with kill(pid, 0) (qlockfile_unix.cpp). That PID can
+# belong to a process in the user's unconfined_t domain (e.g. a PID reused
+# after a crash, or a build-tree binary that was never transitioned to
+# qsnapper_t). The probe then requires the process:signull permission.
+# Without it kill() fails with EACCES instead of ESRCH, so QLockFile treats
+# the stale lock as live and startup may be wrongly refused.
+allow qsnapper_t unconfined_t:process signull;
+
 # User-domain access to qsnapper-dbus-service
 # 任意ユーザドメインからqsnapper-dbus-serviceへのD-Bus呼び出しを許可する
 # 「誰が何を実行できるか」の細粒度認可は、qsnapper-dbus-service内のPolkit (auth_admin / auth_admin_keep) が判定するため、

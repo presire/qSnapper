@@ -85,12 +85,12 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="717"/>
         <source>The restore service stopped unexpectedly</source>
-        <translation type="unfinished"></translation>
+        <translation>Der Wiederherstellungsdienst wurde unerwartet beendet</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="931"/>
         <source>Invalid parameters for restore</source>
-        <translation type="unfinished"></translation>
+        <translation>Ungültige Parameter für die Wiederherstellung</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="939"/>
@@ -101,12 +101,12 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="946"/>
         <source>D-Bus connection failed</source>
-        <translation type="unfinished"></translation>
+        <translation>D-Bus-Verbindung fehlgeschlagen</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="987"/>
         <source>Restore failed: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Wiederherstellung fehlgeschlagen: %1</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1726"/>
@@ -116,22 +116,22 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="1854"/>
         <source>Failed to begin restore plan</source>
-        <translation type="unfinished"></translation>
+        <translation>Wiederherstellungsplan konnte nicht gestartet werden</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1880"/>
         <source>Restore plan has no manifest id</source>
-        <translation type="unfinished"></translation>
+        <translation>Wiederherstellungsplan hat keine Manifest-ID</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1922"/>
         <source>Failed to stage restore entries</source>
-        <translation type="unfinished"></translation>
+        <translation>Wiederherstellungseinträge konnten nicht bereitgestellt werden</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1965"/>
         <source>Failed to commit restore plan</source>
-        <translation type="unfinished"></translation>
+        <translation>Wiederherstellungsplan konnte nicht übernommen werden</translation>
     </message>
 </context>
 <context>
@@ -451,7 +451,7 @@
     <message>
         <location filename="../src/snapperservice.cpp" line="320"/>
         <source>Previous snapshot was not found.</source>
-        <translation type="unfinished"></translation>
+        <translation>Der vorherige Schnappschuss wurde nicht gefunden.</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="389"/>
@@ -459,42 +459,42 @@
         <location filename="../src/snapperservice.cpp" line="479"/>
         <location filename="../src/snapperservice.cpp" line="532"/>
         <source>D-Bus connection failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>D-Bus-Verbindung fehlgeschlagen.</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="399"/>
         <source>Failed to rollback snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Rollback des Snapshots fehlgeschlagen: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="409"/>
         <source>Rollback operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>Rollback-Vorgang fehlgeschlagen.</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="439"/>
         <source>Failed to delete snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Schnappschuss konnte nicht gelöscht werden: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="450"/>
         <source>Delete operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>Löschvorgang fehlgeschlagen.</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="503"/>
         <source>Failed to create snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Schnappschuss konnte nicht erstellt werden: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="546"/>
         <source>Failed to modify snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Schnappschuss konnte nicht geändert werden: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="555"/>
         <source>Modify operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>Änderungsvorgang fehlgeschlagen.</translation>
     </message>
 </context>
 <context>
@@ -583,7 +583,8 @@
         <location filename="../qml/components/SnapshotDetailDialog.qml" line="328"/>
         <source>Snapshot rollback completed.
 Please reboot the system.</source>
-        <translation type="unfinished"></translation>
+        <translation>Snapshot-Rollback abgeschlossen.
+Bitte starten Sie das System neu.</translation>
     </message>
     <message>
         <location filename="../qml/components/SnapshotDetailDialog.qml" line="94"/>
@@ -765,7 +766,7 @@ reason=manual</translation>
     <message>
         <location filename="../src/snapshotlistmodel.cpp" line="206"/>
         <source>Failed to modify snapshot #%1</source>
-        <translation type="unfinished"></translation>
+        <translation>Schnappschuss #%1 konnte nicht geändert werden</translation>
     </message>
 </context>
 <context>
@@ -938,12 +939,12 @@ reason=manual-test</translation>
     <message>
         <location filename="../qml/pages/SnapshotListPage.qml" line="560"/>
         <source>Please wait</source>
-        <translation type="unfinished"></translation>
+        <translation>Bitte warten</translation>
     </message>
     <message>
         <location filename="../qml/pages/SnapshotListPage.qml" line="586"/>
         <source>Deleting snapshots, please wait...</source>
-        <translation type="unfinished"></translation>
+        <translation>Schnappschüsse werden gelöscht, bitte warten...</translation>
     </message>
     <message>
         <location filename="../qml/pages/SnapshotListPage.qml" line="608"/>

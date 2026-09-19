@@ -85,12 +85,12 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="717"/>
         <source>The restore service stopped unexpectedly</source>
-        <translation type="unfinished"></translation>
+        <translation>復元サービスが予期せず停止しました</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="931"/>
         <source>Invalid parameters for restore</source>
-        <translation type="unfinished"></translation>
+        <translation>復元のパラメータが不正です</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="939"/>
@@ -101,12 +101,12 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="946"/>
         <source>D-Bus connection failed</source>
-        <translation type="unfinished"></translation>
+        <translation>D-Bus 接続に失敗しました</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="987"/>
         <source>Restore failed: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>復元に失敗しました: %1</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1726"/>
@@ -116,22 +116,22 @@
     <message>
         <location filename="../src/filechangemodel.cpp" line="1854"/>
         <source>Failed to begin restore plan</source>
-        <translation type="unfinished"></translation>
+        <translation>復元プランを開始できませんでした</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1880"/>
         <source>Restore plan has no manifest id</source>
-        <translation type="unfinished"></translation>
+        <translation>復元プランにマニフェスト ID がありません</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1922"/>
         <source>Failed to stage restore entries</source>
-        <translation type="unfinished"></translation>
+        <translation>復元エントリをステージングできませんでした</translation>
     </message>
     <message>
         <location filename="../src/filechangemodel.cpp" line="1965"/>
         <source>Failed to commit restore plan</source>
-        <translation type="unfinished"></translation>
+        <translation>復元プランをコミットできませんでした</translation>
     </message>
 </context>
 <context>
@@ -451,7 +451,7 @@
     <message>
         <location filename="../src/snapperservice.cpp" line="320"/>
         <source>Previous snapshot was not found.</source>
-        <translation type="unfinished"></translation>
+        <translation>前のスナップショットが見つかりませんでした。</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="389"/>
@@ -459,42 +459,42 @@
         <location filename="../src/snapperservice.cpp" line="479"/>
         <location filename="../src/snapperservice.cpp" line="532"/>
         <source>D-Bus connection failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>D-Bus 接続に失敗しました。</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="399"/>
         <source>Failed to rollback snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショットの復元に失敗しました: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="409"/>
         <source>Rollback operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>復元操作に失敗しました。</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="439"/>
         <source>Failed to delete snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショットの削除に失敗しました: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="450"/>
         <source>Delete operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>削除操作に失敗しました。</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="503"/>
         <source>Failed to create snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショットの作成に失敗しました: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="546"/>
         <source>Failed to modify snapshot: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショットの変更に失敗しました: %1</translation>
     </message>
     <message>
         <location filename="../src/snapperservice.cpp" line="555"/>
         <source>Modify operation failed.</source>
-        <translation type="unfinished"></translation>
+        <translation>変更操作に失敗しました。</translation>
     </message>
 </context>
 <context>
@@ -583,7 +583,8 @@
         <location filename="../qml/components/SnapshotDetailDialog.qml" line="328"/>
         <source>Snapshot rollback completed.
 Please reboot the system.</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショットへの復元が完了しました。
+システムを再起動してください。</translation>
     </message>
     <message>
         <location filename="../qml/components/SnapshotDetailDialog.qml" line="94"/>
@@ -765,7 +766,7 @@ reason=manual</translation>
     <message>
         <location filename="../src/snapshotlistmodel.cpp" line="206"/>
         <source>Failed to modify snapshot #%1</source>
-        <translation type="unfinished"></translation>
+        <translation>スナップショット #%1 の変更に失敗しました</translation>
     </message>
 </context>
 <context>

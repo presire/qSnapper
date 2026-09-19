@@ -3,6 +3,7 @@
 
 #include <QAbstractItemModel>
 #include <QVariantMap>
+#include <QVariantList>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -177,13 +178,47 @@ class FileChangeModel : public QAbstractItemModel
     Q_PROPERTY(int restoreBatchSize READ restoreBatchSize WRITE setRestoreBatchSize NOTIFY restoreBatchSizeChanged)   // 復元チャンクの最大件数を公開する
     Q_PROPERTY(bool useDirectRestore READ useDirectRestore WRITE setUseDirectRestore NOTIFY useDirectRestoreChanged)  // Direct Copy方式の使用設定を公開する
 
+public:
+    /**
+     * @brief 文字列を返すD-Bus呼び出しの非同期結果コールバック
+     *
+     * @param ok 呼び出しに成功した場合: true
+     * @param value 成功時の応答文字列
+     * @param error 失敗時のエラーメッセージ
+     */
+    using AsyncStringReplyHandler = std::function<void(bool ok, const QString &value, const QString &error)>;
+
 private:
+    /**
+     * @brief モデルへ公開したエントリがどの比較で得られたかを識別する値
+     *
+     * エントリのchangeTypeは「number1 --> number2」の向きでしか正しく解釈できないため、
+     * 復元時には、エントリの由来となった比較条件と現在の比較条件が完全に一致している必要がある。
+     * number1は常に、その向きにおける復元元スナップショットを指す。
+     */
+    struct ComparisonContext
+    {
+        QString configName;         // Snapper設定名
+        bool betweenMode = false;   // 2スナップショット比較モードかどうか
+        int number1 = 0;            // 比較元スナップショット番号 (この比較での復元元)
+        int number2 = 0;            // 比較先スナップショット番号 (対カレント比較では0)
+        bool flatMode = false;      // フラット表示として構築したかどうか
+
+        bool operator==(const ComparisonContext &other) const;  // 比較条件が完全に一致するかを返す
+    };
+
     // スナップショット識別・比較モード
     QString m_configName;                   // Snapper設定名
     int m_snapshotNumber;                   // スナップショット番号 (対カレント比較モード用)
     int m_compareNumber1;                   // 比較元スナップショット番号 (任意2スナップショット比較モード用)
     int m_compareNumber2;                   // 比較先スナップショット番号 (同上)
     bool m_betweenMode;                     // 任意2スナップショット比較モードかどうか
+
+    // 公開済みエントリの由来と要求世代
+    ComparisonContext m_loadedComparison;   // 現在モデルへ公開済みのエントリの比較条件
+    bool m_loadedComparisonValid = false;   // 公開済みエントリが読み込み成功に由来するか
+    quint64 m_loadRequestGeneration = 0;    // 変更一覧要求の世代 (古い応答の破棄に使用)
+    quint64 m_diffRequestGeneration = 0;    // ファイル差分要求の世代 (同上)
 
     // 表示・モデル状態
     bool m_flatMode;                        // フラット表示モード (ツリー構築をバイパスし、
@@ -232,6 +267,15 @@ private:
     static QString normalizeRestorePlanPath(const QString &path);                           // 復元パスを正規化する
     static bool isValidRestorePlanEntry(const QString &path, const QString &changeType);    // 復元エントリの妥当性を検証する
 
+    // 比較条件の同一性・復元可否
+    ComparisonContext currentComparisonContext() const;                                     // 現在の比較条件を返す
+    void invalidateLoadedComparison();                                                      // 公開済みエントリとその由来を無効化する
+    bool hasRestorableLoadedComparison() const;                                             // 公開済みエントリから復元してよいかを返す
+
+    // 復元元の決定・整合性検証
+    int currentRestoreSourceNumber() const;                                                 // 現在の比較条件に対応する復元元番号を返す
+    bool isRestoreSourceConsistent(int sourceSnapshotNumber) const;                         // 復元元と現在の比較条件の整合性を検証する
+
     // チェック状態・収集
     void collectCheckedItems(FileChangeItem *parent, QStringList &paths) const;                                     // チェック済みパスのみを収集する
     void collectCheckedItemsWithTypes(FileChangeItem *parent, QStringList &paths, QStringList &changeTypes) const;  // チェック済みパスと変更タイプを収集する
@@ -263,6 +307,34 @@ protected:
      * @param flatMode trueの場合はフラットモデルを構築する
      */
     void setupModelData(const QString &changeOutput, bool flatMode);  // 変更出力からモデルデータを構築する
+
+    /**
+     * @brief 2スナップショット比較の条件を設定する
+     *
+     * loadChangesBetween()からD-Bus読み込みを切り離した部分で、比較の向きと表示モードだけを確定させる。
+     * テストはD-Busサービスを起動せずに比較モードを再現するためにこれを直接呼び出す。
+     *
+     * @param number1 比較元スナップショット番号 (このモードでの復元元)
+     * @param number2 比較先スナップショット番号
+     * @param flat trueの場合はフラットモデルを構築する
+     */
+    void setComparisonRange(int number1, int number2, bool flat);     // 2スナップショット比較の条件を設定する
+
+    /**
+     * @brief 文字列応答のD-Bus呼び出しを非同期で発行する
+     *
+     * 変更一覧とファイル差分の両方がこの一点を経由する。
+     * doneはモデルの生存中にちょうど1回だけ呼び出される。
+     * テストはこれをオーバーライドし、実D-Busサービスを起動させずに
+     * 応答の完了順序を任意に制御する。
+     *
+     * @param methodName 呼び出すD-Busメソッド名
+     * @param arguments メソッドへ渡す引数
+     * @param done 結果コールバック
+     */
+    virtual void requestStringReply(const QString &methodName,        // 文字列応答のD-Bus呼び出しを発行する
+                                    const QVariantList &arguments,
+                                    AsyncStringReplyHandler done);
 
 public:
     // QMLへ公開するモデルデータのロール
@@ -312,6 +384,31 @@ public:
     Q_INVOKABLE bool restoreCheckedItems();                                             // 選択済み項目の復元を開始する
     Q_INVOKABLE void restoreSingleFile(const QString &filePath);                        // 指定ファイルの復元を開始する
     Q_INVOKABLE void cancelRestore();                                                   // 進行中の復元をキャンセルする
+
+    /**
+     * @brief 復元元スナップショットを明示して選択済み項目の復元を開始する
+     *
+     * 比較モード (m_betweenMode) を保ったまま復元できるようにするためのオーバーロードで、
+     * 2スナップショット比較モードではloadChangesBetween()の第1引数 (比較元) のみを復元元として受け付ける。
+     * 現在モデルが保持するエントリのchangeTypeは「比較元 --> 比較先」の向きで解釈されるため、
+     * これ以外のスナップショットを復元元にするとcreatedとdeletedの意味が反転し、
+     * 復元対象外のファイルを削除する危険がある。
+     *
+     * @param sourceSnapshotNumber 復元元スナップショット番号
+     * @return 復元処理が開始された場合: true、検証に失敗した場合: false
+     */
+    Q_INVOKABLE bool restoreCheckedItemsFrom(int sourceSnapshotNumber);                 // 復元元を明示して選択済み項目の復元を開始する
+
+    /**
+     * @brief 復元元スナップショットを明示して指定ファイルの復元を開始する
+     *
+     * restoreCheckedItemsFrom()と同一の整合性検証を単一ファイル復元へ適用する。
+     *
+     * @param filePath 復元対象のファイルパス
+     * @param sourceSnapshotNumber 復元元スナップショット番号
+     */
+    Q_INVOKABLE void restoreSingleFileFrom(const QString &filePath,                     // 復元元を明示して指定ファイルの復元を開始する
+                                           int sourceSnapshotNumber);
 
     /**
      * @brief テスト専用に復元計画transportを差し替える

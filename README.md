@@ -26,7 +26,7 @@ qSnapper is a graphical user interface for the Snapper snapshot management tool.
 - **File Comparison**:
   View changes between snapshots with detailed diff preview
 - **Pre/Post Snapshot Comparison**:
-  Switch between Pre and Post snapshot diffs against the current system, and restore from either snapshot independently
+  Choose between reverting to the Pre snapshot, re-applying to the Post snapshot, or viewing either snapshot against the current system. Restoring only touches files that changed between Pre and Post
 - **Restore Preview**:
   Preview files before restoring from snapshots
 - **Fast Restore**:
@@ -242,9 +242,17 @@ Select a snapshot to view:
 4. Check the files/directories you want to restore
 5. Click "Restore Selected" to restore the checked items
 
-For Pre/Post snapshot pairs, you can:
-- Switch between Pre and Post snapshot diffs using radio buttons
-- Restore from either the Pre or Post snapshot independently using dedicated buttons
+For Pre/Post snapshot pairs, the Snapshot Overview offers four views:  
+- **Revert to Pre #N**: undo the changes made between Pre #N and Post #M (restorable; this is the default view)  
+- **Re-apply to Post #M**: redo the changes made between Pre #N and Post #M (restorable)  
+- **Show differences between snapshot #N (Pre) and the current system**: view only  
+- **Show differences between snapshot #M (Post) and the current system**: view only  
+
+Checkboxes and the restore button are available only in the two restorable views. The two "vs current system" views are read-only and display the hint "View only. Choose a Pre / Post difference above to restore."  
+
+After a successful restore, the view automatically switches to the differences between the restore target snapshot and the current system, so the result is visible immediately. Files changed outside the Pre/Post range (such as files you created manually after the Post snapshot) still appear there, which confirms they were left untouched.  
+
+For Pre/Post pairs the restore button is labelled "Restore Selected to #<number>". Restoring only touches files that actually differ between the Pre and Post snapshots; files changed outside that range (for example, files you created manually after the Post snapshot) are left untouched. This matches the upstream `snapper undochange <pre>..<post>` behaviour.  
 
 #### Restore Modes
 
@@ -267,6 +275,9 @@ During restoration, a real-time progress log displays each file as it is restore
 
 **Warning**:  
 Restoring snapshots may overwrite current data. Always review changes before confirming.  
+
+**Note**:  
+If the changes between the Pre and Post snapshots created a whole new directory (for example, a package installation that added `/etc/foo/`), reverting to Pre removes that directory recursively, including any files you added inside it afterwards (for example, `/etc/foo/mine.conf`). This is the same behaviour as `snapper undochange` and is intentional.  
 
 ## Configuration
 

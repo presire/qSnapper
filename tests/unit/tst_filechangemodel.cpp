@@ -8,7 +8,32 @@
 class TestableFileChangeModel : public FileChangeModel
 {
 public:
+    struct PendingStringReply
+    {
+        QString methodName;
+        QVariantList arguments;
+        AsyncStringReplyHandler done;
+    };
+
     using FileChangeModel::setupModelData;
+    using FileChangeModel::setComparisonRange;
+
+    QList<PendingStringReply> pendingStringReplies;
+
+    void requestStringReply(const QString &methodName,
+                            const QVariantList &arguments,
+                            AsyncStringReplyHandler done) override
+    {
+        pendingStringReplies.append({methodName, arguments, done});
+    }
+
+    void completeStringReply(int index, bool ok, const QString &value = QString(),
+                             const QString &error = QString())
+    {
+        Q_ASSERT(index >= 0 && index < pendingStringReplies.size());
+        const PendingStringReply pending = pendingStringReplies.takeAt(index);
+        pending.done(ok, value, error);
+    }
 };
 
 /**
@@ -233,10 +258,20 @@ private slots:
     void stagedRestoreNormalizesTrailingSlashDirectory();
     void stagedRestoreFiltersInvalidEntriesBeforeStaging();
     void stagedRestoreCancelDuringStagingFinishesLocally();
+    void prePostRestoreUsesComparisonSourceAndPreservesBetweenMode();
+    void prePostRestoreFromComparisonTargetIsRejected();
+    void restoreFromMismatchedSnapshotIsRejectedInVsCurrentMode();
+    void singleFileRestoreFromMismatchedSnapshotIsRejected();
+    void failedComparisonReplacementClearsRestorableEntries();
+    void staleComparisonLoadResponseIsIgnored();
+    void staleFileDiffResponseIsIgnored();
 
 private:
     void prepareStagedRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
                               const QString &changeOutput, const QStringList &pathsToCheck, int batchSize);
+    void prepareComparisonRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
+                                  int number1, int number2,
+                                  const QString &changeOutput, const QStringList &pathsToCheck);
 };
 
 void TestFileChangeModel::initTestCase()
@@ -255,6 +290,27 @@ void TestFileChangeModel::prepareStagedRestore(TestableFileChangeModel *model, F
     model->setSnapshotNumber(42);
     model->setUseDirectRestore(true);
     model->setRestoreBatchSize(batchSize);
+    model->setupModelData(changeOutput, true);
+    model->setRestorePlanTransportForTesting(fake);
+    for (const QString &path : pathsToCheck) {
+        model->setItemChecked(path, true);
+    }
+}
+
+/**
+ * @brief 2スナップショット比較モードの復元前提条件を組み立てる
+ *
+ * loadChangesBetween()は実D-Busサービスを起動してしまうため、比較条件だけを直接設定して
+ * Pre <--> Post差分ビューと同じ状態を再現する。
+ */
+void TestFileChangeModel::prepareComparisonRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
+                                                   int number1, int number2,
+                                                   const QString &changeOutput, const QStringList &pathsToCheck)
+{
+    model->setConfigName(QStringLiteral("root"));
+    model->setUseDirectRestore(true);
+    model->setRestoreBatchSize(100);
+    model->setComparisonRange(number1, number2, true);
     model->setupModelData(changeOutput, true);
     model->setRestorePlanTransportForTesting(fake);
     for (const QString &path : pathsToCheck) {
@@ -861,6 +917,202 @@ void TestFileChangeModel::stagedRestoreCancelDuringStagingFinishesLocally()
     QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Commit), 0);
     QCOMPARE(fake.calls.size(), 4);
     QCOMPARE(completedSpy.count(), 1);
+}
+
+/**
+ * @brief Pre <--> Post差分からの復元が比較元スナップショットを使い、比較モードを保つ
+ */
+void TestFileChangeModel::prePostRestoreUsesComparisonSourceAndPreservesBetweenMode()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    // Pre #100 --> Post #101 の比較結果
+    // createdはPostにだけ存在する = Preには無いため、Preへの復元ではlive側から削除される
+    const QString output = QStringLiteral("+.... /etc/installed.conf\n"
+                                          "-.... /etc/removed.conf\n"
+                                          "c.... /etc/changed.conf\n");
+    const QStringList pathsToCheck = {
+        QStringLiteral("/etc/installed.conf"),
+        QStringLiteral("/etc/removed.conf"),
+        QStringLiteral("/etc/changed.conf"),
+    };
+
+    prepareComparisonRestore(&model, &fake, 100, 101, output, pathsToCheck);
+
+    QVERIFY(model.restoreCheckedItemsFrom(100));
+
+    // 復元元は比較の第1オペランド (Pre #100)。比較先 (Post #101) であってはならない
+    const FakeRestorePlanTransport::Call &beginCall = fake.calls.first();
+    QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
+    QCOMPARE(beginCall.configName, QStringLiteral("root"));
+    QCOMPARE(beginCall.snapshotNumber, 100);
+
+    fake.completeAllPendingOk();
+
+    // changeTypeはクライアント側で反転させず、比較結果のまま送出する
+    const FakeRestorePlanTransport::Call &stageCall = fake.calls.at(1);
+    QCOMPARE(stageCall.paths, pathsToCheck);
+    QCOMPARE(stageCall.changeTypes, QStringList({QStringLiteral("created"),
+                                                 QStringLiteral("deleted"),
+                                                 QStringLiteral("modified")}));
+
+    fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("completed"), QString());
+
+    // 復元しても比較モードは維持されるため、引数なしの復元も比較元 (Pre #100) を使う
+    // (snapshotNumberプロパティは比較先 #101 を保持しているので、リセットが起きれば #101 になる)
+    fake.calls.clear();
+    for (const QString &path : pathsToCheck) {
+        model.setItemChecked(path, true);
+    }
+    QVERIFY(model.restoreCheckedItems());
+    QCOMPARE(fake.calls.first().snapshotNumber, 100);
+}
+
+/**
+ * @brief 比較先スナップショットを復元元に指定した復元が拒否される
+ */
+void TestFileChangeModel::prePostRestoreFromComparisonTargetIsRejected()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    const QStringList pathsToCheck = {QStringLiteral("/etc/installed.conf")};
+
+    prepareComparisonRestore(&model, &fake, 100, 101,
+                             QStringLiteral("+.... /etc/installed.conf\n"), pathsToCheck);
+
+    QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+
+    // Post #101 を復元元にするとcreated/deletedの意味が反転し、残すべきファイルを削除してしまう
+    QVERIFY(!model.restoreCheckedItemsFrom(101));
+    QVERIFY(fake.calls.isEmpty());
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(completedSpy.count(), 1);
+    QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+}
+
+/**
+ * @brief 対カレント比較では指定済みスナップショット以外からの復元が拒否される
+ */
+void TestFileChangeModel::restoreFromMismatchedSnapshotIsRejectedInVsCurrentMode()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    const QStringList pathsToCheck = {QStringLiteral("/data/file0")};
+
+    prepareStagedRestore(&model, &fake, QStringLiteral("+.... /data/file0\n"), pathsToCheck, 100);
+
+    QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
+
+    QVERIFY(!model.restoreCheckedItemsFrom(7));
+    QVERIFY(fake.calls.isEmpty());
+    QCOMPARE(completedSpy.count(), 1);
+    QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+
+    // 一致する番号なら従来どおり復元できる (Singleスナップショットの挙動は不変)
+    QVERIFY(model.restoreCheckedItemsFrom(42));
+    QCOMPARE(fake.calls.first().snapshotNumber, 42);
+}
+
+/**
+ * @brief 単一ファイル復元でも復元元の不整合が拒否される
+ */
+void TestFileChangeModel::singleFileRestoreFromMismatchedSnapshotIsRejected()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    prepareComparisonRestore(&model, &fake, 100, 101,
+                             QStringLiteral("+.... /etc/installed.conf\n"), QStringList());
+
+    QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+
+    // 不整合はD-Bus接続より前に遮断されるため、テスト実行が実サービスを起動することはない
+    model.restoreSingleFileFrom(QStringLiteral("/etc/installed.conf"), 101);
+
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(completedSpy.count(), 1);
+    QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+}
+
+void TestFileChangeModel::failedComparisonReplacementClearsRestorableEntries()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    model.setRestorePlanTransportForTesting(&fake);
+
+    model.loadChangesBetween(100, 101, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+    model.completeStringReply(0, true, QStringLiteral("+.... /etc/installed.conf\n"));
+    QCOMPARE(model.rowCount(), 1);
+
+    model.setItemChecked(QStringLiteral("/etc/installed.conf"), true);
+    model.loadChangesBetween(101, 100, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+    model.completeStringReply(0, false, QString(), QStringLiteral("replacement failed"));
+
+    QVERIFY(!model.restoreCheckedItemsFrom(101));
+    QVERIFY(fake.calls.isEmpty());
+    QCOMPARE(model.rowCount(), 0);
+}
+
+void TestFileChangeModel::staleComparisonLoadResponseIsIgnored()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    model.setRestorePlanTransportForTesting(&fake);
+
+    model.loadChangesBetween(100, 101, true);
+    model.loadChangesBetween(101, 100, true);
+    QCOMPARE(model.pendingStringReplies.size(), 2);
+    QCOMPARE(model.pendingStringReplies.at(1).methodName, QStringLiteral("GetFileChangesBetween"));
+    QCOMPARE(model.pendingStringReplies.at(1).arguments.at(1).toInt(), 101);
+    QCOMPARE(model.pendingStringReplies.at(1).arguments.at(2).toInt(), 100);
+
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+    model.completeStringReply(1, true, QStringLiteral("-.... /etc/post-only.conf\n"));
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/post-only.conf"));
+
+    model.completeStringReply(0, false, QString(), QStringLiteral("old request failed"));
+    QCOMPARE(errorSpy.count(), 0);
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/post-only.conf"));
+
+    model.setItemChecked(QStringLiteral("/etc/post-only.conf"), true);
+    QVERIFY(model.restoreCheckedItemsFrom(101));
+    QCOMPARE(fake.calls.first().snapshotNumber, 101);
+}
+
+void TestFileChangeModel::staleFileDiffResponseIsIgnored()
+{
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    model.setComparisonRange(100, 101, true);
+    model.getFileDiffAndDetails(QStringLiteral("/etc/changed.conf"));
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+
+    model.setComparisonRange(101, 100, true);
+    model.getFileDiffAndDetails(QStringLiteral("/etc/changed.conf"));
+    QCOMPARE(model.pendingStringReplies.size(), 2);
+
+    QSignalSpy diffSpy(&model, &FileChangeModel::fileDiffAndDetailsReady);
+    model.completeStringReply(1, true,
+                              QStringLiteral("snapshot=post\n---DIFF_SEPARATOR---\npost diff"));
+    QCOMPARE(diffSpy.count(), 1);
+    QCOMPARE(diffSpy.at(0).at(1).toMap().value(QStringLiteral("snapshot")).toString(),
+             QStringLiteral("post"));
+    QCOMPARE(diffSpy.at(0).at(2).toString(), QStringLiteral("post diff"));
+
+    model.completeStringReply(0, true,
+                              QStringLiteral("snapshot=pre\n---DIFF_SEPARATOR---\npre diff"));
+    QCOMPARE(diffSpy.count(), 1);
 }
 
 QTEST_APPLESS_MAIN(TestFileChangeModel)

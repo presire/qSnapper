@@ -18,9 +18,31 @@ BorderedDialog {
     // そのため内部状態は分離する。
     property int activeSnapshotNumber: 0
     readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0
-    // Pre <--> Post間の差分を表示する閲覧専用モード
-    // このモードでは復元ボタンとチェックボックスを無効化する (復元は、現在の差分でしか成立しないため)
-    property bool prePostDiffMode: false
+
+    // 表示モード定数
+    // FileChangeModelは比較の第1引数を復元元として扱うため、Pre <--> Post差分の向きは復元先で決まる
+    // 向きはラジオ選択の時点で確定させる (復元ボタン押下時に読み直すとユーザのチェック選択が消えるため)
+    readonly property int viewRevertToPre: 0     // Pre <--> Post差分をPreへ戻す向き (復元可)
+    readonly property int viewReapplyToPost: 1   // Pre <--> Post差分をPostへ再適用する向き (復元可)
+    readonly property int viewVsCurrent: 2       // 選択スナップショットと現在のシステムの差分 (Pre/Postペアでは閲覧専用)
+    property int viewMode: root.viewVsCurrent
+
+    // Pre <--> Post間の差分を表示しているかどうか
+    readonly property bool prePostDiffMode: root.viewMode === root.viewRevertToPre
+                                            || root.viewMode === root.viewReapplyToPost
+
+    // 現在の表示から復元できるかどうか
+    // Pre/Postペアでは、Pre <--> Post間で起きた変更だけを巻き戻せる差分ビューのみ復元を許可し、
+    // 「vs 現在」ビューは閲覧専用とする (そちらから復元すると、Post以降の手動変更まで巻き戻るため)
+    readonly property bool restorable: root.isPrePostPair ? root.prePostDiffMode : true
+
+    // 復元元スナップショット番号 (0 = 現在の表示からは復元できない)
+    readonly property int restoreSourceNumber: {
+        if (!root.isPrePostPair) return root.activeSnapshotNumber
+        if (root.viewMode === root.viewRevertToPre) return root.preSnapshotNumber
+        if (root.viewMode === root.viewReapplyToPost) return root.postSnapshotNumber
+        return 0
+    }
 
     signal restoreConfirmed()                        // 復元確認シグナル
 
@@ -38,23 +60,47 @@ BorderedDialog {
 
     // Pre/Post または Single --> 対カレント比較
     function switchSnapshotView(targetNumber) {
-        if (!root.prePostDiffMode && root.activeSnapshotNumber === targetNumber) return
-        root.prePostDiffMode = false
+        if (root.viewMode === root.viewVsCurrent && root.activeSnapshotNumber === targetNumber) return
+        root.viewMode = root.viewVsCurrent
         root.activeSnapshotNumber = targetNumber
         fileChangeModel.snapshotNumber = targetNumber  // betweenMode/flatModeをfalseにリセット
         resetRightPane()
         fileChangeModel.loadChanges()                  // ファイルツリーを再読み込み (切替先スナップショット vs 現在のシステムで比較)
     }
 
-    // Pre <--> Post間の閲覧モードに切り替え
-    function switchPrePostDiffView() {
-        if (root.prePostDiffMode) return
+    // Pre <--> Post間の差分ビューに切り替える
+    function switchPrePostDiffView(mode) {
         if (!root.isPrePostPair) return
-        root.prePostDiffMode = true
+        if (root.viewMode === mode) return
+        root.viewMode = mode
         resetRightPane()
-        fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
-                                           root.postSnapshotNumber,
-                                           false)
+        loadPrePostDiff()
+    }
+
+    // 現在のviewModeに対応する向きでPre <--> Post差分を読み込む
+    // 第1引数が復元元になるため、復元先スナップショットを先頭に置いて向きを揃える
+    function loadPrePostDiff() {
+        if (root.viewMode === root.viewRevertToPre) {
+            fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
+                                               root.postSnapshotNumber,
+                                               false)
+        }
+        else {
+            fileChangeModel.loadChangesBetween(root.postSnapshotNumber,
+                                               root.preSnapshotNumber,
+                                               false)
+        }
+    }
+
+    // 現在の表示条件を保ったままファイルツリーを再読み込みする
+    function reloadCurrentView() {
+        if (root.prePostDiffMode) {
+            loadPrePostDiff()
+        }
+        else {
+            fileChangeModel.snapshotNumber = root.activeSnapshotNumber
+            fileChangeModel.loadChanges()
+        }
     }
 
     width: {
@@ -82,14 +128,12 @@ BorderedDialog {
         root.activeSnapshotNumber = snapshotNumber
 
         if (root.isPrePostPair) {
-            // Pre/Post ペア: 既定で Pre <--> Post間の差分を表示
-            root.prePostDiffMode = true
-            fileChangeModel.loadChangesBetween(root.preSnapshotNumber,
-                                               root.postSnapshotNumber,
-                                               false)
+            // Pre/Post ペア: 既定でPre <--> Post間の差分をPreへ戻す向きで表示する
+            root.viewMode = root.viewRevertToPre
+            loadPrePostDiff()
         }
         else {
-            root.prePostDiffMode = false
+            root.viewMode = root.viewVsCurrent
             fileChangeModel.snapshotNumber = snapshotNumber
             fileChangeModel.loadChanges()
         }
@@ -140,18 +184,20 @@ BorderedDialog {
             progressDialog.close()
             if (success) {
                 // 右ペインの選択状態をリセット
-                rightPane.fileSelected = false
-                rightPane.selectedFilePath = ""
-                rightPane.selectedChangeType = -1
-                rightPane.selectedStatusFlags = ""
-                rightPane.fileLoading = false
-                rightPane.fileDetails = {}
-                diffTextArea.textFormat = TextEdit.PlainText
-                diffTextArea.text = ""
+                root.resetRightPane()
 
-                // 復元成功後、ラジオボタン選択中のスナップショット番号に戻してから再読み込み
-                fileChangeModel.snapshotNumber = root.activeSnapshotNumber
-                fileChangeModel.loadChanges()
+                // 復元後は現在のシステムの状態を一覧へ反映させる。
+                // Pre<-->Post差分はスナップショット同士の比較であり、復元しても内容は変わらないため、
+                // Pre/Postペアでは復元先スナップショット vs 現在 へ切り替える。
+                // このビューには範囲外で追加されたファイルも現れるため、意図しない巻き戻りが無いことも確認できる。
+                var restoreTarget = root.restoreSourceNumber
+                if (root.isPrePostPair && restoreTarget > 0) {
+                    root.switchSnapshotView(restoreTarget)
+                }
+                else {
+                    root.reloadCurrentView()
+                }
+
                 successDialog.open()
             }
             else {
@@ -199,10 +245,14 @@ BorderedDialog {
         }
 
         Label {
-            text: qsTr("Shows the system state after applying the specified snapshot")
+            text: root.prePostDiffMode
+                  ? qsTr("Shows only the changes made between the Pre and Post snapshots. Restoring reverts just those changes; files modified afterwards are left untouched.")
+                  : qsTr("Shows the system state after applying the specified snapshot")
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
 
-        // Pre/Postペア時: 差分対象スナップショット切り替えラジオボタン
+        // Pre/Postペア時: 差分対象と復元の向きを切り替えるラジオボタン
         GroupBox {
             visible: root.isPrePostPair
             Layout.fillWidth: true
@@ -211,25 +261,34 @@ BorderedDialog {
                 spacing: 4
 
                 RadioButton {
-                    id: prePostRadioButton
-                    checked: root.prePostDiffMode
-                    text: qsTr("Show differences between Pre #%1 and Post #%2 (view only)")
+                    id: revertToPreRadioButton
+                    checked: root.viewMode === root.viewRevertToPre
+                    text: qsTr("Revert to Pre #%1: undo the changes made between Pre #%1 and Post #%2")
                               .arg(root.preSnapshotNumber)
                               .arg(root.postSnapshotNumber)
-                    onClicked: root.switchPrePostDiffView()
+                    onClicked: root.switchPrePostDiffView(root.viewRevertToPre)
+                }
+
+                RadioButton {
+                    id: reapplyToPostRadioButton
+                    checked: root.viewMode === root.viewReapplyToPost
+                    text: qsTr("Re-apply to Post #%2: redo the changes made between Pre #%1 and Post #%2")
+                              .arg(root.preSnapshotNumber)
+                              .arg(root.postSnapshotNumber)
+                    onClicked: root.switchPrePostDiffView(root.viewReapplyToPost)
                 }
 
                 RadioButton {
                     id: preRadioButton
-                    checked: !root.prePostDiffMode && root.activeSnapshotNumber === root.preSnapshotNumber
-                    text: qsTr("Show differences between snapshot #%1 (Pre) and the current system").arg(root.preSnapshotNumber)
+                    checked: root.viewMode === root.viewVsCurrent && root.activeSnapshotNumber === root.preSnapshotNumber
+                    text: qsTr("Show differences between snapshot #%1 (Pre) and the current system (view only)").arg(root.preSnapshotNumber)
                     onClicked: root.switchSnapshotView(root.preSnapshotNumber)
                 }
 
                 RadioButton {
                     id: postRadioButton
-                    checked: !root.prePostDiffMode && root.activeSnapshotNumber === root.postSnapshotNumber
-                    text: qsTr("Show differences between snapshot #%1 (Post) and the current system").arg(root.postSnapshotNumber)
+                    checked: root.viewMode === root.viewVsCurrent && root.activeSnapshotNumber === root.postSnapshotNumber
+                    text: qsTr("Show differences between snapshot #%1 (Post) and the current system (view only)").arg(root.postSnapshotNumber)
                     onClicked: root.switchSnapshotView(root.postSnapshotNumber)
                 }
             }
@@ -307,9 +366,9 @@ BorderedDialog {
                                         spacing: 5
 
                                         // 復元選択チェックボックス
-                                        // Pre↔Post 閲覧モードでは復元できないため非表示
+                                        // 閲覧専用ビュー (Pre/Postペアの「vs 現在」) では復元できないため非表示
                                         CheckBox {
-                                            visible: !root.prePostDiffMode
+                                            visible: root.restorable
                                             checked: isChecked
                                             onToggled: {
                                                 fileChangeModel.setItemChecked(filePath, checked)
@@ -609,8 +668,9 @@ BorderedDialog {
                     }
 
                     // 個別ファイル復元ボタン
+                    // 閲覧専用ビューでは復元できないため非表示
                     RowLayout {
-                        visible: rightPane.fileSelected && !rightPane.fileLoading
+                        visible: rightPane.fileSelected && !rightPane.fileLoading && root.restorable
                         Layout.fillWidth: true
                         spacing: 10
 
@@ -644,6 +704,16 @@ BorderedDialog {
             Layout.fillWidth: true
             spacing: 10
 
+            // 閲覧専用ビューであることの案内
+            // 無効化されたButtonはホバーを受け取らずToolTipが出ないため、常設のラベルで示す
+            Label {
+                visible: root.isPrePostPair && !root.restorable
+                text: qsTr("View only. Choose a Pre / Post difference above to restore.")
+                color: palette.placeholderText
+                wrapMode: Text.WordWrap
+                Layout.maximumWidth: 420
+            }
+
             Item {
                 Layout.fillWidth: true
             }
@@ -654,44 +724,18 @@ BorderedDialog {
                 onClicked: root.close()
             }
 
-            // 非Pre/Post時: 従来の復元ボタン
+            // 復元ボタン
+            // 復元元はラジオ選択で確定済みのrestoreSourceNumberを使う
             Button {
                 id: restoreButton
-                visible: !root.isPrePostPair
-                text: qsTr("Restore Selected")
+                text: (root.isPrePostPair && root.restorable)
+                      ? qsTr("Restore Selected to #%1").arg(root.restoreSourceNumber)
+                      : qsTr("Restore Selected")
                 highlighted: true
-                enabled: fileChangeModel.hasChanges && !root.prePostDiffMode
+                enabled: fileChangeModel.hasChanges && root.restorable
                 onClicked: {
-                    confirmRestoreDialog.restoreTargetNumber = root.activeSnapshotNumber
-                    confirmRestoreDialog.open()
-                }
-            }
-
-            // Pre/Post時: Preスナップショットから復元
-            // Pre <--> Post閲覧モードでは無効 (復元するには、Pre/Postラジオに切替が必要)
-            Button {
-                visible: root.isPrePostPair
-                text: qsTr("Restore from Pre #%1").arg(root.preSnapshotNumber)
-                highlighted: true
-                enabled: fileChangeModel.hasChanges && !root.prePostDiffMode
-                ToolTip.visible: hovered && root.prePostDiffMode
-                ToolTip.text: qsTr("Switch to 'Pre vs current' view to restore.")
-                onClicked: {
-                    confirmRestoreDialog.restoreTargetNumber = root.preSnapshotNumber
-                    confirmRestoreDialog.open()
-                }
-            }
-
-            // Pre/Post時: Postスナップショットから復元
-            Button {
-                visible: root.isPrePostPair
-                text: qsTr("Restore from Post #%1").arg(root.postSnapshotNumber)
-                highlighted: true
-                enabled: fileChangeModel.hasChanges && !root.prePostDiffMode
-                ToolTip.visible: hovered && root.prePostDiffMode
-                ToolTip.text: qsTr("Switch to 'Post vs current' view to restore.")
-                onClicked: {
-                    confirmRestoreDialog.restoreTargetNumber = root.postSnapshotNumber
+                    if (!root.restorable || root.restoreSourceNumber <= 0) return
+                    confirmRestoreDialog.restoreTargetNumber = root.restoreSourceNumber
                     confirmRestoreDialog.open()
                 }
             }
@@ -727,7 +771,12 @@ BorderedDialog {
             }
 
             Label {
-                text: qsTr("This will restore selected files and directories to snapshot #%1 state.").arg(confirmRestoreDialog.restoreTargetNumber)
+                text: root.isPrePostPair
+                      ? qsTr("Only the selected entries of the Pre #%1 / Post #%2 difference will be restored to the snapshot #%3 state. Files changed outside this range are left untouched.")
+                            .arg(root.preSnapshotNumber)
+                            .arg(root.postSnapshotNumber)
+                            .arg(confirmRestoreDialog.restoreTargetNumber)
+                      : qsTr("This will restore selected files and directories to snapshot #%1 state.").arg(confirmRestoreDialog.restoreTargetNumber)
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 450
                 color: palette.text
@@ -792,12 +841,11 @@ BorderedDialog {
         }
 
         // 復元実行
+        // snapshotNumberへの代入は比較モードをリセットしてしまうため、復元元は引数で渡す
         onAccepted: {
-            // 復元対象のスナップショット番号を設定 (D-Bus RestoreFilesに使用される)
-            fileChangeModel.snapshotNumber = confirmRestoreDialog.restoreTargetNumber
             progressDialog.resetProgress()
             progressDialog.open()
-            fileChangeModel.restoreCheckedItems()
+            fileChangeModel.restoreCheckedItemsFrom(confirmRestoreDialog.restoreTargetNumber)
         }
     }
 
@@ -975,7 +1023,7 @@ BorderedDialog {
             Label {
                 text: rightPane.selectedChangeType === 0
                       ? qsTr("Remove this file from the current system?")
-                      : qsTr("Restore this file from snapshot #%1?").arg(root.activeSnapshotNumber)
+                      : qsTr("Restore this file from snapshot #%1?").arg(root.restoreSourceNumber)
                 font.bold: true
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 450
@@ -1002,11 +1050,12 @@ BorderedDialog {
         }
 
         onAccepted: {
+            if (!root.restorable || root.restoreSourceNumber <= 0) return
             progressDialog.resetProgress()
             progressDialog.totalProgress = 1
             progressDialog.currentFile = rightPane.selectedFilePath
             progressDialog.open()
-            fileChangeModel.restoreSingleFile(rightPane.selectedFilePath)
+            fileChangeModel.restoreSingleFileFrom(rightPane.selectedFilePath, root.restoreSourceNumber)
         }
     }
 
@@ -1038,7 +1087,15 @@ BorderedDialog {
             }
 
             Label {
-                visible: !fileChangeModel.hasChanges
+                visible: root.isPrePostPair
+                text: qsTr("Switched to the differences between snapshot #%1 and the current system.")
+                        .arg(root.activeSnapshotNumber)
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 400
+            }
+
+            Label {
+                visible: !fileChangeModel.hasChanges && !fileChangeModel.loading
                 text: qsTr("No more differences with snapshot.")
                 color: ThemeManager.successColor
                 font.italic: true

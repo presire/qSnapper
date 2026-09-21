@@ -12,6 +12,7 @@
 #include <QMap>
 #include <QDebug>
 #include "snapperservice.h"
+#include "csvrecord.h"
 
 // QVariantMap --> QMap<QString,QString> 変換ヘルパー
 static QMap<QString, QString> toStringMap(const QVariantMap &src)
@@ -710,7 +711,10 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 
     for (int i = 1; i < lines.size(); ++i) {
         QString line = lines[i];
-        QStringList fields = line.split(',');
+        // 1行 = 1レコードの前提は、サーバー側のisRecordSafeText()が制御文字 (改行含む) をfail-closedで拒否するため維持される
+        // 行分割は変更せず、フィールド分割のみRFC 4180対応のsplitRecord()へ置き換える
+        // これによりカンマを含むdescription等が列ずれを起こさなくなる (無quoteの旧サーバー出力もそのまま解釈できる)
+        QStringList fields = qsnapper::csv::splitRecord(line);
 
         if (fields.size() < 7) {
             continue;

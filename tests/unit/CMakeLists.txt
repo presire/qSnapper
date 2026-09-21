@@ -129,6 +129,25 @@ target_link_libraries(tst_restoremanifest PRIVATE
 set_target_properties(tst_restoremanifest PROPERTIES AUTOMOC ON)
 add_test(NAME tst_restoremanifest COMMAND tst_restoremanifest)
 
+# --- tst_restorevalidation ---
+# コミット時preflightの純粋関数群 (状態ビット -> changeType写像、path正規化、権威あるmap構築と凍結済みentry検証) をlibsnapperなしで検証する
+add_executable(tst_restorevalidation
+    tst_restorevalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${INPUTVALIDATOR_SOURCES}
+)
+target_include_directories(tst_restorevalidation PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_restorevalidation PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_restorevalidation PROPERTIES AUTOMOC ON)
+add_test(NAME tst_restorevalidation COMMAND tst_restorevalidation)
+
 # --- tst_restoreplanexecutor ---
 add_executable(tst_restoreplanexecutor
     tst_restoreplanexecutor.cpp
@@ -145,9 +164,27 @@ target_link_libraries(tst_restoreplanexecutor PRIVATE
 set_target_properties(tst_restoreplanexecutor PROPERTIES AUTOMOC ON)
 add_test(NAME tst_restoreplanexecutor COMMAND tst_restoreplanexecutor)
 
+# --- tst_csvrecord ---
+# qsnapper::csv (include/csvrecord.h) はヘッダオンリのため、実装ソースはinputvalidator.cppのみ
+# (制御文字が依然としてfail-closedで拒否されることを同じターゲット内で固定する)
+add_executable(tst_csvrecord
+    tst_csvrecord.cpp
+    ${INPUTVALIDATOR_SOURCES}
+)
+target_include_directories(tst_csvrecord PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_csvrecord PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_csvrecord PROPERTIES AUTOMOC ON)
+add_test(NAME tst_csvrecord COMMAND tst_csvrecord)
+
 # ASan / UBSanを全テストに適用 (Debugビルド時に"-DQSNAPPER_TEST_SANITIZE=ON")
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restoreplanexecutor)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

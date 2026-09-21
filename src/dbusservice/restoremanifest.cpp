@@ -7,12 +7,14 @@
 namespace qsnapper::restore {
 
 RestoreManifest::RestoreManifest(QString owner, QString configName,
-                                 int snapshotNumber, RestoreMode mode,
-                                 QString id, qint64 creationTimeMs,
-                                 qint64 ttlMs)
+                                 int snapshotNumber,
+                                 int counterpartSnapshotNumber,
+                                 RestoreMode mode, QString id,
+                                 qint64 creationTimeMs, qint64 ttlMs)
     : m_owner(std::move(owner))
     , m_configName(std::move(configName))
     , m_snapshotNumber(snapshotNumber)
+    , m_counterpartSnapshotNumber(counterpartSnapshotNumber)
     , m_mode(mode)
     , m_id(std::move(id))
     , m_creationTimeMs(creationTimeMs)
@@ -170,6 +172,11 @@ int RestoreManifest::snapshotNumber() const
     return m_snapshotNumber;
 }
 
+int RestoreManifest::counterpartSnapshotNumber() const
+{
+    return m_counterpartSnapshotNumber;
+}
+
 RestoreMode RestoreManifest::mode() const
 {
     return m_mode;
@@ -212,6 +219,7 @@ ManifestStatus RestoreManifest::status() const
     result.mode = m_mode;
     result.configName = m_configName;
     result.snapshotNumber = m_snapshotNumber;
+    result.counterpartSnapshotNumber = m_counterpartSnapshotNumber;
     result.lastError = m_lastError;
     return result;
 }
@@ -257,6 +265,7 @@ void RestoreManifestRegistry::setCapacityOverridesForTesting(
 QString RestoreManifestRegistry::createStaging(const QString &owner,
                                                const QString &configName,
                                                int snapshotNumber,
+                                               int counterpartSnapshotNumber,
                                                RestoreMode mode,
                                                ManifestError *err)
 {
@@ -278,7 +287,8 @@ QString RestoreManifestRegistry::createStaging(const QString &owner,
     const qint64 nowMs = m_clock();
     ManifestRecord record;
     record.manifest = std::make_unique<RestoreManifest>(
-        owner, configName, snapshotNumber, mode, id, nowMs, kDefaultTtlMs);
+        owner, configName, snapshotNumber, counterpartSnapshotNumber, mode,
+        id, nowMs, kDefaultTtlMs);
     m_manifests.emplace(id, std::move(record));
     setError(err, ManifestError::None);
     return id;

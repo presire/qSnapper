@@ -115,7 +115,8 @@ public:
      * @param restoreMode 復元方式 ("YaST" または "ダイレクト")
      * @param done 結果コールバック (ok, マニフェストID, error)
      */
-    void beginPlan(const QString &configName, int snapshotNumber, const QString &restoreMode,
+    void beginPlan(const QString &configName, int snapshotNumber,
+                   int counterpartSnapshotNumber, const QString &restoreMode,
                    std::function<void(bool ok, const QString &manifestId, const QString &error)> done) override
     {
         QDBusMessage message = QDBusMessage::createMethodCall(
@@ -124,7 +125,7 @@ public:
             "com.presire.qsnapper.Operations",
             "BeginRestorePlan"
         );
-        message << configName << snapshotNumber << restoreMode;
+        message << configName << snapshotNumber << counterpartSnapshotNumber << restoreMode;
 
         callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
             QDBusPendingReply<QString> reply = *watcher;
@@ -2155,7 +2156,11 @@ bool FileChangeModel::restoreCheckedItemsFrom(int sourceSnapshotNumber)
 
     // 認証なしでstaging計画を開始する (Polkitプロンプトはcommit時に1度だけ出る)
     const QString restoreMode = m_useDirectRestore ? QStringLiteral("direct") : QStringLiteral("yast");
-    m_restorePlanTransport->beginPlan(m_configName, sourceSnapshotNumber, restoreMode,
+    // counterpartは表示中のエントリを生んだ比較条件 (m_loadedComparison) から取る
+    // 後から変更され得るUIプロパティを使うと、検証対象と実行対象の比較が食い違う
+    // (対カレント比較では0 = 「現在のシステム」のsentinelになる)
+    m_restorePlanTransport->beginPlan(m_configName, sourceSnapshotNumber,
+                                      m_loadedComparison.number2, restoreMode,
                                       [this](bool ok, const QString &manifestId, const QString &error) {
                                           onPlanBeginFinished(ok, manifestId, error);
                                       });

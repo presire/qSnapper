@@ -12,9 +12,11 @@
 #include <QDBusMessage>
 #include <QDBusServiceWatcher>
 #include <QTimer>
+#include <sys/stat.h>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <snapper/Snapshot.h>
 #include "comparisoncache.h"
 #include "restoremanifest.h"
 #include "restoreplanexecutor.h"
@@ -38,7 +40,7 @@ private:
         QString configName;
         int snapshotNumber = -1;
         QString snapshotDir;
-        // 認可時に開いて計画寿命の間保持するsnapshot dirfd
+        // 認可時に開いて計画寿命の間保持するスナップショット dirfd
         // ソース読み取りを全て本fd相対で行うことで、実行中のスナップショット削除 / 同番号スナップショットの再作成 / mount状態の変化に依存せず、
         // 認可された計画が参照したスナップショットそのものから復元し続ける
         int snapshotDirFd = -1;
@@ -64,9 +66,11 @@ private:
      * @brief 認可要求の即時結果
      */
     enum class AuthorizationOutcome {
-        Granted,    // 対話なしで許可済み。呼び出し元はそのまま同期実行してよい
+        Granted,    // 対話なしで許可済み
+                    // 呼び出し元はそのまま同期実行してよい
         Denied,     // 拒否 (D-Busエラー応答は送出済み)
-        Deferred    // polkitプロンプト待ち。応答は完了継続から送出される
+        Deferred    // polkitプロンプト待ち
+                    // 応答は完了継続から送出される
     };
 
     static constexpr int IdleTimeoutMs = 5 * 60 * 1000;     // アイドルタイムアウト (5分)
@@ -93,9 +97,8 @@ private:
     /**
      * @brief アイドルタイマをリセットする
      *
-     * D-Busメソッドの先頭で呼び出し、無操作5分による自動終了を先送りする。
-     * 認可待ちが1件でもある間はタイマを止めたままにする (プロンプト応答を待つ間に
-     * サービスが自動終了すると、ユーザが認証した直後に呼び出しが失われるため)
+     * D-Busメソッドの先頭で呼び出し、無操作5分による自動終了を先送りする
+     * 認可待ちが1件でもある間はタイマを止めたままにする (プロンプト応答を待つ間にサービスが自動終了すると、ユーザが認証した直後に呼び出しが失われるため)
      */
     void resetIdleTimer();
 
@@ -123,7 +126,7 @@ private:
      * @brief polkit認可を要求する (対話が必要な場合のみ非同期化する)
      *
      * 高速経路として対話を許可しない問い合わせを先に行う
-     * allow_active=yesやauth_admin_keepのキャッシュ済み認可はここでGrantedとなり、プロンプトが出ないためイベントループはミリ秒しか止まらない。
+     * allow_active=yesやauth_admin_keepのキャッシュ済み認可はここでGrantedとなり、プロンプトが出ないためイベントループはミリ秒しか止まらない
      * 対話が必要 (challenge) な場合のみ非同期APIへ回し、setDelayedReply(true)を立てた上でDeferredを返す
      * 同期版はタイムアウトを持たず、未応答プロンプト1つでサービス全体のイベントループが無期限に凍結するため、対話経路では使わない
      *
@@ -307,6 +310,8 @@ private:
      *
      * 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が起こり得るため、
      * mountやexecutor起動の前に状態を再検証する
+     * さらに凍結済みの全entryが、サーバが再構築した権威ある比較
+     * (source, counterpart) と一致することをcommit時に確認する
      *
      * @param manifestId owner束縛されたマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name
@@ -314,6 +319,50 @@ private:
      */
     bool commitRestorePlanAuthorized(const QString &manifestId,
                                      const QString &owner);
+
+    /**
+     * @brief 凍結済み計画をサーバ再構築の権威ある比較と照合して検証する
+     *
+     * ローカルの非キャッシュComparison (mount=false) を1つだけ構築し、
+     * 全entryの検証とpin済みdirfdの同一性確認 (st_dev / st_ino) を行ってから破棄する
+     *
+     * キャッシュを使わない理由は、Policy::Reuseが認可前生成のComparisonを返し得ること、Policy::Refreshがmount済みオブジェクトをキャッシュに残すことにある
+     * (libsnapperのmount_use_countはboolではないため、キャッシュに残ったmountはユーザの明示unmountを飛ばす)
+     *
+     * 本関数は認可を一切行わない
+     *
+     * @param manifestId owner束縛されたマニフェストID
+     * @param owner 認可前にキャプチャした呼び出し元unique name
+     * @param snapper 検証済み設定のSnapperインスタンス
+     * @param source 復元元スナップショットのiterator
+     * @param counterpart 比較相手スナップショットのiterator (getSnapshotCurrent()含む)
+     * @param snapshotDir pin済みdirfdが指すスナップショット directoryのpath
+     * @param pinnedStat pin済みdirfdに対するfstatの結果
+     * @return 計画全体が権威ある比較と一致し同一性確認も通った場合true
+     */
+    bool validateFrozenRestorePlan(const QString &manifestId,
+                                   const QString &owner,
+                                   snapper::Snapper *snapper,
+                                   const snapper::Snapshots::const_iterator &source,
+                                   const snapper::Snapshots::const_iterator &counterpart,
+                                   const QString &snapshotDir,
+                                   const struct stat &pinnedStat);
+
+    /**
+     * @brief commit時preflight失敗を計画のfail-closed終端へ落とし込む
+     *
+     * mount / dirfd確保は準備であって復元の変異ではないため、executor起動前に失敗していればlive filesystemは一切変化しない
+     * cleanup -> markFailed -> 汎用warning -> replyErrorの順で終端する
+     *
+     * エラー文とlogに攻撃者が制御できるpathを含めてはならない
+     *
+     * @param manifestId 検証に失敗したマニフェストID
+     * @param owner 認可前にキャプチャした呼び出し元unique name
+     * @param error registryのmarkFailedへ渡すエラー格納先
+     */
+    void failRestorePlanPreflight(const QString &manifestId,
+                                  const QString &owner,
+                                  qsnapper::restore::ManifestError *error);
 
     /**
      * @brief 認可が得られなかった復元計画をFailedで終端する
@@ -404,7 +453,7 @@ private:
      * 実行中にsnapshotDirのパス上で削除 / 再作成 / 差し替えが起きても、fdが指すinodeを読み続けるため、
      * 認可時と異なる内容を読み込むことがない
      *
-     * @param sourceDirFd pin済みのsnapshot dirfd
+     * @param sourceDirFd pin済みのスナップショット dirfd
      * @param sourceRelativePath snapshotDirからの相対ソースパス (絶対パス・".."/"."成分は不可)
      * @param dst live filesystem上の絶対パス
      * @param tryReflink FICLONEを先行試行するか
@@ -432,7 +481,8 @@ private:
     /**
      * @brief live パスをroot配下で再解決して一時的な兄弟パスへ退避する
      * @param path 退避対象の絶対パス
-     * @param movedPath 実際の退避先。対象不存在時は空文字列
+     * @param movedPath 実際の退避先
+     *                  対象不存在時は空文字列
      * @return 退避または対象不存在時true
      */
     static bool movePathAsideBeneathRoot(const QString &path,
@@ -623,7 +673,7 @@ public slots:
     /**
      * @brief ファイルをスナップショットから復元する (YaST互換コピー経路)
      *
-     * reflinkを用いず、typechangedの事前削除も行わない。
+     * reflinkを用いず、typechangedの事前削除も行わない
      */
     bool RestoreFiles(const QString &configName,
                       int snapshotNumber,
@@ -633,7 +683,8 @@ public slots:
     /**
      * @brief ファイルをスナップショットから復元する (高速経路)
      *
-     * btrfs reflinkを優先。typechangedは既存ファイル削除後にコピー
+     * btrfs reflinkを優先
+     * typechangedは既存ファイル削除後にコピー
      */
     bool RestoreFilesDirect(const QString &configName,
                              int snapshotNumber,
@@ -644,11 +695,13 @@ public slots:
      * @brief ownerに束縛された空のstaged restore計画を開始する
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元スナップショット番号
+     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
      * @param restoreMode yastまたはdirect
-     * @return 成功時マニフェストID
+     * @return 成功時manifest id
      */
     QString BeginRestorePlan(const QString &configName,
                              int snapshotNumber,
+                             int counterpartSnapshotNumber,
                              const QString &restoreMode);
 
     /**

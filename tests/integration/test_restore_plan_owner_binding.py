@@ -202,8 +202,9 @@ def main() -> int:
         obj_b = bus_b.get_object(IFACE, PATH)
 
         # --- Step 1: A begins a restore plan ---
+        # counterpartSnapshotNumber=0 means "the current system" (sentinel).
         manifest_id = obj_a.BeginRestorePlan(
-            "root", 1, "direct", dbus_interface=IFACE
+            "root", 1, 0, "direct", dbus_interface=IFACE
         )
         proof("BEGIN_MANIFEST_ID", manifest_id)
         if not manifest_id:

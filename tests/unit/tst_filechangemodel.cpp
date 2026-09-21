@@ -50,6 +50,7 @@ public:
         Kind kind = Begin;
         QString configName;
         int snapshotNumber = 0;
+        int counterpartNumber = 0;
         QString restoreMode;
         QString manifestId;
         QStringList paths;
@@ -125,13 +126,15 @@ public:
 
     // --- RestorePlanTransport interface ---
 
-    void beginPlan(const QString &configName, int snapshotNumber, const QString &restoreMode,
+    void beginPlan(const QString &configName, int snapshotNumber,
+                   int counterpartSnapshotNumber, const QString &restoreMode,
                    std::function<void(bool ok, const QString &manifestId, const QString &error)> done) override
     {
         Call call;
         call.kind = Call::Begin;
         call.configName = configName;
         call.snapshotNumber = snapshotNumber;
+        call.counterpartNumber = counterpartSnapshotNumber;
         call.restoreMode = restoreMode;
         calls.append(call);
 
@@ -258,6 +261,9 @@ private slots:
     void stagedRestoreCancelDuringStagingFinishesLocally();
     void prePostRestoreUsesComparisonSourceAndPreservesBetweenMode();
     void prePostRestoreFromComparisonTargetIsRejected();
+    void beginPlanCarriesCounterpartFromLoadedComparisonInBothDirections();
+    void beginPlanCarriesZeroCounterpartInVsCurrentMode();
+    void syntheticParentWithEmptyStatusFlagsNeverReachesThePlan();
     void restoreFromMismatchedSnapshotIsRejectedInVsCurrentMode();
     void singleFileRestoreFromMismatchedSnapshotIsRejected();
     void failedComparisonReplacementClearsRestorableEntries();
@@ -484,6 +490,8 @@ void TestFileChangeModel::stagedRestoreStagesBoundedChunksAndCommitsOnce()
     QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
     QCOMPARE(beginCall.configName, QStringLiteral("root"));
     QCOMPARE(beginCall.snapshotNumber, 42);
+    // 対カレント比較モードではcounterpartは0 (現在のシステムのsentinel)
+    QCOMPARE(beginCall.counterpartNumber, 0);
     QCOMPARE(beginCall.restoreMode, QStringLiteral("direct"));
 
     // 各チャンクは上限以下で空ではなく、連結結果が元の選択順序と一致する
@@ -544,6 +552,7 @@ void TestFileChangeModel::stagedRestoreSendsNoMutableValuesAfterCommit()
         QVERIFY(call.configName.isEmpty());
         QVERIFY(call.restoreMode.isEmpty());
         QCOMPARE(call.snapshotNumber, 0);
+        QCOMPARE(call.counterpartNumber, 0);
         QCOMPARE(call.manifestId, fake.nextManifestId);
     }
 
@@ -557,6 +566,7 @@ void TestFileChangeModel::stagedRestoreSendsNoMutableValuesAfterCommit()
     QVERIFY(cancelCall.configName.isEmpty());
     QVERIFY(cancelCall.restoreMode.isEmpty());
     QCOMPARE(cancelCall.snapshotNumber, 0);
+    QCOMPARE(cancelCall.counterpartNumber, 0);
     QCOMPARE(cancelCall.manifestId, fake.nextManifestId);
 
     fake.completePending(true);
@@ -1027,6 +1037,130 @@ void TestFileChangeModel::prePostRestoreFromComparisonTargetIsRejected()
     QCOMPARE(errorSpy.count(), 1);
     QCOMPARE(completedSpy.count(), 1);
     QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+}
+
+/**
+ * @brief beginPlanに比較相手 (counterpart) が両方向で正しく渡されることを検証する
+ *
+ * counterpartは表示中のエントリを生んだ比較条件 (m_loadedComparison.number2) であり、
+ * サーバはこの値で権威ある比較を再構築して凍結済みentryを検証する
+ * 復元元と同じ向きでなければCREATEDとDELETEDが反転するため、
+ * Pre --> PostとPost --> Preの両方向で意図どおりの値が届くことを固定する
+ */
+void TestFileChangeModel::beginPlanCarriesCounterpartFromLoadedComparisonInBothDirections()
+{
+    const QString output = QStringLiteral("+.... /etc/installed.conf\n"
+                                          "-.... /etc/removed.conf\n");
+
+    // --- Pre #100 --> Post #101 (Revert to Pre) ---
+    {
+        FakeRestorePlanTransport fake;
+        TestableFileChangeModel model;
+        const QStringList pathsToCheck = {QStringLiteral("/etc/installed.conf")};
+        prepareComparisonRestore(&model, &fake, 100, 101, output, pathsToCheck);
+
+        QVERIFY(model.restoreCheckedItemsFrom(100));
+
+        const FakeRestorePlanTransport::Call &beginCall = fake.calls.first();
+        QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
+        QCOMPARE(beginCall.snapshotNumber, 100);
+        QCOMPARE(beginCall.counterpartNumber, 101);
+    }
+
+    // --- Post #101 --> Pre #100 (Re-apply to Post) ---
+    {
+        FakeRestorePlanTransport fake;
+        TestableFileChangeModel model;
+        const QStringList pathsToCheck = {QStringLiteral("/etc/installed.conf")};
+        prepareComparisonRestore(&model, &fake, 101, 100, output, pathsToCheck);
+
+        QVERIFY(model.restoreCheckedItemsFrom(101));
+
+        const FakeRestorePlanTransport::Call &beginCall = fake.calls.first();
+        QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
+        QCOMPARE(beginCall.snapshotNumber, 101);
+        QCOMPARE(beginCall.counterpartNumber, 100);
+    }
+}
+
+/**
+ * @brief 対カレント比較モードではbeginPlanにcounterpart 0が渡されることを検証する
+ *
+ * 0は「現在のシステム」を表すsentinelである
+ * snapshotNumberプロパティ (比較相手ではない) を誤って渡すと、
+ * サーバ側で別snapshotとの比較が再構築され、検証対象が実行対象と食い違う
+ */
+void TestFileChangeModel::beginPlanCarriesZeroCounterpartInVsCurrentMode()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    const QStringList pathsToCheck = {QStringLiteral("/data/file0")};
+
+    prepareStagedRestore(&model, &fake, QStringLiteral("+.... /data/file0\n"),
+                         pathsToCheck, 100);
+
+    QVERIFY(model.restoreCheckedItemsFrom(42));
+
+    const FakeRestorePlanTransport::Call &beginCall = fake.calls.first();
+    QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
+    QCOMPARE(beginCall.snapshotNumber, 42);
+    QCOMPARE(beginCall.counterpartNumber, 0);
+}
+
+/**
+ * @brief 空のstatusFlagsを持つ合成親ディレクトリが計画へ載らないことを検証する
+ *
+ * ツリー構築で合成された中間ディレクトリは比較結果に由来せず、
+ * statusFlagsが空でchangeTypeがModifiedになる
+ * stagerはchangeTypeがModifiedの親に実レコードの子が居る場合、親を計画へ載せない
+ * 合成ノードが誤ってStageRestoreEntriesへ届くと、
+ * 権威ある比較に存在しないパスとしてcommit時の検証が計画全体をrejectしてしまう
+ */
+void TestFileChangeModel::syntheticParentWithEmptyStatusFlagsNeverReachesThePlan()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    // /etc/foo/barは出力に現れず、ツリー構築時に合成される
+    const QString output = QStringLiteral("+.... /etc/foo\n"
+                                          "+.... /etc/foo/bar/baz.conf\n");
+    prepareStagedRestore(&model, &fake, output,
+                         {QStringLiteral("/etc/foo/")}, 100, /*flatMode=*/false);
+
+    // 合成ノードのstatusFlagsは空であることを直接観測する
+    // (getItem / findItemIndexはprivateのため、公開APIで木を走査する)
+    const std::function<QModelIndex(const QString &)> findPath =
+        [&](const QString &path) -> QModelIndex {
+            const std::function<QModelIndex(const QModelIndex &)> walk =
+                [&](const QModelIndex &parent) -> QModelIndex {
+                    for (int row = 0; row < model.rowCount(parent); ++row) {
+                        const QModelIndex index = model.index(row, 0, parent);
+                        if (model.data(index, FileChangeModel::PathRole).toString() == path) {
+                            return index;
+                        }
+                        const QModelIndex child = walk(index);
+                        if (child.isValid()) {
+                            return child;
+                        }
+                    }
+                    return QModelIndex();
+                };
+            return walk(QModelIndex());
+        };
+    const QModelIndex fooIndex = findPath(QStringLiteral("/etc/foo/"));
+    QVERIFY(fooIndex.isValid());
+    const QModelIndex barIndex = findPath(QStringLiteral("/etc/foo/bar/"));
+    QVERIFY(barIndex.isValid());
+    QCOMPARE(model.data(barIndex, FileChangeModel::StatusFlagsRole).toString(), QString());
+
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    // 合成ノード (/etc/foo/bar) は計画に載らない
+    const QStringList stagedPaths = stagedPathsOf(fake);
+    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo")));
+    QVERIFY(!stagedPaths.contains(QStringLiteral("/etc/foo/bar")));
+    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo/bar/baz.conf")));
 }
 
 /**

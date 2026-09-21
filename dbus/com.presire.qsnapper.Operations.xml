@@ -87,13 +87,21 @@
       snapshot number, or restore mode — so a frozen plan cannot be mutated
       after the single authorization. restoreMode is the string "yast" or
       "direct".
-      statusCsv field order mirrors ManifestStatus in restoremanifest.h:
+      counterpartSnapshotNumber is the comparison counterpart of the restore
+      SOURCE (snapshotNumber): 0 means "the current system", a positive value
+      must differ from snapshotNumber. The server reconstructs the
+      authoritative comparison from (snapshotNumber, counterpartSnapshotNumber)
+      at commit time and re-validates every staged entry against it.
+      statusCsv field order is a PUBLIC SUBSET of ManifestStatus in
+      restoremanifest.h (the internal counterpartSnapshotNumber field is
+      intentionally not exposed; positional parsers must not be shifted):
         id, state, totalEntries, cursor, processed, mode, configName,
         snapshotNumber, lastError
     -->
     <method name="BeginRestorePlan">
       <arg name="configName" type="s" direction="in"/>
       <arg name="snapshotNumber" type="i" direction="in"/>
+      <arg name="counterpartSnapshotNumber" type="i" direction="in"/>
       <arg name="restoreMode" type="s" direction="in"/>
       <arg name="manifestId" type="s" direction="out"/>
     </method>

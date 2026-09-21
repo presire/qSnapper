@@ -68,14 +68,18 @@ struct ManifestStatus {
     RestoreMode mode = RestoreMode::YastCompatible;
     QString configName;
     int snapshotNumber = -1;
+    // 復元元との比較相手
+    // 0は「現在のシステム」を表すsentinelである
+    // 内部専用のfieldであり、GetRestorePlanStatusのCSVには含めない
+    int counterpartSnapshotNumber = -1;
     QString lastError;
 };
 
 /**
  * @brief 単一復元計画のD-Bus非依存な状態機械
  *
- * owner、設定、スナップショット、mode、id、TTLは構築後不変である。freeze後の
- * エントリ列はconstなコンテナへ移され、型として変更できない。
+ * owner、設定、スナップショット、mode、id、TTLは構築後不変である
+ * freeze後のエントリ列はconstなコンテナへ移され、型として変更できない
  */
 class RestoreManifest
 {
@@ -85,14 +89,15 @@ public:
      * @param owner D-Bus呼び出し元のユニーク名
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元スナップショット番号
+     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
      * @param mode 復元方式
      * @param id 推測困難なマニフェスト識別子
      * @param creationTimeMs 作成時刻 (ミリ秒)
      * @param ttlMs 最終活動から失効するまでの時間 (ミリ秒)
      */
     RestoreManifest(QString owner, QString configName, int snapshotNumber,
-                    RestoreMode mode, QString id, qint64 creationTimeMs,
-                    qint64 ttlMs);
+                    int counterpartSnapshotNumber, RestoreMode mode,
+                    QString id, qint64 creationTimeMs, qint64 ttlMs);
 
     /**
      * @brief Staging中の末尾へエントリ列を原子的に追加する
@@ -149,7 +154,7 @@ public:
      * @brief 指定時刻でTTLを超過しているか判定する
      *
      * Running状態の計画は認可済みかつexecutorが駆動中であり、TTL回収の対象外とする
-     * (owner消失時はregistryのremoveByOwnerが回収する)。
+     * (owner消失時はregistryのremoveByOwnerが回収する)
      *
      * @param nowMs 判定時刻 (milliseconds)
      * @return 非Runningかつ最終活動からTTLを超過していればtrue
@@ -191,6 +196,12 @@ public:
      * @return 構築時に固定されたスナップショット番号
      */
     int snapshotNumber() const;
+
+    /**
+     * @brief 比較相手のスナップショット番号を返す
+     * @return 構築時に固定された比較相手番号 (0は現在のシステム)
+     */
+    int counterpartSnapshotNumber() const;
 
     /**
      * @brief 復元方式を返す
@@ -238,6 +249,7 @@ private:
     const QString m_owner;
     const QString m_configName;
     const int m_snapshotNumber;
+    const int m_counterpartSnapshotNumber;
     const RestoreMode m_mode;
     const QString m_id;
     const qint64 m_creationTimeMs;
@@ -286,7 +298,8 @@ public:
 
     /**
      * @brief TTL判定と活動更新に使うclockを差し替える
-     * @param clock millisecondsを返す関数。空なら実時間clockへ戻す
+     * @param clock millisecondsを返す関数
+     *              空なら実時間clockへ戻す
      */
     void setClock(std::function<qint64()> clock);
 
@@ -297,7 +310,8 @@ public:
      * @param maxEntriesGlobal 正のregistry全体エントリ数上限
      * @param maxPathBytesGlobal 非負のregistry全体UTF-8 path byte上限
      *
-     * productionの呼び出し側では使用しない。固定の公開上限を超える値は固定上限へ丸められる
+     * productionの呼び出し側では使用しない
+     * 固定の公開上限を超える値は固定上限へ丸められる
      */
     void setCapacityOverridesForTesting(
         int maxEntriesPerManifest,
@@ -310,13 +324,14 @@ public:
      * @param owner D-Bus呼び出し元のunique name
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元スナップショット番号
+     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
      * @param mode 復元方式
      * @param err 結果エラーの格納先 (省略可)
      * @return 成功時は推測困難なID、拒否時は空文字列
      */
     QString createStaging(const QString &owner, const QString &configName,
-                          int snapshotNumber, RestoreMode mode,
-                          ManifestError *err);
+                          int snapshotNumber, int counterpartSnapshotNumber,
+                          RestoreMode mode, ManifestError *err);
 
     /**
      * @brief owner確認後にpath / changeType列を原子的にstageする

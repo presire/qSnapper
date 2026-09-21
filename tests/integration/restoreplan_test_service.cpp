@@ -3,26 +3,17 @@
  * @brief 隔離root D-Busバス上でstaged restoreのowner境界を検証するためのテスト専用サービス
  *
  * SnapshotOperations (src/dbusservice/snapshotoperations.cpp) の
- * BeginRestorePlan / StageRestoreEntries / CommitRestorePlan /
- * ContinueRestorePlan / GetRestorePlanStatus / CancelRestorePlan の
- * D-Bus adapterロジックを、順序とセマンティクスをVERBATIMに再現したまま
- * 実security core (RestoreManifestRegistry / RestorePlanExecutor /
- * qsnapper::security::*) に接続する。
+ * BeginRestorePlan / StageRestoreEntries / CommitRestorePlan / ContinueRestorePlan / GetRestorePlanStatus / CancelRestorePlan の
+ * D-Busアダプタロジックを、順序とセマンティクスをVERBATIMに再現したまま、
+ * 実security core (RestoreManifestRegistry / RestorePlanExecutor / qsnapper::security::*) に接続する
  *
  * user namespace内では実行できない2箇所のみを意図的に代替する
  * (各代替箇所はDoxygenコメントで明示する):
- *   - CommitRestorePlanのPolkit認証 (checkAuthorization) は
- *     authorizeForTest() へ置き換える
- *   - RestorePlanExecutorのEntryApplierはlibsnapperでmountした実ファイルを
- *     コピーする代わりにapplyRestoreEntryForTest() へ置き換える
+ *   - CommitRestorePlanのPolkit認証 (checkAuthorization) は、authorizeForTest()へ置き換える
+ *   - RestorePlanExecutorのEntryApplierはlibsnapperでmountした実ファイルをコピーする代わりにapplyRestoreEntryForTest()へ置き換える
  *
  * libsnapper / PolkitQt1 / btrfsutil にはリンクしない。
  */
-
-#include "filesystemhelpers.h"
-#include "inputvalidator.h"
-#include "restoremanifest.h"
-#include "restoreplanexecutor.h"
 
 #include <QCoreApplication>
 #include <QDBusConnection>
@@ -39,12 +30,15 @@
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
-
 #include <cstdio>
 #include <csignal>
 #include <optional>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "filesystemhelpers.h"
+#include "inputvalidator.h"
+#include "restoremanifest.h"
+#include "restoreplanexecutor.h"
 
 namespace {
 
@@ -85,11 +79,10 @@ void appendLogLine(const QString &path, const QString &line)
 } // namespace
 
 /**
- * @brief SIGTERMをQt event loopの終了要求へ橋渡しするhelper
+ * @brief SIGTERMをQtイベントループの終了要求へ橋渡しするヘルパー
  *
- * self-pipe trickを使い、シグナルハンドラ本体からはpipeへ1byte書き込むだけに
- * 留め、実際のQCoreApplication::quit()呼び出しはQSocketNotifier経由で
- * event loop context上で行う。
+ * self-pipe trickを使い、シグナルハンドラ本体からはpipeへ1byte書き込むだけに留め、
+ * 実際のQCoreApplication::quit()呼び出しは、QSocketNotifier経由でイベントループコンテキスト上で行う
  */
 class SigTermBridge : public QObject
 {
@@ -116,7 +109,7 @@ public:
 
 private slots:
     /**
-     * @brief self-pipeが読み取り可能になったらevent loopを終了する
+     * @brief self-pipeが読み取り可能になったらイベントループを終了する
      */
     void onActivated()
     {
@@ -176,16 +169,19 @@ public slots:
     /**
      * @brief ownerに束縛された空のstaged restore計画を開始する
      *
-     * snapshotoperations.cpp BeginRestorePlan (行1811-1865) と同じ順序:
-     * owner確認 -> resolveConfigOrFail -> restoreMode検証 -> snapshotNumber検証
-     * -> purgeExpired -> createStaging
+     * snapshotoperations.cpp BeginRestorePlanと同じ順序:
+     * owner確認 -> resolveConfigOrFail -> restoreMode検証 -> snapshotNumber検証　-> counterpartSnapshotNumber検証 -> purgeExpired -> createStaging
+     *
+     * counterpartSnapshotNumberは比較相手のsnapshot番号であり、0は「現在のシステム」のsentinel、正の値は復元元と異なる番号でなければならない
      *
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元snapshot番号
+     * @param counterpartSnapshotNumber 比較相手のsnapshot番号 (0は現在のシステム)
      * @param restoreMode yastまたはdirect
      * @return 成功時manifest id
      */
     QString BeginRestorePlan(const QString &configName, int snapshotNumber,
+                             int counterpartSnapshotNumber,
                              const QString &restoreMode)
     {
         const QString owner = callerOwner();
@@ -219,12 +215,21 @@ public slots:
             return {};
         }
 
+        if (counterpartSnapshotNumber < 0
+                || (counterpartSnapshotNumber > 0
+                    && counterpartSnapshotNumber == snapshotNumber)) {
+            sendErrorReply(QDBusError::InvalidArgs,
+                           QStringLiteral("Invalid counterpart snapshot number"));
+            return {};
+        }
+
         purgeExpiredRestorePlansForTest();
 
         qsnapper::restore::ManifestError error =
             qsnapper::restore::ManifestError::None;
         const QString manifestId = m_restoreRegistry.createStaging(
-            owner, *cfg, snapshotNumber, mode, &error);
+            owner, *cfg, snapshotNumber, counterpartSnapshotNumber, mode,
+            &error);
         if (manifestId.isEmpty()) {
             sendManifestError(error);
             return {};
@@ -237,8 +242,7 @@ public slots:
     /**
      * @brief staging計画へ検証済みentry chunkを原子的に追加する
      *
-     * snapshotoperations.cpp StageRestoreEntries (行1874-1933) と
-     * entry検証ループをVERBATIMに再現する。
+     * snapshotoperations.cpp StageRestoreEntries (行1874-1933) とエントリ検証ループをVERBATIMに再現する。
      *
      * @param manifestId owner束縛されたmanifest id
      * @param filePaths 復元対象絶対path列
@@ -306,11 +310,10 @@ public slots:
     /**
      * @brief 計画をfreeze後に一度だけ認可し非同期実行を開始する
      *
-     * snapshotoperations.cpp CommitRestorePlan (行1940-2068) と
-     * 「freezeがauthorizationより前」「状態事前条件」「totalEntries<=0確認」の
-     * 順序をVERBATIMに保つ。libsnapperでのmount (行1994-2055) はuser namespace内で
-     * 実行できないため丸ごとskipし、freeze直後の認可のみ
-     * authorizeForTest() へ置き換える。
+     * snapshotoperations.cpp CommitRestorePlan (行1940-2068) と「freezeがauthorizationより前」「状態事前条件」「totalEntries<=0確認」の
+     * 順序をVERBATIMに保つ
+     *
+     * libsnapperでのmount (行1994-2055) はuser namespace内で実行できないため丸ごとスキップして、freeze直後の認可のみauthorizeForTest()へ置き換える
      *
      * @param manifestId owner束縛されたmanifest id
      * @return 実行開始を受理した場合true
@@ -319,15 +322,13 @@ public slots:
     {
         const QString owner = callerOwner();
         if (calledFromDBus() && owner.isEmpty()) {
-            sendErrorReply(QDBusError::AccessDenied,
-                           QStringLiteral("Restore plan caller is unavailable"));
+            sendErrorReply(QDBusError::AccessDenied, QStringLiteral("Restore plan caller is unavailable"));
             return false;
         }
 
         purgeExpiredRestorePlansForTest();
 
-        qsnapper::restore::ManifestError error =
-            qsnapper::restore::ManifestError::None;
+        qsnapper::restore::ManifestError error = qsnapper::restore::ManifestError::None;
         const auto status = m_restoreRegistry.status(manifestId, owner, &error);
         if (!status) {
             return sendManifestError(error);
@@ -349,26 +350,22 @@ public slots:
             return sendManifestError(error);
         }
 
-        // TEST-ONLY SUBSTITUTION: 本番はここで
-        // checkAuthorization("com.presire.qsnapper.rollback-snapshot") を呼び
-        // Polkitへ問い合わせる。user namespace内ではpolkitdへ到達できないため
-        // authorizeForTest() へ置き換える (常にtrueを返しつつ認可回数を
-        // QSNAPPER_TEST_AUTH_LOGへ記録する)。
+        // TEST-ONLY SUBSTITUTION:
+        // 本番は、ここでcheckAuthorization("com.presire.qsnapper.rollback-snapshot") を呼び、Polkitへ問い合わせる
+        // user namespace内ではpolkitdへ到達できないため、authorizeForTest()へ置き換える
+        // (常にtrueを返しつつ、認可回数をQSNAPPER_TEST_AUTH_LOGへ記録する)
         if (!authorizeForTest()) {
-            qsnapper::restore::ManifestError failureError =
-                qsnapper::restore::ManifestError::None;
-            m_restoreRegistry.markFailed(
-                manifestId, owner, QStringLiteral("Authorization failed"),
-                &failureError);
+            qsnapper::restore::ManifestError failureError = qsnapper::restore::ManifestError::None;
+            m_restoreRegistry.markFailed(manifestId, owner, QStringLiteral("Authorization failed"), &failureError);
             return false;
         }
 
-        // TEST-ONLY SUBSTITUTION: 本番はここでgetSnapper()/mountFilesystemSnapshot()
-        // によりlibsnapperで実snapshotをmountし、RestoreExecution contextを
-        // m_restoreExecutionsへ保存する (snapshotoperations.cpp 行1986-2034)。
-        // user namespace内ではbtrfs mount操作を実行できないため、本サービスは
-        // mount手順を丸ごとskipしexecutorを直接startする。EntryApplierは
-        // applyRestoreEntryForTest() (no-opスタブ) が処理する。
+        // TEST-ONLY SUBSTITUTION:
+        // 本番は、ここでgetSnapper() / mountFilesystemSnapshot()によりlibsnapperで実snapshotをマウントして、
+        // RestoreExecution contextをm_restoreExecutionsへ保存する (snapshotoperations.cpp 行1986-2034)
+        //
+        // user namespace内ではbtrfs mount操作を実行できないため、本サービスはマウント手順を丸ごとスキップして、executorを直接startする
+        // EntryApplierは、applyRestoreEntryForTest() (no-opスタブ) が処理する
 
         if (!m_restoreExecutor.start(manifestId, owner, &error)) {
             qsnapper::restore::ManifestError failureError =
@@ -511,7 +508,7 @@ private:
     /**
      * @brief manifest操作エラーを情報漏洩しないD-Bus errorへ変換して送信する
      *
-     * snapshotoperations.cpp sendManifestError (行452-493) とbyte-identical。
+     * snapshotoperations.cpp sendManifestError (行452-493) とbyte-identical
      *
      * @param error registryが返したエラー
      * @return 常にfalse
@@ -597,9 +594,9 @@ private:
     }
 
     /**
-     * @brief RFC4180形式で必要なCSV fieldをquoteする
+     * @brief RFC4180形式で必要なCSVフィールドをクォートする
      * @param field quote対象文字列
-     * @return CSVへ安全に埋め込めるfield
+     * @return CSVへ安全に埋め込めるフィールド
      */
     static QString quoteRestoreStatusCsvField(const QString &field)
     {
@@ -616,11 +613,9 @@ private:
     /**
      * @brief TEST-ONLY SUBSTITUTION: checkAuthorizationの代替実装
      *
-     * 本番のcheckAuthorization (snapshotoperations.cpp 行852以降) は
-     * PolkitQt1::Authority::checkAuthorizationSync()でpolkitdへ問い合わせるが、
-     * user namespace内ではpolkitdへ到達できない。本stubは常にtrueを返しつつ、
-     * 認可が要求された回数をQSNAPPER_TEST_AUTH_LOGへ1行追記することで、
-     * テストから「1回だけ認可されたこと」を観測可能にする。
+     * 本番のcheckAuthorization (snapshotoperations.cpp 行852以降) は、
+     * PolkitQt1::Authority::checkAuthorizationSync()でpolkitdへ問い合わせるが、user namespace内ではpolkitdへ到達できない
+     * 本stubは常にtrueを返しつつ、認可が要求された回数をQSNAPPER_TEST_AUTH_LOGへ1行追記することで、テストから「1回だけ認可されたこと」を観測可能にする
      *
      * @return 常にtrue
      */
@@ -635,11 +630,10 @@ private:
     /**
      * @brief TEST-ONLY SUBSTITUTION: RestorePlanExecutor::EntryApplierの代替実装
      *
-     * 本番のapplyRestoreEntry (snapshotoperations.cpp 行2681以降) は
-     * libsnapperでmountしたsnapshotから実ファイルをlive filesystemへコピーするが、
-     * user namespace内ではbtrfs mount操作を実行できない。本stubは
-     * QSNAPPER_TEST_APPLY_LOGへentry pathを1行追記し、1ミリ秒sleepしてtrueを
-     * 返すだけのno-opとする。
+     * 本番のapplyRestoreEntry (snapshotoperations.cpp 行2681以降) は、libsnapperでmountしたsnapshotから実ファイルをlive filesystemへコピーするが、
+     * user namespace内ではbtrfs mount操作を実行できない
+     *
+     * 本スタブは、QSNAPPER_TEST_APPLY_LOGへentry pathを1行追記し、1ミリ秒スリープしてtrueを返すだけのno-opとする
      *
      * @param manifestId 実行中manifest id (未使用)
      * @param entry 適用対象entry
@@ -657,8 +651,7 @@ private:
     /**
      * @brief 終端計画のsignal送出とregistry削除を実行する
      *
-     * snapshotoperations.cpp finishRestorePlan (行628以降) からmount解除と
-     * safety netを除いた部分をVERBATIMに再現する。
+     * snapshotoperations.cpp finishRestorePlan (行628以降) からmount解除とsafety netを除いた部分をVERBATIMに再現する
      *
      * @param manifestId 終端したmanifest id
      * @param terminal 終端状態
@@ -679,8 +672,7 @@ private:
     /**
      * @brief TTL purgeで消えたactive計画をabandonする
      *
-     * snapshotoperations.cpp purgeExpiredRestorePlans (行679以降) から
-     * mount cleanupとowner watcher更新を除いた部分を再現する。
+     * snapshotoperations.cpp purgeExpiredRestorePlans (行679以降) からmount cleanupとowner watcher更新を除いた部分を再現する
      */
     void purgeExpiredRestorePlansForTest()
     {
@@ -692,8 +684,7 @@ private:
                 qsnapper::restore::ManifestError::None;
             const QString owner = m_restorePlanOwners.value(manifestId);
             if (!m_restoreRegistry.status(manifestId, owner, &error)) {
-                // executorが同じ計画をもう一度終端しないよう先にabandonしてから、
-                // finishRestorePlanで終端して終端signalを必ず発火させる
+                // executorが同じ計画をもう一度終端しないよう先にabandonしてから、finishRestorePlanで終端して終端signalを必ず発火させる
                 m_restoreExecutor.abandon(manifestId);
                 finishRestorePlan(
                     manifestId, qsnapper::restore::ManifestState::Failed,
@@ -713,8 +704,8 @@ private:
 /**
  * @brief エントリポイント
  *
- * QSNAPPER_TEST_READY_FILEが設定されていれば、名前とオブジェクトの登録完了後に
- * "READY" を書き込みflushする。あわせて標準出力へ "SERVICE_READY" を出力しflushする。
+ * QSNAPPER_TEST_READY_FILEが設定されていれば、名前とオブジェクトの登録完了後に"READY"を書き込み・フラッシュする
+ * 併せて、標準出力へ"SERVICE_READY"を出力・フラッシュする
  *
  * @param argc 引数の数
  * @param argv 引数配列

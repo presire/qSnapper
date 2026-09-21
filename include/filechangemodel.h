@@ -87,13 +87,15 @@ public:
      * @brief staging計画の作成を要求する (この時点では認証されない)
      *
      * @param configName Snapper設定名
-     * @param snapshotNumber スナップショット番号
+     * @param snapshotNumber スナップショット番号 (復元元)
+     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
      * @param restoreMode 復元方式 ("yast" または "direct")
      * @param done 結果コールバック (ok, manifestId, error)
      * @return なし
      */
     virtual void beginPlan(const QString &configName,       // 復元計画の作成を非同期で要求する
                            int snapshotNumber,
+                           int counterpartSnapshotNumber,
                            const QString &restoreMode,
                            std::function<void(bool ok, const QString &manifestId, const QString &error)> done) = 0;
 

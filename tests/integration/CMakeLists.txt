@@ -92,3 +92,26 @@ target_link_libraries(qsnapper_change_record_injection_poc PRIVATE
     Qt6::DBus
 )
 set_target_properties(qsnapper_change_record_injection_poc PROPERTIES AUTOMOC ON)
+
+# --- qsnapper_restore_plan_tamper_poc: セキュリティPoC実行体 (ビルドのみ) ---
+# staged restoreのcommit時changeType改ざん (権威ある比較照合) を、
+# 実のrestorevalidation / restoremanifest / restoreplanexecutor / filesystemhelpersで
+# 再現・阻止確認する。全操作は引数で与えたscratch root配下に閉じる
+#
+# インストールせず、add_test()にも登録しない
+# ("tests/security_poc/poc_restore_plan_tamper.sh"経由でのみ手動起動する)
+add_executable(qsnapper_restore_plan_tamper_poc
+    ${CMAKE_SOURCE_DIR}/tests/security_poc/poc_restore_plan_tamper.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/inputvalidator.cpp
+)
+target_include_directories(qsnapper_restore_plan_tamper_poc PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(qsnapper_restore_plan_tamper_poc PRIVATE
+    Qt6::Core
+)
+set_target_properties(qsnapper_restore_plan_tamper_poc PROPERTIES AUTOMOC ON)

@@ -1,8 +1,6 @@
-#include "restoremanifest.h"
-
 #include <QTest>
-
 #include <functional>
+#include "restoremanifest.h"
 
 using namespace qsnapper::restore;
 
@@ -19,10 +17,12 @@ QString createManifest(RestoreManifestRegistry &registry,
                        const QString &owner = QStringLiteral(":1.1"),
                        RestoreMode mode = RestoreMode::YastCompatible,
                        const QString &configName = QStringLiteral("root"),
-                       int snapshotNumber = 42)
+                       int snapshotNumber = 42,
+                       int counterpartSnapshotNumber = 0)
 {
     ManifestError error = ManifestError::None;
-    return registry.createStaging(owner, configName, snapshotNumber, mode, &error);
+    return registry.createStaging(owner, configName, snapshotNumber,
+                                  counterpartSnapshotNumber, mode, &error);
 }
 
 bool stageOne(RestoreManifestRegistry &registry, const QString &id,
@@ -59,6 +59,7 @@ private slots:
     void cursorBoundsAndCompletionAreEnforced();
     void generatedIdsAreOpaqueAndUnique();
     void frozenStatusPreservesManifestMetadata();
+    void counterpartSnapshotIsImmutableAndSurfaced();
     void malformedAndEdgeInputIsHandledAtomically();
     void stageOnFrozenManifestIsRejectedWithoutGrowth();
     void errorCodesForMissingWrongOwnerAndExpiredAreIndistinguishableAtTheApiBoundary();
@@ -67,7 +68,7 @@ private slots:
 
 void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
 {
-    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42,
+    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
                              RestoreMode::YastCompatible, QStringLiteral("rm-test"),
                              kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
     ManifestError error = ManifestError::None;
@@ -85,7 +86,7 @@ void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
 
 void TestRestoreManifest::frozenPairsCannotBeReplaced()
 {
-    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42,
+    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
                              RestoreMode::DirectCopy, QStringLiteral("rm-test"),
                              kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
     const QVector<RestoreEntry> original{
@@ -227,9 +228,10 @@ void TestRestoreManifest::everyControlOperationDropsExpiredManifest()
         QCOMPARE(errorValue(error), errorValue(ManifestError::NotFound));
     }
 
-    // Running状態の計画だけはTTL回収の対象外とする。
-    // 認可済みかつexecutor駆動中の計画をTTLで回収すると、別クライアントのPolkitプロンプトが
-    // 単一スレッドのevent loopをTTL超過までブロックしただけで進行中の復元が黙って破棄され、
+    // Running状態の計画だけはTTL回収の対象外とする
+    //
+    // 認可済みかつexecutor駆動中の計画をTTLで回収すると、
+    // 別クライアントのPolkitプロンプトが単一スレッドのイベントループをTTL超過までブロックしただけで進行中の復元が黙って破棄され、
     // live filesystemが中途半端な状態のまま残るため
     nowMs = kInitialTimeMs;
     const QString runningId = createManifest(registry);
@@ -475,7 +477,7 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
     }
     const int perOwnerCount = perOwnerRegistry.count();
     const QString rejectedPerOwner = perOwnerRegistry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("root"), 42,
+        QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
         RestoreMode::YastCompatible, &error);
     QVERIFY(rejectedPerOwner.isEmpty());
     QCOMPARE(errorValue(error), errorValue(ManifestError::CapacityExceeded));
@@ -489,7 +491,7 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
     }
     const int globalCount = globalRegistry.count();
     const QString rejectedGlobal = globalRegistry.createStaging(
-        QStringLiteral(":3.1"), QStringLiteral("root"), 42,
+        QStringLiteral(":3.1"), QStringLiteral("root"), 42, 0,
         RestoreMode::YastCompatible, &error);
     QVERIFY(rejectedGlobal.isEmpty());
     QCOMPARE(errorValue(error), errorValue(ManifestError::GlobalLimit));
@@ -499,25 +501,24 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
 /**
  * @brief stagingの予算がregistry全体で閉じており、接続数で掛け算できないこと
  *
- * BeginRestorePlan / StageRestoreEntries は設計上、認可を要さない。
- * 上限がmanifest単位にしか無いと、一般ユーザがD-Bus接続を複数開くだけで
- * (unique nameごとに別ownerとして数えられるため) rootサービスに
- * manifest上限 x 接続数のメモリを確保させられる。
- * 本テストは entry数 / path byte の両軸で、2つ目のownerが最初のownerの
- * 消費分を引き継いだ残余しか使えず、超過時はGlobalLimitで
- * manifestを一切変化させずに拒否されることを固定する。
+ * BeginRestorePlan / StageRestoreEntries は設計上、認可を要さない
+ * 上限がmanifest単位にしか無いと、一般ユーザがD-Bus接続を複数開くだけで (unique nameごとに別ownerとして数えられるため)
+ * rootサービスにマニフェスト上限 x 接続数のメモリを確保させられる
+ *
+ * 本テストは、エントリ数 / path byteの両軸で、2つ目のownerが最初のownerの消費分を引き継いだ残余しか使えず、
+ * 超過時はGlobalLimitでマニフェストを一切変化させずに拒否されることを固定する
  */
 void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
 {
     const QString ownerA = QStringLiteral(":1.1");
     const QString ownerB = QStringLiteral(":1.2");
 
-    // --- entry数の軸 ---
+    // --- エントリ数の軸 ---
     {
         qint64 nowMs = kInitialTimeMs;
         RestoreManifestRegistry registry;
         registry.setClock([&nowMs]() { return nowMs; });
-        // manifest単位は緩く、グローバルだけを絞る
+        // マニフェスト単位は緩く、グローバルだけを絞る
         registry.setCapacityOverridesForTesting(100, 1024,
                                                 /*maxEntriesGlobal=*/3,
                                                 /*maxPathBytesGlobal=*/1024);
@@ -533,8 +534,7 @@ void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
                                       &error));
         QCOMPARE(registry.globalEntries(), qint64(2));
 
-        // ownerBはmanifest単位では100件まで許されるが、
-        // 全体予算の残りは1件しかない
+        // ownerBはマニフェスト単位では100件まで許されるが、全体予算の残りは1件しかない
         QVERIFY2(!registry.stageEntries(idB, ownerB,
                                         {QStringLiteral("/b1"), QStringLiteral("/b2")},
                                         {QStringLiteral("created"), QStringLiteral("deleted")},
@@ -546,7 +546,7 @@ void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
         QVERIFY(bAfterReject.has_value());
         QCOMPARE(bAfterReject->totalEntries, 0);
 
-        // 残余ぶんは通る
+        // 残余分は通る
         QVERIFY(registry.stageEntries(idB, ownerB, {QStringLiteral("/b1")},
                                       {QStringLiteral("created")}, &error));
         QCOMPARE(registry.globalEntries(), qint64(3));
@@ -566,12 +566,12 @@ void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
         QVERIFY(!idA.isEmpty());
         QVERIFY(!idB.isEmpty());
 
-        // "/aaaaaaaa" = 9 byte
+        // "/aaaaaaaa" = 9byte
         QVERIFY(registry.stageEntries(idA, ownerA, {QStringLiteral("/aaaaaaaa")},
                                       {QStringLiteral("created")}, &error));
         QCOMPARE(registry.globalPathBytes(), qint64(9));
 
-        // 残り3 byteしかないので "/bbbbbbbb" (9 byte) は入らない
+        // 残り3byteしかないので "/bbbbbbbb" (9byte) は入らない
         QVERIFY2(!registry.stageEntries(idB, ownerB, {QStringLiteral("/bbbbbbbb")},
                                         {QStringLiteral("created")}, &error),
                  "a second connection must not get its own path-byte budget");
@@ -588,8 +588,7 @@ void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
     }
 
     // --- productionの既定値が「掛け算できない」大きさに保たれていること ---
-    // manifest単位の上限 x manifest上限数 (= 32 x 64MB) がそのまま
-    // 確保され得ないことを、定数レベルで固定する
+    // マニフェスト単位の上限 x マニフェスト上限数 (= 32 x 64MB) がそのまま確保され得ないことを、定数レベルで固定する
     QVERIFY2(RestoreManifestRegistry::kMaxPathBytesGlobal
                  < RestoreManifestRegistry::kMaxPathBytesPerManifest
                      * RestoreManifestRegistry::kMaxManifestsGlobal,
@@ -637,7 +636,7 @@ void TestRestoreManifest::entriesPreserveOrderAcrossChunks()
 
 void TestRestoreManifest::cursorBoundsAndCompletionAreEnforced()
 {
-    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42,
+    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
                              RestoreMode::YastCompatible, QStringLiteral("rm-test"),
                              kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
     ManifestError error = ManifestError::None;
@@ -690,7 +689,7 @@ void TestRestoreManifest::frozenStatusPreservesManifestMetadata()
     registry.setClock([&nowMs]() { return nowMs; });
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("home-config"), 987,
+        QStringLiteral(":1.1"), QStringLiteral("home-config"), 987, 988,
         RestoreMode::DirectCopy, &error);
     QVERIFY(!id.isEmpty());
     QVERIFY(stageOne(registry, id));
@@ -702,6 +701,61 @@ void TestRestoreManifest::frozenStatusPreservesManifestMetadata()
     QCOMPARE(status->configName, QStringLiteral("home-config"));
     QCOMPARE(status->snapshotNumber, 987);
     QCOMPARE(status->state, ManifestState::Frozen);
+}
+
+/**
+ * @brief counterpart (比較相手snapshot番号) が不変に保持され、
+ *        getterとManifestStatus、createStaging経由の全経路で反映されることを検証する
+ *
+ * counterpartはcommit時の権威ある比較再構築 (source, counterpart) の入力である
+ * staging中やfreeze後に書き換え可能な状態があると、検証対象と実行対象の比較が食い違うため、構築後不変であることを型と挙動の両面で固定する
+ */
+void TestRestoreManifest::counterpartSnapshotIsImmutableAndSurfaced()
+{
+    // --- 直接構築: 0は「現在のシステム」のsentinel ---
+    RestoreManifest vsCurrent(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
+                              RestoreMode::YastCompatible, QStringLiteral("rm-a"),
+                              kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
+    QCOMPARE(vsCurrent.counterpartSnapshotNumber(), 0);
+    QCOMPARE(vsCurrent.status().counterpartSnapshotNumber, 0);
+
+    // --- 直接構築: 正のcounterpart ---
+    RestoreManifest between(QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+                            RestoreMode::DirectCopy, QStringLiteral("rm-b"),
+                            kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
+    QCOMPARE(between.counterpartSnapshotNumber(), 101);
+
+    // staging / freeze / freeze後のstatusのいずれでも不変
+    ManifestError error = ManifestError::None;
+    QVERIFY(between.appendEntries({{QStringLiteral("/one"), QStringLiteral("modified")}}, &error));
+    QCOMPARE(between.status().counterpartSnapshotNumber, 101);
+    QVERIFY(between.freeze(&error));
+    QCOMPARE(between.status().counterpartSnapshotNumber, 101);
+    QVERIFY(between.markRunning(&error));
+    QCOMPARE(between.counterpartSnapshotNumber(), 101);
+    QCOMPARE(between.status().counterpartSnapshotNumber, 101);
+
+    // --- registryのcreateStaging経由でもcounterpartが運ばれる ---
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    const QString vsCurrentId = createManifest(registry, QStringLiteral(":1.1"),
+                                               RestoreMode::YastCompatible,
+                                               QStringLiteral("root"), 42, 0);
+    QVERIFY(!vsCurrentId.isEmpty());
+    const QString betweenId = createManifest(registry, QStringLiteral(":1.1"),
+                                             RestoreMode::YastCompatible,
+                                             QStringLiteral("root"), 100, 101);
+    QVERIFY(!betweenId.isEmpty());
+
+    const auto vsCurrentStatus = registry.status(vsCurrentId, QStringLiteral(":1.1"), &error);
+    QVERIFY(vsCurrentStatus.has_value());
+    QCOMPARE(vsCurrentStatus->counterpartSnapshotNumber, 0);
+
+    const auto betweenStatus = registry.status(betweenId, QStringLiteral(":1.1"), &error);
+    QVERIFY(betweenStatus.has_value());
+    QCOMPARE(betweenStatus->snapshotNumber, 100);
+    QCOMPARE(betweenStatus->counterpartSnapshotNumber, 101);
 }
 
 void TestRestoreManifest::malformedAndEdgeInputIsHandledAtomically()
@@ -751,12 +805,10 @@ void TestRestoreManifest::malformedAndEdgeInputIsHandledAtomically()
 
 /**
  * @brief registry.stageEntries()がFrozen manifestに対しWrongStateで拒否され、
- *        entry列・totalEntries・pathBytes会計のいずれも変化させないことを検証する
+ *        エントリ列・totalEntries・pathBytes会計のいずれも変化させないことを検証する
  *
- * appendAfterFreezeIsRejectedWithoutGrowth はRestoreManifest::appendEntries()を
- * 直接呼び出すstate machine単体の検証であり、registry層の事前条件チェック
- * (stageEntries内、manifest->appendEntriesへ到達する前の
- * manifest->state() != Staging判定) は別経路のため未検証だった。
+ * appendAfterFreezeIsRejectedWithoutGrowthは、RestoreManifest::appendEntries()を直接呼び出すstate machine単体の検証であり、
+ * registry層の事前条件チェック (stageEntries内、manifest->appendEntriesへ到達する前のmanifest->state() != Staging判定) は別経路のため未検証だった
  */
 void TestRestoreManifest::stageOnFrozenManifestIsRejectedWithoutGrowth()
 {
@@ -792,17 +844,16 @@ void TestRestoreManifest::stageOnFrozenManifestIsRejectedWithoutGrowth()
 }
 
 /**
- * @brief NotFound/OwnerMismatch/Expiredの3経路がAPI境界で同一エラーへ
- *        集約される (sendManifestError側の責務) 一方、registry内部では
- *        別個のManifestErrorを返し、かつ関係ない他manifestの保存状態を
- *        一切変化させないことを検証する
+ * @brief NotFound/OwnerMismatch/Expiredの3経路がAPI境界で同一エラーへ集約される (sendManifestError側の責務)
+ *        一方、registry内部では別個のManifestErrorを返し、かつ関係ない他マニフェストの保存状態を一切変化させないことを検証する
  *
- * SnapshotOperations::sendManifestError (snapshotoperations.cpp 行452-493) は
- * NotFound/OwnerMismatch/Expiredをすべて同一のD-Bus AccessDenied
- * "Restore plan access denied" へ集約する (情報漏洩防止)。
- * しかしregistry層ではこの3種は明確に異なるManifestErrorとして区別され、
- * どの経路でも「無関係なmanifestの状態」および「対象manifest自身の
- * 呼び出し前状態」は変更されない。本テストはその不変条件を検証する。
+ * SnapshotOperations::sendManifestError (snapshotoperations.cpp 行452-493) は、
+ * NotFound / OwnerMismatch / Expiredをすべて同一のD-Bus AccessDenied "Restore plan access denied" へ集約する (情報漏洩防止)
+ *
+ * しかし、registry層ではこの3種は明確に異なるManifestErrorとして区別され、
+ * どの経路でも「無関係なマニフェストの状態」および「対象マニフェスト自身の呼び出し前状態」は変更されない。
+ *
+ * 本テストはその不変条件を検証する。
  */
 void TestRestoreManifest::errorCodesForMissingWrongOwnerAndExpiredAreIndistinguishableAtTheApiBoundary()
 {
@@ -827,10 +878,10 @@ void TestRestoreManifest::errorCodesForMissingWrongOwnerAndExpiredAreIndistingui
     QVERIFY(stageOne(registry, targetId));
     QVERIFY(registry.freeze(targetId, QStringLiteral(":1.1"), &error));
 
-    // expiringIdのみが失効し、controlId/targetIdはまだ有効な時刻へ進める
+    // expiringIdのみが失効し、controlId / targetIdはまだ有効な時刻へ進める
     nowMs = kInitialTimeMs + ttl + 1;
 
-    // --- 経路1: NotFound (存在しないid) ---
+    // --- 経路1: NotFound (存在しないID) ---
     const int countBeforeMissing = registry.count();
     const auto controlBeforeMissing = registry.status(controlId, QStringLiteral(":1.1"), &error);
     QVERIFY(controlBeforeMissing.has_value());
@@ -882,8 +933,7 @@ void TestRestoreManifest::errorCodesForMissingWrongOwnerAndExpiredAreIndistingui
     QVERIFY(targetStillThere.has_value());
 
     // registry内部では3経路が明確に異なるコードである
-    // (sendManifestErrorはこれらを同一のAccessDeniedへ集約するが、その集約は
-    // D-Bus adapter層の責務でありregistry層のテスト範囲外)
+    // (sendManifestErrorはこれらを同一のAccessDeniedへ集約するが、その集約はD-Busアダプタ層の責務でありregistry層のテスト範囲外)
     QVERIFY(notFoundError != ownerMismatchError);
     QVERIFY(notFoundError != expiredError);
     QVERIFY(ownerMismatchError != expiredError);
@@ -958,10 +1008,9 @@ void TestRestoreManifest::keepAliveExtendsTtlWithoutMutatingState()
     QCOMPARE(afterKeepAlive->processed, beforeKeepAlive->processed);
     QCOMPARE(afterKeepAlive->totalEntries, beforeKeepAlive->totalEntries);
 
-    // keepAlive呼び出し時点からさらにTTL弱だけ進める。
-    // advance()のtouchからの経過はttl/2 + (ttl-1) > ttlとなり、keepAliveが
-    // なければ本来ここで失効しているはずだが、keepAliveがtouchを更新したため
-    // まだttl-1しか経過しておらず到達可能なままである
+    // keepAlive呼び出し時点からさらにTTL弱だけ進める
+    // advance()のtouchからの経過はttl/2 + (ttl-1) > ttlとなり、keepAliveがなければ本来ここで失効しているはずだが、
+    // keepAliveがtouchを更新したため、まだttl-1しか経過しておらず到達可能なままである
     nowMs += ttl - 1;
     const auto stillAlive = registry.status(liveId, QStringLiteral(":3.1"), &error);
     QVERIFY(stillAlive.has_value());

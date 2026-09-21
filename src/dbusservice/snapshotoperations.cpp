@@ -10,7 +10,7 @@
 #include <QPointer>
 
 // glibのGDBusInterfaceInfo / GDBusObjectSkeletonは"signals"というメンバ名を持ち、Qtのsignalsマクロと衝突する
-// polkitヘッダの取り込み中だけマクロを外す
+// そのため、polkitヘッダの取り込み中だけマクロを外す
 #undef signals
 #include <polkit/polkit.h>
 #define signals Q_SIGNALS
@@ -38,6 +38,8 @@
 #include "snapshotoperations.h"
 #include "inputvalidator.h"
 #include "filesystemhelpers.h"
+#include "csvrecord.h"
+#include "restorevalidation.h"
 
 // 古いlibsnapper (7.x未満) には LIBSNAPPER_VERSION_AT_LEAST マクロが存在しない
 #ifndef LIBSNAPPER_VERSION_AT_LEAST
@@ -633,7 +635,7 @@ bool SnapshotOperations::sendManifestError(
 }
 
 /**
- * @brief manifest状態をD-Bus contractの小文字表現へ変換する
+ * @brief マニフェスト状態をD-Bus contractの小文字表現へ変換する
  * @param state 変換対象状態
  * @return contractで定義した状態文字列
  */
@@ -673,20 +675,19 @@ QString SnapshotOperations::restoreModeString(
 }
 
 /**
- * @brief RFC4180形式で必要なCSVフィールドをquoteする
- * @param フィールドquote対象文字列
+ * @brief RFC4180形式で必要なCSVフィールドをクォートする
+ * @param フィールドクォート対象文字列
  * @return CSVへ安全に埋め込めるフィールド
+ *
+ * 実装はqsnapper::csv::quoteField() (include/csvrecord.h) へ委譲する
+ * スナップショット一覧CSVと同じ実装を使うことでproducer/consumerの対称性を保証する
+ * 共有実装はCR / LFもクォート対象とする (旧実装の上位互換)
+ *
+ * クォート対象のconfigName / lastErrorは、それぞれ設定名検証とqSnapper内部生成のメッセージに由来し実際にはCR / LFを含まないため、出力は従来と同一である
  */
 QString SnapshotOperations::quoteRestoreStatusCsvField(const QString &field)
 {
-    if (!field.contains(QLatin1Char(','))
-            && !field.contains(QLatin1Char('"'))) {
-        return field;
-    }
-
-    QString escaped = field;
-    escaped.replace(QStringLiteral("\""), QStringLiteral("\"\""));
-    return QLatin1Char('"') + escaped + QLatin1Char('"');
+    return qsnapper::csv::quoteField(field);
 }
 
 /**
@@ -727,8 +728,8 @@ void SnapshotOperations::unmountRestoreExecution(
 }
 
 /**
- * @brief 指定manifestのmountを解除して実行contextを削除する
- * @param manifestId cleanup対象manifest id
+ * @brief 指定マニフェストのmountを解除して実行contextを削除する
+ * @param manifestId cleanup対象マニフェストID
  */
 void SnapshotOperations::cleanupRestoreExecution(const QString &manifestId)
 {
@@ -737,12 +738,15 @@ void SnapshotOperations::cleanupRestoreExecution(const QString &manifestId)
         return;
     }
 
-    const RestoreExecution context = execution.value();
-    unmountRestoreExecution(context);
+    // dirfdを先に閉じてからunmountを要求する
+    // 開いたfdがmount点をbusyのままにすると、検証失敗時の後片付けが
+    // mount leakに化けるため、順序を逆にしてはならない
     if (execution->snapshotDirFd >= 0) {
         ::close(execution->snapshotDirFd);
         execution->snapshotDirFd = -1;
     }
+    const RestoreExecution context = execution.value();
+    unmountRestoreExecution(context);
     m_restoreExecutions.erase(execution);
 }
 
@@ -765,7 +769,7 @@ void SnapshotOperations::restoreRootReadWriteSafetyNet()
 
 /**
  * @brief 終端計画の安全ネット・unmount・signal・registry削除を実行する
- * @param manifestId 終端したmanifest id
+ * @param manifestId 終端したマニフェストID
  * @param terminal 終端状態
  * @param messageText 終端理由
  */
@@ -778,11 +782,12 @@ void SnapshotOperations::finishRestorePlan(
 
     const auto execution = m_restoreExecutions.find(manifestId);
     if (execution != m_restoreExecutions.end()) {
-        unmountRestoreExecution(execution.value());
+        // cleanupRestoreExecutionと同じ順序規約: dirfdを先に閉じる
         if (execution->snapshotDirFd >= 0) {
             ::close(execution->snapshotDirFd);
             execution->snapshotDirFd = -1;
         }
+        unmountRestoreExecution(execution.value());
     }
 
     emit restorePlanFinished(manifestId,
@@ -796,7 +801,7 @@ void SnapshotOperations::finishRestorePlan(
 }
 
 /**
- * @brief owner消失時に予約済み実行とmountとmanifestを全て破棄する
+ * @brief owner消失時に予約済み実行とmountとマニフェストを全て破棄する
  * @param owner unregisterされたD-Bus unique name
  */
 void SnapshotOperations::handleRestoreOwnerUnregistered(const QString &owner)
@@ -848,7 +853,7 @@ void SnapshotOperations::purgeExpiredRestorePlans()
 }
 
 /**
- * @brief manifestを持たないownerをservice watcherから除外する
+ * @brief マニフェストを持たないownerをservice watcherから除外する
  */
 void SnapshotOperations::removeUnusedRestoreOwnerWatches()
 {
@@ -1254,15 +1259,21 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
     for (auto it = snapshots.begin(); it != snapshots.end(); ++it) {
         const snapper::Snapshot &snapshot = *it;
 
-        // 本CSVは「1行 = 1スナップショット」である
+        // 本CSVは、"1行 = 1スナップショット"である
         // description / cleanup / userdataは、snapper CLIやpluginからも書き込まれる信頼できない値であり、
         // 改行を混入されると行が割れて攻撃者の選んだnumberを持つ偽のスナップショット行が生まれる
+        //
         // 偽のnumberはクライアントからDeleteSnapshot / RollbackSnapshotへそのまま渡るため、1件でも検出したら一覧全体を失敗させる (fail-closed)
-        // カンマは列をずらすだけでnumberは壊さず、正当なdescriptionにも現れ得るため対象外とする
+        // カンマは拒否しない (正当なdescriptionにも現れ得る)
+        // 代わりにqsnapper::csv::quoteField()によるRFC 4180準拠のクォートで列ずれを防ぐ
+        //
+        // クォートは表示正しさのための修正であり、isRecordSafeText()による制御文字拒否の上に重ねる層であって代替ではない
         const QString cleanup     = QString::fromStdString(snapshot.getCleanup());
         const QString description = QString::fromStdString(snapshot.getDescription());
 
         // ユーザデータを key1=value1,key2=value2形式に変換
+        // 各ペアは個別のCSVフィールドであるため、ペア文字列を組み立てた上で1フィールド毎にクォートする
+        // (keyやvalueにカンマがあってもペアが2フィールドに割れない)
         const std::map<std::string, std::string> &userdata = snapshot.getUserdata();
         QStringList userdataPairs;
         bool recordSafe = qsnapper::security::isRecordSafeText(cleanup)
@@ -1274,7 +1285,7 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
                 recordSafe = false;
                 break;
             }
-            userdataPairs.append(key + "=" + value);
+            userdataPairs.append(qsnapper::csv::quoteField(key + "=" + value));
         }
         if (!recordSafe) {
             // 攻撃者が制御する値はログにもエラー本文にも載せない (ログ注入防止)
@@ -1293,8 +1304,9 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
         csv += dateTime.toString(Qt::ISODate) + ",";
 
         csv += QString::number(snapshot.getUid()) + ",";
-        csv += cleanup + ",";
-        csv += description + ",";
+        // cleanup / description / userdataペアはquoteField()でクォートする (前述の注記を参照)
+        csv += qsnapper::csv::quoteField(cleanup) + ",";
+        csv += qsnapper::csv::quoteField(description) + ",";
 
         csv += userdataPairs.join(",");
         csv += "\n";
@@ -1513,6 +1525,8 @@ QString SnapshotOperations::createSnapshotAuthorized(
         const QString cleanup     = QString::fromStdString(newSnapshot->getCleanup());
         const QString description = QString::fromStdString(newSnapshot->getDescription());
 
+        // ユーザデータを key1=value1,key2=value2形式に変換
+        // 各ペアは個別のCSVフィールドであるため、formatSnapshotToCSV()と同様にペア単位でクォートする
         const std::map<std::string, std::string> &userdata = newSnapshot->getUserdata();
         QStringList userdataPairs;
         bool recordSafe = qsnapper::security::isRecordSafeText(cleanup) && qsnapper::security::isRecordSafeText(description);
@@ -1523,11 +1537,11 @@ QString SnapshotOperations::createSnapshotAuthorized(
                 recordSafe = false;
                 break;
             }
-            userdataPairs.append(key + "=" + value);
+            userdataPairs.append(qsnapper::csv::quoteField(key + "=" + value));
         }
         if (!recordSafe) {
-            // スナップショット自体は作成済みである。応答だけを拒否し、
-            // 偽装可能なCSVをクライアントへ渡さない
+            // スナップショット自体は作成済みである
+            // 応答だけを拒否し、偽装可能なCSVをクライアントへ渡さない
             qWarning() << "Rejected snapshot creation reply: snapshot" << newSnapshot->getNum()
                        << "has metadata containing control characters";
             replyError(QDBusError::Failed, QStringLiteral("Snapshot metadata contains control characters"));
@@ -1535,6 +1549,7 @@ QString SnapshotOperations::createSnapshotAuthorized(
         }
 
         // 新しく作成されたスナップショットのCSV情報を返す
+        // クォートは表示正しさのための修正であり、isRecordSafeText()による制御文字拒否の上に重ねる層であって代替ではない
         QString csv = "number,type,pre-number,date,user,cleanup,description,userdata\n";
         csv += QString::number(newSnapshot->getNum()) + ",";
         csv += snapshotTypeToString(newSnapshot->getType()) + ",";
@@ -1544,8 +1559,8 @@ QString SnapshotOperations::createSnapshotAuthorized(
         csv += dateTime.toString(Qt::ISODate) + ",";
 
         csv += QString::number(newSnapshot->getUid()) + ",";
-        csv += cleanup + ",";
-        csv += description + ",";
+        csv += qsnapper::csv::quoteField(cleanup) + ",";
+        csv += qsnapper::csv::quoteField(description) + ",";
 
         csv += userdataPairs.join(",");
 
@@ -1969,14 +1984,12 @@ QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
             // パディングして出力フォーマットを整える
             statusStr = statusStr.leftJustified(5, '.');
 
-            // 本出力は「1行 = 1エントリ」の行指向テキストである。
-            // パスに改行を混入できると1エントリが複数行に割れ、2行目以降が
-            // 攻撃者の選んだstatusとパスを持つ独立エントリとしてクライアントに解釈される。
+            // 本出力は「1行 = 1エントリ」の行指向テキストである
+            // パスに改行を混入できると1エントリが複数行に割れ、2行目以降が攻撃者の選んだstatusとパスを持つ独立エントリとしてクライアントに解釈される
             // 検証した文字列をそのまま連結し、再取得した値を使わないこと
             const QString fileName = QString::fromStdString(file.getName());
             if (!qsnapper::security::isRecordSafeText(fileName)) {
-                // 該当エントリだけを落とすと、クライアントは欠落した一覧を完全な一覧として
-                // 扱ってしまうため、メソッド全体を失敗させる。
+                // 該当エントリだけを落とすと、クライアントは欠落した一覧を完全な一覧として扱ってしまうため、メソッド全体を失敗させる
                 // 攻撃者が制御するパスはログにもエラー本文にも載せない (ログ注入防止)
                 qWarning() << "Rejected file change listing: snapshot" << snapshotNumber
                            << "of config" << configName
@@ -2348,11 +2361,13 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
  * @brief ownerに束縛された空のstaged restore計画を開始する
  * @param configName Snapper設定名
  * @param snapshotNumber 復元元snapshot番号
+ * @param counterpartSnapshotNumber 比較相手のsnapshot番号 (0は現在のシステム)
  * @param restoreMode yastまたはdirect
- * @return 成功時manifest id
+ * @return 成功時マニフェストID
  */
 QString SnapshotOperations::BeginRestorePlan(const QString &configName,
                                              int snapshotNumber,
+                                             int counterpartSnapshotNumber,
                                              const QString &restoreMode)
 {
     resetIdleTimer();
@@ -2388,12 +2403,22 @@ QString SnapshotOperations::BeginRestorePlan(const QString &configName,
         return {};
     }
 
+    // 0は「現在のシステム」のsentinelである (snapshot vs currentのbulk経路が使用する)
+    // 正の値は復元元と別のsnapshotでなければならない
+    if (counterpartSnapshotNumber < 0
+            || (counterpartSnapshotNumber > 0
+                && counterpartSnapshotNumber == snapshotNumber)) {
+        replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Invalid counterpart snapshot number"));
+        return {};
+    }
+
     purgeExpiredRestorePlans();
 
     qsnapper::restore::ManifestError error =
         qsnapper::restore::ManifestError::None;
     const QString manifestId = m_restoreRegistry.createStaging(
-        owner, *cfg, snapshotNumber, mode, &error);
+        owner, *cfg, snapshotNumber, counterpartSnapshotNumber, mode, &error);
     if (manifestId.isEmpty()) {
         sendManifestError(error);
         return {};
@@ -2409,7 +2434,7 @@ QString SnapshotOperations::BeginRestorePlan(const QString &configName,
 
 /**
  * @brief staging計画へ検証済みentry chunkを原子的に追加する
- * @param manifestId owner束縛されたmanifest id
+ * @param manifestId owner束縛されたマニフェストID
  * @param filePaths 復元対象絶対path列
  * @param changeTypes pathと対応する変更種別列
  * @return chunk全体を追加できた場合true
@@ -2481,7 +2506,7 @@ bool SnapshotOperations::StageRestoreEntries(
 
 /**
  * @brief 計画をfreeze後に1度だけ認可し非同期実行を開始する
- * @param manifestId owner束縛されたmanifest id
+ * @param manifestId owner束縛されたマニフェストID
  * @return 実行開始を受理した場合true
  */
 bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
@@ -2568,7 +2593,7 @@ bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
 
 /**
  * @brief 認可が得られなかった復元計画をFailedで終端する
- * @param manifestId 対象manifest id
+ * @param manifestId 対象マニフェストID
  * @param owner 認可前にcaptureした呼び出し元unique name
  */
 void SnapshotOperations::failRestorePlanAuthorization(const QString &manifestId,
@@ -2589,8 +2614,10 @@ void SnapshotOperations::failRestorePlanAuthorization(const QString &manifestId,
  *   - 他の計画が実行を開始していないこと (復元はlive filesystemへの排他操作)
  *   - 計画がownerに束縛されたまま存在し、まだFrozenであること
  *     (cancel / TTL失効 / owner消失は全てここで弾かれる)
+ *   - 凍結済みの全entryが、サーバが(source, counterpart)から再構築した
+ *     権威ある比較と一致すること (クライアント申告のchangeTypeは信頼しない)
  *
- * @param manifestId owner束縛されたmanifest id
+ * @param manifestId owner束縛されたマニフェストID
  * @param owner 認可前にcaptureした呼び出し元unique name
  * @return 実行開始を受理した場合true
  */
@@ -2626,33 +2653,61 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
     execution.removeOnTypechanged = execution.useReflink;
 
     try {
-        snapper::Snapper *snapper = getSnapper(execution.configName);
+        // Snapperは構築時にsnapshot一覧をcaptureし外部追加を観測しないため、
+        // 権威ある比較の相手を解決する前に強制再生成する
+        // cache clearが先である理由は、古いSnapperを参照するComparisonが
+        // cacheへ残るのを防ぐためである
+        m_comparisonCache.clear();
+        snapper::Snapper *snapper = getSnapper(execution.configName,
+                                               /*forceReload=*/true);
         if (!snapper) {
             m_restoreRegistry.markFailed(
                 manifestId, owner,
                 QStringLiteral("Failed to initialize restore source"),
                 &error);
             replyError(QDBusError::Failed,
-                           QStringLiteral("Failed to prepare restore plan"));
+                            QStringLiteral("Failed to prepare restore plan"));
             return false;
         }
 
-        const snapper::Snapshots::const_iterator snapshot =
+        const snapper::Snapshots::const_iterator source =
             snapper->getSnapshots().find(execution.snapshotNumber);
-        if (snapshot == snapper->getSnapshots().end()) {
+        if (source == snapper->getSnapshots().end()) {
             m_restoreRegistry.markFailed(
                 manifestId, owner,
                 QStringLiteral("Restore source snapshot is unavailable"),
                 &error);
             replyError(QDBusError::Failed,
-                           QStringLiteral("Failed to prepare restore plan"));
+                            QStringLiteral("Failed to prepare restore plan"));
             return false;
         }
 
-        m_comparisonCache.clear();
-        snapshot->mountFilesystemSnapshot(true);
+        // 復元元と同じ向きで比較相手を解決する
+        // 0は「現在のシステム」のsentinelであり、正の値は番号で解決する
+        // (Pre/Postの順序を推測・並べ替えるとCREATEDとDELETEDが反転する)
+        snapper::Snapshots::const_iterator counterpart;
+        if (status->counterpartSnapshotNumber == 0) {
+            counterpart = snapper->getSnapshotCurrent();
+        }
+        else {
+            counterpart = snapper->getSnapshots().find(
+                status->counterpartSnapshotNumber);
+        }
+        if (counterpart == snapper->getSnapshots().end()
+                || counterpart == source) {
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Restore comparison counterpart is unavailable"),
+                &error);
+            replyError(QDBusError::Failed,
+                            QStringLiteral("Failed to prepare restore plan"));
+            return false;
+        }
+
+        source->mountFilesystemSnapshot(true);
         execution.mounted = true;
-        const QString snapshotDir = QString::fromStdString(snapshot->snapshotDir());
+        const QString snapshotDir =
+            QString::fromStdString(source->snapshotDir());
         m_restoreExecutions.insert(manifestId, execution);
         m_restoreExecutions[manifestId].snapshotDir = snapshotDir;
 
@@ -2664,15 +2719,51 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         if (snapshotDirFd < 0) {
             qWarning() << "Staged restore: Failed to pin snapshot dir:"
                        << strerror(errno);
-            cleanupRestoreExecution(manifestId);
-            m_restoreRegistry.markFailed(
-                manifestId, owner,
-                QStringLiteral("Failed to pin restore source"), &error);
-            replyError(QDBusError::Failed,
-                           QStringLiteral("Failed to prepare restore plan"));
+            failRestorePlanPreflight(manifestId, owner, &error);
             return false;
         }
         m_restoreExecutions[manifestId].snapshotDirFd = snapshotDirFd;
+
+        // pin済みfdの同一性判定に使うstatを確定させる
+        struct stat pinnedStat = {};
+        if (::fstat(snapshotDirFd, &pinnedStat) != 0) {
+            qWarning() << "Staged restore: Failed to stat pinned snapshot dir:"
+                       << strerror(errno);
+            failRestorePlanPreflight(manifestId, owner, &error);
+            return false;
+        }
+
+        // executor起動前の最終検証
+        // 権威ある比較の再構築と全entryの照合、pin済みdirfdの同一性確認が
+        // 全て通るまで復元は1バイトもlive filesystemへ書き込まない
+        try {
+            if (!validateFrozenRestorePlan(manifestId, owner, snapper,
+                                           source, counterpart, snapshotDir,
+                                           pinnedStat)) {
+                failRestorePlanPreflight(manifestId, owner, &error);
+                return false;
+            }
+        }
+        catch (const snapper::Exception &) {
+            // 例外本文にはlibsnapperが扱ったfilesystem pathが含まれ得るため記録しない
+            // (攻撃者由来の名前をログへ持ち込まない)
+            qWarning() << "Staged restore: Authoritative comparison reconstruction"
+                       << "failed";
+            failRestorePlanPreflight(manifestId, owner, &error);
+            return false;
+        }
+        catch (const std::exception &) {
+            qWarning() << "Staged restore: Authoritative comparison reconstruction"
+                       << "failed unexpectedly";
+            failRestorePlanPreflight(manifestId, owner, &error);
+            return false;
+        }
+        catch (...) {
+            qWarning() << "Staged restore: Authoritative comparison reconstruction"
+                       << "failed unexpectedly";
+            failRestorePlanPreflight(manifestId, owner, &error);
+            return false;
+        }
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Staged restore preparation failed:" << e.what();
@@ -2681,7 +2772,7 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             manifestId, owner, QStringLiteral("Failed to prepare restore source"),
             &error);
         replyError(QDBusError::Failed,
-                       QStringLiteral("Failed to prepare restore plan"));
+                        QStringLiteral("Failed to prepare restore plan"));
         return false;
     }
     catch (const std::exception &e) {
@@ -2692,7 +2783,7 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             manifestId, owner, QStringLiteral("Failed to prepare restore source"),
             &error);
         replyError(QDBusError::Failed,
-                       QStringLiteral("Failed to prepare restore plan"));
+                        QStringLiteral("Failed to prepare restore plan"));
         return false;
     }
     catch (...) {
@@ -2702,7 +2793,7 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             manifestId, owner, QStringLiteral("Failed to prepare restore source"),
             &error);
         replyError(QDBusError::Failed,
-                       QStringLiteral("Failed to prepare restore plan"));
+                        QStringLiteral("Failed to prepare restore plan"));
         return false;
     }
 
@@ -2720,9 +2811,118 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
 }
 
 /**
+ * @brief 凍結済み計画をサーバ再構築の権威ある比較と照合して検証する
+ * @param manifestId owner束縛されたマニフェストID
+ * @param owner 認可前にcaptureした呼び出し元unique name
+ * @param snapper 検証済み設定のSnapperインスタンス
+ * @param source 復元元snapshotのiterator
+ * @param counterpart 比較相手snapshotのiterator
+ * @param snapshotDir pin済みdirfdが指すsnapshot directoryのpath
+ * @param pinnedStat pin済みdirfdに対するfstatの結果
+ * @return 計画全体が権威ある比較と一致し同一性確認も通った場合true
+ *
+ * @note 本検証はbest-effortの整合性検査であり、tamper-proofなセキュリティ境界ではない
+ *       snapper::Comparisonはread-only snapshot同士ではlibsnapper保存のfilelistキャッシュを
+ *       優先して読み、そのキャッシュは無エスケープの行指向形式であるため、
+ *       改行を含むファイル名により偽entryが混入し得る (詳細はrestorevalidation.hの注記)
+ *       キャッシュを公開APIから無効化できないため本経路は塞げない
+ *       実際の防護は実行段のisConfirmedAbsentAt()とsource種別判定が担い、
+ *       こちらは認可時にpinしたdirfdから直接算出するためキャッシュの影響を受けない
+ */
+bool SnapshotOperations::validateFrozenRestorePlan(
+    const QString &manifestId,
+    const QString &owner,
+    snapper::Snapper *snapper,
+    const snapper::Snapshots::const_iterator &source,
+    const snapper::Snapshots::const_iterator &counterpart,
+    const QString &snapshotDir,
+    const struct stat &pinnedStat)
+{
+    QHash<QString, QString> authoritative;
+
+    {
+        // ローカルの非キャッシュComparison (mount=false)
+        // mount=falseでもinitialize()はstatus setを計算するため、
+        // getName() / getPreToPostStatus()は使用可能である
+        // blockを抜けるまでにComparisonを使い切り、cleanupやexecutor起動の
+        // 前に確実に破棄する
+        snapper::Comparison comparison(snapper, source, counterpart, false);
+
+        const snapper::Files &files = comparison.getFiles();
+        authoritative.reserve(static_cast<qsizetype>(files.size()));
+        for (const snapper::File &file : files) {
+            // 権威名は復号可能性と制御文字の両方を検証する
+            // libsnapperのfilelistキャッシュは無エスケープの行指向形式であり、
+            // 改行を含む名前はキャッシュ再読込時に偽entryとして混入し得る
+            // 攻撃者が制御する名前はログにもエラー本文にも載せない
+            QString authoritativeName;
+            if (!qsnapper::restore::decodeAuthoritativeRestoreName(
+                    file.getName(), &authoritativeName)) {
+                qWarning() << "Staged restore: Authoritative comparison contains"
+                           << "an unusable path name";
+                return false;
+            }
+
+            if (!qsnapper::restore::registerAuthoritativeRestoreEntry(
+                    &authoritative, authoritativeName,
+                    file.getPreToPostStatus())) {
+                // 同一パスに異なる期待型が潰れて衝突した場合は検証不能であり、
+                // 計画全体をfail-closedさせる
+                qWarning() << "Staged restore: Authoritative entries contain"
+                           << "conflicting change types for one path";
+                return false;
+            }
+        }
+
+        qsnapper::restore::ManifestError validationError =
+            qsnapper::restore::ManifestError::None;
+        if (!qsnapper::restore::validateFrozenEntriesAgainstAuthoritative(
+                m_restoreRegistry, manifestId, owner, authoritative,
+                &validationError)) {
+            qWarning() << "Staged restore: Frozen plan does not match the"
+                       << "authoritative comparison";
+            return false;
+        }
+    }
+
+    // pin済みfdと、pathを改めて開いた結果が同一inodeであることを確認する
+    // (st_devとst_inoの両方) 異なっていれば、検証対象と実行対象のスナップショットが入れ替わっているため実行を拒否する
+    // 実行は以降もpin済みfdのみを通る
+    struct stat currentStat = {};
+    if (::stat(snapshotDir.toUtf8().constData(), &currentStat) != 0
+            || currentStat.st_dev != pinnedStat.st_dev
+            || currentStat.st_ino != pinnedStat.st_ino) {
+        qWarning() << "Staged restore: Snapshot directory identity changed"
+                   << "during validation";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief commit時preflight失敗を計画のfail-closed終端へ落とし込む
+ * @param manifestId 検証に失敗したマニフェストID
+ * @param owner 認可前にcaptureした呼び出し元unique name
+ * @param error registryのmarkFailedへ渡すエラー格納先
+ */
+void SnapshotOperations::failRestorePlanPreflight(
+    const QString &manifestId,
+    const QString &owner,
+    qsnapper::restore::ManifestError *error)
+{
+    cleanupRestoreExecution(manifestId);
+    m_restoreRegistry.markFailed(
+        manifestId, owner, QStringLiteral("Restore plan validation failed"),
+        error);
+    qWarning() << "Staged restore: Restore plan failed commit-time validation";
+    replyError(QDBusError::Failed,
+               QStringLiteral("Restore plan validation failed"));
+}
+
+/**
  * @brief owner確認済みRunning計画のidle loopを再開する
- * @param manifestId owner束縛されたmanifest id
- * @return nudgeを受理した場合true
+ * @param manifestId owner束縛されたマニフェストID
+ * @return nudgeを受理した場合: true
  */
 bool SnapshotOperations::ContinueRestorePlan(const QString &manifestId)
 {
@@ -2745,8 +2945,8 @@ bool SnapshotOperations::ContinueRestorePlan(const QString &manifestId)
 
 /**
  * @brief owner確認済み計画状態をRFC4180 escaping済みCSVで返す
- * @param manifestId owner束縛されたmanifest id
- * @return ManifestStatus field順のCSV、失敗時空文字列
+ * @param manifestId owner束縛されたマニフェストID
+ * @return ManifestStatusフィールド順のCSV、失敗時空文字列
  */
 QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
 {
@@ -2782,7 +2982,7 @@ QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
 
 /**
  * @brief owner確認済み非終端計画へ境界cancellationを要求する
- * @param manifestId owner束縛されたmanifest id
+ * @param manifestId owner束縛されたマニフェストID
  * @return cancellationを受理した場合true
  */
 bool SnapshotOperations::CancelRestorePlan(const QString &manifestId)
@@ -3360,7 +3560,8 @@ bool SnapshotOperations::copySymlink(const QString &src, const QString &dst)
 /**
  * @brief live pathをroot配下で再解決して一時的な兄弟pathへ退避する
  * @param path 退避対象の絶対path
- * @param movedPath 実際の退避先。対象不存在時は空文字列
+ * @param movedPath 実際の退避先
+ *                  対象不存在時は空文字列
  * @return 退避または対象不存在時true
  */
 bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
@@ -3396,7 +3597,7 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
 
 /**
  * @brief executor callbackから単一の凍結済みentryをlive filesystemへ適用する
- * @param manifestId 実行contextを選択するmanifest id
+ * @param manifestId 実行contextを選択するマニフェストID
  * @param entry 適用対象entry
  * @return entry全体の適用成功時true
  */

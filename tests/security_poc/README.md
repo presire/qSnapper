@@ -24,6 +24,8 @@ security_poc/
 ├── poc_quit_dos.sh                       (C-6: issue 5b, Quit()無認証DoS)
 ├── poc_change_record_injection.sh        (C-8: 改行注入によるパス偽装 --> 任意ファイル削除)
 ├── poc_change_record_injection.cpp       (同PoCの実行体。実ソースをリンクする)
+├── poc_restore_plan_tamper.sh            (C-9: staged restoreのcommit時changeType改ざん)
+├── poc_restore_plan_tamper.cpp           (同PoCの実行体。実ソースをリンクする)
 └── results/                              (各実行の結果ログ保存先)
 ```
 
@@ -74,6 +76,51 @@ BASELINE=1 ./tests/security_poc/poc_change_record_injection.sh build
 - `STAGE 4b` ガード有りでの削除 — 復元元に存在するため拒否され victim が残ること  
 - `STAGE 4c` 正当な created (復元元に不在) は従来どおり削除されること  
 
+## C-9: staged restoreのcommit時changeType改ざん (poc_restore_plan_tamper)
+
+**VMもシステムD-Busも実snapper設定も不要** (`isolated_root_dbus_env.sh` の
+user namespace内scratch rootに全操作を閉じる点はC-8と同じ)。  
+
+staged restore計画のentry (`path, changeType`) をクライアントが改ざんした場合、
+サーバがcommit時に (source, counterpart) から権威ある比較を再構築して
+全entryを照合する層の有効性を検証する。pre/postの2つの「snapshot」木から
+現実の差分を計算し、本番と同一の純粋関数群 (`qsnapper::restore::restorevalidation`) と
+実security core (`RestoreManifestRegistry` / `RestorePlanExecutor` /
+`qsnapper::security::*`) を用いる。
+
+| 層 | 実装 |
+|---|---|
+| 状態ビット -> changeType写像 / path正規化 / 権威あるmap構築 | `qsnapper::restore::restorevalidation` |
+| 凍結済み計画の保持とbounded slice読み出し | `RestoreManifestRegistry` |
+| created削除前の復元元存在確認 | `qsnapper::security::isConfirmedAbsentAt()` |
+| 実際の削除 | `qsnapper::security::safeRemoveAllBeneathRoot()` |
+
+### ビルド
+
+```bash
+cmake -S . -B build -DQSNAPPER_BUILD_TESTS=ON
+cmake --build build --target qsnapper_restore_plan_tamper_poc
+```
+
+### 実行
+
+```bash
+./tests/security_poc/poc_restore_plan_tamper.sh build
+```
+
+exit 0が期待値である。
+
+### 出力の読み方
+
+- `STAGE 2a` modified を created へ改ざんした計画がcommit時に拒否され、
+  live木が1バイトも変化しないこと  
+- `STAGE 2b` 差分に現れないパスをmodifiedと偽った計画 (snapshot内容の
+  live上書き攻撃) も拒否されること  
+- `STAGE 3` 正当なRevert to Pre計画 (pre --> post向き) は検証を通過し、
+  実行後も差分外のパスが保持されること (過剰拒否がないことの証明)  
+- `STAGE 4` 正当なRe-apply to Post計画 (post --> pre向き) も検証を通過すること
+  (CREATED / DELETEDが向きに応じて正しく反転すること)  
+
 ## 実行手順
 
 ### 1. ベースライン取得 (修正前 v1.3.2 で実行)
@@ -121,6 +168,7 @@ sudo -u bob python3 /tmp/qsnapper_poc/poc_polkit_race.py --iterations 1000
 | C-5 | #5a  | P0-4 (RestoreFiles統合 + openat) |
 | C-6 | #5b  | P1-6 (Quit削除) + P2 (.conf per-member ACL) |
 | C-8 | —    | シリアライズのfail-closed (isRecordSafeText) + created削除前の復元元存在確認 (isConfirmedAbsentAt) |
+| C-9 | —    | commit時の権威ある比較再構築と全entry照合 (restorevalidation) + counterpartSnapshotNumber導入 |
 
 > **削除済PoC** (テスト計画書 [テスト計画]SUSE_Security_Fix_テスト項目.md と同期):  
 > - **C-2** (poc_config_traversal.sh): B-2 + `tests/integration/test_configname_dbus.py` で完全カバー  

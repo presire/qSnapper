@@ -250,6 +250,8 @@ For Pre/Post snapshot pairs, the Snapshot Overview offers four views:
 
 Checkboxes and the restore button are available only in the two restorable views. The two "vs current system" views are read-only and display the hint "View only. Choose a Pre / Post difference above to restore."  
 
+The two restorable views list only the entries that still differ from the current system. Entries whose current state already matches the restore target — for example files you have already restored, or files the package manager removed again after the Post snapshot — are hidden, because restoring them would have no effect. When every entry has been filtered out, the tree shows "No differences with snapshot". This filtering never widens the restore scope: the list always remains a subset of the Pre/Post difference, and files changed outside that range are never added to it.  
+
 After a successful restore, the view automatically switches to the differences between the restore target snapshot and the current system, so the result is visible immediately. Files changed outside the Pre/Post range (such as files you created manually after the Post snapshot) still appear there, which confirms they were left untouched.  
 
 For Pre/Post pairs the restore button is labelled "Restore Selected to #<number>". Restoring only touches files that actually differ between the Pre and Post snapshots; files changed outside that range (for example, files you created manually after the Post snapshot) are left untouched. This matches the upstream `snapper undochange <pre>..<post>` behaviour.  

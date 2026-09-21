@@ -265,6 +265,12 @@ private slots:
     void failedComparisonReplacementClearsRestorableEntries();
     void staleComparisonLoadResponseIsIgnored();
     void staleFileDiffResponseIsIgnored();
+    void filteredComparisonHidesEntriesUnchangedAgainstCurrentSystem();
+    void filteredComparisonMatchesDirectoriesRegardlessOfTrailingSlash();
+    void filteredComparisonWithoutRemainingEntriesReportsNoChangesWithoutError();
+    void filteredComparisonCurrentComparisonFailureSkipsSecondRequest();
+    void staleFilteredComparisonResponseIsIgnored();
+    void filteredComparisonPreservesRestoreSourceAndChangeTypes();
 
 private:
     void prepareStagedRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
@@ -1113,6 +1119,214 @@ void TestFileChangeModel::staleFileDiffResponseIsIgnored()
     model.completeStringReply(0, true,
                               QStringLiteral("snapshot=pre\n---DIFF_SEPARATOR---\npre diff"));
     QCOMPARE(diffSpy.count(), 1);
+}
+
+/**
+ * @brief 復元元と現在のシステムの間に差異が無いエントリが表示対象から除外される
+ */
+void TestFileChangeModel::filteredComparisonHidesEntriesUnchangedAgainstCurrentSystem()
+{
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+
+    model.loadChangesBetween(100, 101, true, true);
+
+    // 2つの比較は直列に要求する。並行させるとPolkit認可のキャッシュ前に2件の認可要求が飛び、
+    // 認証プロンプトが二重に出る可能性があるため
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+    QCOMPARE(model.pendingStringReplies.at(0).methodName, QStringLiteral("GetFileChanges"));
+    QCOMPARE(model.pendingStringReplies.at(0).arguments.at(1).toInt(), 100);
+
+    model.completeStringReply(0, true,
+                              QStringLiteral("+.... /usr/bin/newtool\n"
+                                             "c.... /etc/ld.so.cache\n"
+                                             "-.... /etc/removed.conf\n"
+                                             "+.... /etc/manually-added.conf\n"));
+
+    // 対カレント比較を先に完了させることで、サービス側の単一スロットComparisonキャッシュには
+    // 「比較元 --> 比較先」が最後に残り、後続のファイル差分取得が再利用できる
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+    QCOMPARE(model.pendingStringReplies.at(0).methodName, QStringLiteral("GetFileChangesBetween"));
+    QCOMPARE(model.pendingStringReplies.at(0).arguments.at(1).toInt(), 100);
+    QCOMPARE(model.pendingStringReplies.at(0).arguments.at(2).toInt(), 101);
+    QCOMPARE(model.rowCount(), 0);
+    QVERIFY(model.isLoading());
+
+    model.completeStringReply(0, true,
+                              QStringLiteral("+.... /usr/bin/newtool\n"
+                                             "c.... /etc/ld.so.cache\n"
+                                             "-.... /etc/removed.conf\n"
+                                             "c.... /etc/already-restored.conf\n"));
+
+    QVERIFY(!model.isLoading());
+    QVERIFY(model.hasChanges());
+
+    // 既に復元済みの /etc/already-restored.conf は消え、
+    // Pre <--> Post の範囲外にある /etc/manually-added.conf は追加されない
+    QCOMPARE(model.rowCount(), 3);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/usr/bin/newtool"));
+    QCOMPARE(model.data(model.index(1, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/ld.so.cache"));
+    QCOMPARE(model.data(model.index(2, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/removed.conf"));
+
+    // 変更種別は「比較元 --> 比較先」のまま保持される
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::ChangeTypeRole).toInt(),
+             static_cast<int>(FileChangeItem::Created));
+    QCOMPARE(model.data(model.index(2, 0), FileChangeModel::ChangeTypeRole).toInt(),
+             static_cast<int>(FileChangeItem::Deleted));
+}
+
+/**
+ * @brief 末尾スラッシュ表記の揺れがあっても同一パスとして突き合わせる
+ */
+void TestFileChangeModel::filteredComparisonMatchesDirectoriesRegardlessOfTrailingSlash()
+{
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+
+    model.loadChangesBetween(100, 101, true, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+
+    model.completeStringReply(0, true,
+                              QStringLiteral("c.... /etc/conf.d\n"
+                                             "c.... /etc/other.conf\n"));
+    QCOMPARE(model.rowCount(), 0);
+    QVERIFY(model.isLoading());
+
+    // 同じディレクトリが末尾スラッシュ付きで報告されても突き合わせに成功する
+    model.completeStringReply(0, true,
+                              QStringLiteral("c.... /etc/conf.d/\n"
+                                             "c.... /etc/unchanged.conf\n"));
+
+    QVERIFY(!model.isLoading());
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/conf.d/"));
+}
+
+/**
+ * @brief 全エントリが除外された場合、エラーではなく「差分なし」として扱う
+ */
+void TestFileChangeModel::filteredComparisonWithoutRemainingEntriesReportsNoChangesWithoutError()
+{
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+
+    model.loadChangesBetween(100, 101, true, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+
+    // 現在のシステムは既に復元元と一致しているため、対カレント比較は空を返す
+    model.completeStringReply(0, true, QString());
+    model.completeStringReply(0, true, QStringLiteral("c.... /etc/already-restored.conf\n"));
+
+    QCOMPARE(errorSpy.count(), 0);
+    QVERIFY(!model.isLoading());
+    QVERIFY(!model.hasChanges());
+    QCOMPARE(model.rowCount(), 0);
+}
+
+/**
+ * @brief 対カレント比較が失敗した場合、2スナップショット比較を要求せず一覧も復活させない
+ */
+void TestFileChangeModel::filteredComparisonCurrentComparisonFailureSkipsSecondRequest()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    model.setRestorePlanTransportForTesting(&fake);
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+
+    model.loadChangesBetween(100, 101, true, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+
+    model.completeStringReply(0, false, QString(), QStringLiteral("current comparison failed"));
+
+    // フィルタ集合が得られない以上、2スナップショット比較の結果だけで一覧を作ってはならない
+    QCOMPARE(errorSpy.count(), 1);
+    QVERIFY(model.pendingStringReplies.isEmpty());
+    QVERIFY(!model.isLoading());
+    QCOMPARE(model.rowCount(), 0);
+    QVERIFY(!model.hasChanges());
+
+    model.setItemChecked(QStringLiteral("/etc/installed.conf"), true);
+    QVERIFY(!model.restoreCheckedItemsFrom(100));
+    QVERIFY(fake.calls.isEmpty());
+}
+
+/**
+ * @brief 比較条件の切替後に届いた古いフィルタ応答がモデルへ公開されない
+ */
+void TestFileChangeModel::staleFilteredComparisonResponseIsIgnored()
+{
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+
+    model.loadChangesBetween(100, 101, true, true);
+    model.loadChangesBetween(101, 100, true, true);
+    QCOMPARE(model.pendingStringReplies.size(), 2);
+
+    // 新しい要求 (index 1) を完了させ、その後続要求も完了させる
+    model.completeStringReply(1, true, QStringLiteral("-.... /etc/post-only.conf\n"));
+    QCOMPARE(model.pendingStringReplies.size(), 2);
+    QCOMPARE(model.pendingStringReplies.at(1).methodName, QStringLiteral("GetFileChangesBetween"));
+    model.completeStringReply(1, true, QStringLiteral("-.... /etc/post-only.conf\n"));
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/post-only.conf"));
+
+    // 古い要求 (index 0) の応答は世代が一致しないため破棄され、後続要求も発行されない
+    QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
+    model.completeStringReply(0, true, QStringLiteral("+.... /etc/stale.conf\n"));
+
+    QCOMPARE(errorSpy.count(), 0);
+    QVERIFY(model.pendingStringReplies.isEmpty());
+    QCOMPARE(model.rowCount(), 1);
+    QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
+             QStringLiteral("/etc/post-only.conf"));
+}
+
+/**
+ * @brief 絞り込み後も復元元は比較の第1オペランドのままで、変更種別も書き換わらない
+ */
+void TestFileChangeModel::filteredComparisonPreservesRestoreSourceAndChangeTypes()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    model.setConfigName(QStringLiteral("root"));
+    model.setUseDirectRestore(true);
+    model.setRestoreBatchSize(100);
+    model.setRestorePlanTransportForTesting(&fake);
+
+    model.loadChangesBetween(100, 101, true, true);
+    QCOMPARE(model.pendingStringReplies.size(), 1);
+    model.completeStringReply(0, true,
+                              QStringLiteral("+.... /etc/installed.conf\n"
+                                             "-.... /etc/removed.conf\n"));
+    model.completeStringReply(0, true,
+                              QStringLiteral("+.... /etc/installed.conf\n"
+                                             "-.... /etc/removed.conf\n"
+                                             "c.... /etc/already-restored.conf\n"));
+
+    QCOMPARE(model.rowCount(), 2);
+    model.setItemChecked(QStringLiteral("/etc/installed.conf"), true);
+    model.setItemChecked(QStringLiteral("/etc/removed.conf"), true);
+
+    // 絞り込みで除外済みのパスは、明示的にチェックしてもモデルに存在しないため送出されない
+    model.setItemChecked(QStringLiteral("/etc/already-restored.conf"), true);
+
+    QVERIFY(model.restoreCheckedItemsFrom(100));
+    QCOMPARE(fake.calls.first().snapshotNumber, 100);
+
+    fake.completeAllPendingOk();
+
+    const FakeRestorePlanTransport::Call &stageCall = fake.calls.at(1);
+    QCOMPARE(stageCall.paths, QStringList({QStringLiteral("/etc/installed.conf"),
+                                           QStringLiteral("/etc/removed.conf")}));
+    QCOMPARE(stageCall.changeTypes, QStringList({QStringLiteral("created"),
+                                                 QStringLiteral("deleted")}));
 }
 
 QTEST_APPLESS_MAIN(TestFileChangeModel)

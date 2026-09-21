@@ -6,6 +6,7 @@
 #include <QVariantList>
 #include <QString>
 #include <QStringList>
+#include <QSet>
 #include <QVector>
 #include <QDBusInterface>
 #include <functional>
@@ -198,11 +199,12 @@ private:
      */
     struct ComparisonContext
     {
-        QString configName;         // Snapper設定名
-        bool betweenMode = false;   // 2スナップショット比較モードかどうか
-        int number1 = 0;            // 比較元スナップショット番号 (この比較での復元元)
-        int number2 = 0;            // 比較先スナップショット番号 (対カレント比較では0)
-        bool flatMode = false;      // フラット表示として構築したかどうか
+        QString configName;                             // Snapper設定名
+        bool betweenMode = false;                       // 2スナップショット比較モードかどうか
+        int number1 = 0;                                // 比較元スナップショット番号 (この比較での復元元)
+        int number2 = 0;                                // 比較先スナップショット番号 (対カレント比較では0)
+        bool flatMode = false;                          // フラット表示として構築したかどうか
+        bool filterUnchangedAgainstCurrent = false;     // 現在のシステムと差異が無いエントリを除外したかどうか
 
         bool operator==(const ComparisonContext &other) const;  // 比較条件が完全に一致するかを返す
     };
@@ -213,6 +215,8 @@ private:
     int m_compareNumber1;                   // 比較元スナップショット番号 (任意2スナップショット比較モード用)
     int m_compareNumber2;                   // 比較先スナップショット番号 (同上)
     bool m_betweenMode;                     // 任意2スナップショット比較モードかどうか
+    bool m_filterUnchangedAgainstCurrent = false;   // 現在のシステムと差異が無いエントリを表示対象から除外するかどうか
+                                                    // (2スナップショット比較モードでのみ意味を持つ)
 
     // 公開済みエントリの由来と要求世代
     ComparisonContext m_loadedComparison;   // 現在モデルへ公開済みのエントリの比較条件
@@ -258,6 +262,13 @@ private:
 private:
     // モデル管理
     void clearModel();                                                                      // モデルデータをクリアする
+
+    // 変更一覧の読み込み
+    void requestFilteredChangeList(const ComparisonContext &requestedContext,               // フィルタ付きの変更一覧を2要求で読み込む
+                                   quint64 requestGeneration);
+    void publishFilteredChangeList(const ComparisonContext &requestedContext,               // 絞り込んだ変更一覧をモデルへ公開する
+                                   const QString &betweenOutput,
+                                   const QString &currentOutput);
 
     // アイテム取得・変換
     FileChangeItem *getItem(const QModelIndex &index) const;                                // インデックスからアイテムを取得する
@@ -317,8 +328,34 @@ protected:
      * @param number1 比較元スナップショット番号 (このモードでの復元元)
      * @param number2 比較先スナップショット番号
      * @param flat trueの場合はフラットモデルを構築する
+     * @param filterUnchangedAgainstCurrent trueの場合、number1と現在のシステムの間に差異が無いエントリを表示対象から除外する
      */
-    void setComparisonRange(int number1, int number2, bool flat);     // 2スナップショット比較の条件を設定する
+    void setComparisonRange(int number1, int number2, bool flat,      // 2スナップショット比較の条件を設定する
+                            bool filterUnchangedAgainstCurrent = false);
+
+    /**
+     * @brief 変更レコード出力から正規化済みパスの集合を抽出する
+     *
+     * パスの末尾スラッシュを除去してから格納するため、ディレクトリが
+     * 一方の比較でのみ末尾スラッシュ付きで報告されても同一パスとして扱える。
+     *
+     * @param changeOutput Snapperの変更出力
+     * @return 出力に含まれる正規化済みパスの集合
+     */
+    static QSet<QString> collectChangedPaths(const QString &changeOutput);  // 変更出力から正規化済みパス集合を抽出する
+
+    /**
+     * @brief 変更レコード出力を、許可パス集合に含まれる行だけへ絞り込む
+     *
+     * 行の内容 (ステータスフラグと変更種別) は一切書き換えない。
+     * 返す行は必ず入力changeOutputの部分集合であり、エントリが追加されることはない。
+     *
+     * @param changeOutput 絞り込み対象のSnapperの変更出力
+     * @param allowedPaths 表示を許可する正規化済みパスの集合
+     * @return 絞り込み後の変更出力
+     */
+    static QString filterChangeOutputByPaths(const QString &changeOutput,   // 変更出力を許可パス集合で絞り込む
+                                             const QSet<QString> &allowedPaths);
 
     /**
      * @brief 文字列応答のD-Bus呼び出しを非同期で発行する
@@ -377,7 +414,22 @@ public:
 
     // 公開メソッド
     Q_INVOKABLE void loadChanges();                                                     // 対カレントの変更を読み込む
-    Q_INVOKABLE void loadChangesBetween(int number1, int number2, bool flat = false);   // 2つのスナップショット間の変更を読み込む
+
+    /**
+     * @brief 2つのスナップショット間の変更を読み込む
+     *
+     * filterUnchangedAgainstCurrentを指定すると、number1と現在のシステムの間に差異が無いエントリ
+     * (既に復元済みなど) を表示対象から除外する。除外はnumber1 --> number2の結果に対する絞り込みで
+     * あり、エントリのchangeTypeは書き換えないため、復元の向きは影響を受けない。
+     *
+     * @param number1 比較元スナップショット番号 (このモードでの復元元)
+     * @param number2 比較先スナップショット番号
+     * @param flat trueの場合はフラットモデルを構築する
+     * @param filterUnchangedAgainstCurrent trueの場合、現在のシステムと差異が無いエントリを除外する
+     */
+    Q_INVOKABLE void loadChangesBetween(int number1, int number2,                       // 2つのスナップショット間の変更を読み込む
+                                        bool flat = false,
+                                        bool filterUnchangedAgainstCurrent = false);
     Q_INVOKABLE void getFileDiffAndDetails(const QString &filePath);                    // 指定ファイルの差分と詳細を取得する
     Q_INVOKABLE void setItemChecked(const QString &filePath, bool checked);             // 指定パスの選択状態を設定する
     Q_INVOKABLE QStringList getCheckedItems() const;                                    // 選択済みパスの一覧を返す

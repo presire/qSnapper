@@ -79,16 +79,19 @@ BorderedDialog {
 
     // 現在のviewModeに対応する向きでPre <--> Post差分を読み込む
     // 第1引数が復元元になるため、復元先スナップショットを先頭に置いて向きを揃える
+    // 第4引数のtrueで、復元元と現在のシステムの間に差異が無いエントリ (既に復元済みなど) を非表示にする
     function loadPrePostDiff() {
         if (root.viewMode === root.viewRevertToPre) {
             fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
                                                root.postSnapshotNumber,
-                                               false)
+                                               false,
+                                               true)
         }
         else {
             fileChangeModel.loadChangesBetween(root.postSnapshotNumber,
                                                root.preSnapshotNumber,
-                                               false)
+                                               false,
+                                               true)
         }
     }
 
@@ -246,7 +249,7 @@ BorderedDialog {
 
         Label {
             text: root.prePostDiffMode
-                  ? qsTr("Shows only the changes made between the Pre and Post snapshots. Restoring reverts just those changes; files modified afterwards are left untouched.")
+                  ? qsTr("Shows only the changes made between the Pre and Post snapshots that still differ from the current system. Entries already matching the restore target are hidden. Restoring reverts just those changes; files modified afterwards are left untouched.")
                   : qsTr("Shows the system state after applying the specified snapshot")
             wrapMode: Text.WordWrap
             Layout.fillWidth: true

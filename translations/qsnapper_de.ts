@@ -83,53 +83,54 @@
 <context>
     <name>FileChangeModel</name>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="717"/>
+        <location filename="../src/filechangemodel.cpp" line="750"/>
         <source>The restore service stopped unexpectedly</source>
         <translation>Der Wiederherstellungsdienst wurde unerwartet beendet</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="931"/>
+        <location filename="../src/filechangemodel.cpp" line="1175"/>
+        <location filename="../src/filechangemodel.cpp" line="1193"/>
         <source>Invalid parameters for restore</source>
         <translation>Ungültige Parameter für die Wiederherstellung</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="939"/>
-        <location filename="../src/filechangemodel.cpp" line="1744"/>
+        <location filename="../src/filechangemodel.cpp" line="1183"/>
+        <location filename="../src/filechangemodel.cpp" line="2025"/>
         <source>File changes are still loading</source>
         <translation>Dateiänderungen werden noch geladen</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="946"/>
+        <location filename="../src/filechangemodel.cpp" line="1200"/>
         <source>D-Bus connection failed</source>
         <translation>D-Bus-Verbindung fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="987"/>
+        <location filename="../src/filechangemodel.cpp" line="1241"/>
         <source>Restore failed: %1</source>
         <translation>Wiederherstellung fehlgeschlagen: %1</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="1726"/>
+        <location filename="../src/filechangemodel.cpp" line="2067"/>
         <source>No files selected for restoration</source>
         <translation>Es sind keine Dateien zur Wiederherstellung ausgewählt</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="1854"/>
+        <location filename="../src/filechangemodel.cpp" line="2177"/>
         <source>Failed to begin restore plan</source>
         <translation>Wiederherstellungsplan konnte nicht gestartet werden</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="1880"/>
+        <location filename="../src/filechangemodel.cpp" line="2203"/>
         <source>Restore plan has no manifest id</source>
         <translation>Wiederherstellungsplan hat keine Manifest-ID</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="1922"/>
+        <location filename="../src/filechangemodel.cpp" line="2245"/>
         <source>Failed to stage restore entries</source>
         <translation>Wiederherstellungseinträge konnten nicht bereitgestellt werden</translation>
     </message>
     <message>
-        <location filename="../src/filechangemodel.cpp" line="1965"/>
+        <location filename="../src/filechangemodel.cpp" line="2288"/>
         <source>Failed to commit restore plan</source>
         <translation>Wiederherstellungsplan konnte nicht übernommen werden</translation>
     </message>
@@ -145,17 +146,22 @@
 <context>
     <name>RestorePreviewDialog</name>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="115"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="118"/>
         <source>Snapshot Overview</source>
         <translation>Schnappschuss Übersicht</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="240"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="246"/>
         <source>Root Filesystem</source>
         <translation>Root Dateisystem</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="247"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="252"/>
+        <source>Shows only the changes made between the Pre and Post snapshots that still differ from the current system. Entries already matching the restore target are hidden. Restoring reverts just those changes; files modified afterwards are left untouched.</source>
+        <translation>Zeigt nur die Änderungen zwischen den Vorher- und Nachher-Schnappschüssen, die sich noch vom aktuellen System unterscheiden. Einträge, die bereits dem Wiederherstellungsziel entsprechen, werden ausgeblendet. Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dateien bleiben unverändert.</translation>
+    </message>
+    <message>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="253"/>
         <source>Shows the system state after applying the specified snapshot</source>
         <translation>Zeigt den Systemzustand nach Anwendung des angegebenen Snapshots an.</translation>
     </message>
@@ -176,148 +182,147 @@
         <translation type="vanished">Kein Unterschied gefunden.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="463"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="469"/>
         <source>No differences with snapshot</source>
         <translation>Keine Unterschiede zum Snapshot</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="708"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="714"/>
         <source>View only. Choose a Pre / Post difference above to restore.</source>
         <translation>Nur Ansicht. Wählen Sie oben einen Unterschied zwischen Vorher und Nachher aus, um ihn wiederherzustellen.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="720"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="726"/>
         <source>Cancel</source>
         <translation>Abbrechen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="729"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="735"/>
         <source>Restore Selected to #%1</source>
         <translation>Auswahl zu #%1 wiederherstellen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="730"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="736"/>
         <source>Restore Selected</source>
         <translation>Ausgewählte wiederherstellen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="745"/>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1002"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="751"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1008"/>
         <source>Confirmation</source>
         <translation>Besätigung</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="766"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="772"/>
         <source>Restore selected files/directories?</source>
         <translation>Ausgewählte Dateien/Verzeichnisse wiederherstellen?</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="772"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="778"/>
         <source>Only the selected entries of the Pre #%1 / Post #%2 difference will be restored to the snapshot #%3 state. Files changed outside this range are left untouched.</source>
         <translation>Nur die ausgewählten Einträge aus dem Unterschied zwischen Vorher #%1 und Nachher #%2 werden auf den Zustand von Schnappschuss #%3 zurückgesetzt. Außerhalb dieses Bereichs geänderte Dateien bleiben unverändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="776"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="782"/>
         <source>This will restore selected files and directories to snapshot #%1 state.</source>
         <translation>Die ausgewählten Dateien und Verzeichnisse werden auf den Zustand des Schnappschuss #%1 zurückgesetzt.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="783"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="789"/>
         <source>Warning: This may overwrite current files.</source>
         <translation>Warnung: Vorhandene Dateien können überschrieben werden.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="852"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="858"/>
         <source>Restoring Files</source>
         <translation>Dateien wiederherstellen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="938"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="944"/>
         <source>Restoring files. Please wait...</source>
         <translation>Dateien wiederherstellen. Bitte warten...</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="954"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="960"/>
         <source>Progress: %1 / %2</source>
         <translation>Fortschritt: %1 / %2</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1062"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1068"/>
         <source>Success</source>
         <translation>Erfolg</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1081"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1087"/>
         <source>File/directory restoration completed.</source>
         <translation>Datei-/Verzeichniswiederherstellung abgeschlossen.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1088"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1102"/>
         <source>No more differences with snapshot.</source>
         <translation>Keine Unterschiede mehr zum Snapshot.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1088"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1094"/>
         <source>Switched to the differences between snapshot #%1 and the current system.</source>
         <translation>Zur Ansicht der Unterschiede zwischen Schnappschuss #%1 und dem aktuellen System gewechselt.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="792"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="798"/>
         <source>Restore Options</source>
         <translation>Wiederherstellungsoptionen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="246"/>
         <source>Shows only the changes made between the Pre and Post snapshots. Restoring reverts just those changes; files modified afterwards are left untouched.</source>
-        <translation>Zeigt nur die Änderungen zwischen den Vorher- und Nachher-Schnappschüssen. Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dateien bleiben unverändert.</translation>
+        <translation type="vanished">Zeigt nur die Änderungen zwischen den Vorher- und Nachher-Schnappschüssen. Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dateien bleiben unverändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="263"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="269"/>
         <source>Revert to Pre #%1: undo the changes made between Pre #%1 and Post #%2</source>
         <translation>Zu Vorher #%1 zurückkehren: Änderungen zwischen Vorher #%1 und Nachher #%2 rückgängig machen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="272"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="278"/>
         <source>Re-apply to Post #%2: redo the changes made between Pre #%1 and Post #%2</source>
         <translation>Auf Nachher #%2 erneut anwenden: Änderungen zwischen Vorher #%1 und Nachher #%2 wiederholen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="281"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="287"/>
         <source>Show differences between snapshot #%1 (Pre) and the current system (view only)</source>
         <translation>Unterschiede zwischen Schnappschuss #%1 (Vorher) und dem aktuellen System anzeigen (nur Ansicht)</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="288"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="294"/>
         <source>Show differences between snapshot #%1 (Post) and the current system (view only)</source>
         <translation>Unterschiede zwischen Schnappschuss #%1 (Nachher) und dem aktuellen System anzeigen (nur Ansicht)</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="802"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="808"/>
         <source>Method:</source>
         <translation>Methode:</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="806"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="812"/>
         <source>Direct copy (fast)</source>
         <translation>Direktkopie (schnell)</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="811"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="817"/>
         <source>YaST compatible</source>
         <translation>YaST-kompatibel</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="821"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="827"/>
         <source>Batch size:</source>
         <translation>Stapelgröße:</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="832"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="838"/>
         <source>files per batch</source>
         <translation>Dateien pro Stapel</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="224"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="230"/>
         <source>Loading file changes. Please wait...</source>
         <translation>Dateiänderungen werden geladen. Bitte warten...</translation>
     </message>
@@ -342,63 +347,63 @@
         <translation type="vanished">Unterschiede zwischen Schnappschuss #%1 (Nachher) und dem aktuellen System anzeigen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="518"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="524"/>
         <source>New file was created.</source>
         <translation>Neue Datei wurde erstellt.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="519"/>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="522"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="525"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="528"/>
         <source>File content was modified.</source>
         <translation>Dateiinhalt wurde geändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="520"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="526"/>
         <source>File was removed.</source>
         <translation>Datei wurde entfernt.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="521"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="527"/>
         <source>File type was changed.</source>
         <translation>Dateityp wurde geändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="539"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="545"/>
         <source>Select a file to view details</source>
         <translation>Wählen Sie eine Datei aus, um Details anzuzeigen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="572"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="578"/>
         <source>Loading file details...</source>
         <translation>Dateidetails werden geladen...</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="582"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="588"/>
         <source>File Status</source>
         <translation>Dateistatus</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="610"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="616"/>
         <source>File mode was changed from &apos;%1&apos; to &apos;%2&apos;.</source>
         <translation>Dateimodus wurde von &apos;%1&apos; auf &apos;%2&apos; geändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="623"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="629"/>
         <source>File user ownership was changed from &apos;%1&apos; to &apos;%2&apos;.</source>
         <translation>Datei-Benutzereigentümer wurde von &apos;%1&apos; auf &apos;%2&apos; geändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="636"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="642"/>
         <source>File group ownership was changed from &apos;%1&apos; to &apos;%2&apos;.</source>
         <translation>Datei-Gruppeneigentümer wurde von &apos;%1&apos; auf &apos;%2&apos; geändert.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="678"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="684"/>
         <source>Remove</source>
         <translation>Entfernen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="679"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="685"/>
         <source>Restore</source>
         <translation>Wiederherstellen</translation>
     </message>
@@ -411,37 +416,37 @@
         <translation type="vanished">Wiederherstellen von Nachher #%1</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1022"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1028"/>
         <source>Remove this file from the current system?</source>
         <translation>Diese Datei vom aktuellen System entfernen?</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1023"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1029"/>
         <source>Restore this file from snapshot #%1?</source>
         <translation>Diese Datei aus Schnappschuss #%1 wiederherstellen?</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1040"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1046"/>
         <source>Warning: This file will be deleted from the current system.</source>
         <translation>Warnung: Diese Datei wird vom aktuellen System gelöscht.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1041"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1047"/>
         <source>Warning: The current file will be overwritten.</source>
         <translation>Warnung: Die aktuelle Datei wird überschrieben.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1103"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1117"/>
         <source>Restore Failed</source>
         <translation>Wiederherstellung fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1122"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1136"/>
         <source>Failed to restore some or all files.</source>
         <translation>Einige oder alle Dateien konnten nicht wiederhergestellt werden.</translation>
     </message>
     <message>
-        <location filename="../qml/components/RestorePreviewDialog.qml" line="1129"/>
+        <location filename="../qml/components/RestorePreviewDialog.qml" line="1143"/>
         <source>The files may already be in sync with the snapshot, or an error occurred during restoration. Check the system log for details.</source>
         <translation>Die Dateien sind möglicherweise bereits mit dem Schnappschuss synchronisiert, oder es ist ein Fehler bei der Wiederherstellung aufgetreten. Überprüfen Sie das Systemprotokoll für Details.</translation>
     </message>

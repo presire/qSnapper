@@ -784,6 +784,7 @@ void FileChangeModel::setSnapshotNumber(int number)
     // snapshotNumber を明示セットした場合は「対カレント比較」モードに戻す
     m_betweenMode = false;
     m_flatMode    = false;
+    m_filterUnchangedAgainstCurrent = false;
     if (!(previousContext == currentComparisonContext())) {
         invalidateLoadedComparison();
     }
@@ -813,6 +814,12 @@ void FileChangeModel::loadChanges()
 
     m_loading = true;
     emit loadingChanged();
+
+    // 現在のシステムと差異が無いエントリを除外する場合は、2つの比較結果を合流させてから公開する
+    if (requestedContext.filterUnchangedAgainstCurrent) {
+        requestFilteredChangeList(requestedContext, requestGeneration);
+        return;
+    }
 
     const auto requestTimer = QSharedPointer<QElapsedTimer>::create();
     requestTimer->start();
@@ -868,6 +875,108 @@ void FileChangeModel::loadChanges()
 }
 
 /**
+ * @brief 現在のシステムと差異が無いエントリを除いた変更一覧を読み込む
+ *
+ * 「比較元 --> 現在のシステム」を先に取得し、その応答を受け取ってから「比較元 --> 比較先」を
+ * 取得して、後者を前者のパス集合で絞り込んでからモデルへ公開する。
+ * 公開されるエントリは常に後者の部分集合であり、エントリの変更種別も書き換えないため、
+ * この絞り込みが復元対象を広げることはない。
+ *
+ * 2つの比較を並行させず直列化するのには理由が2つある。
+ * 1. 両メソッドは同じPolkit action (view-diff) で個別に認可される。並行させると、初回の認可が
+ *    キャッシュされる前に2件の認可要求が同時に飛び、認証プロンプトが二重に出る可能性がある。
+ * 2. サービス側のComparisonキャッシュは1件しか保持しないため、直列化することで
+ *    「比較元 --> 比較先」のComparisonが最後に残ることが確定し、後続のファイル差分取得が再利用できる。
+ * サービス側の比較処理自体は単一のイベントループ上で直列に実行されるため、
+ * 並行要求にしても所要時間は短縮されない。
+ *
+ * @param requestedContext この要求を発行した時点の比較条件
+ * @param requestGeneration この要求の世代
+ */
+void FileChangeModel::requestFilteredChangeList(const ComparisonContext &requestedContext,
+                                                quint64 requestGeneration)
+{
+    const auto requestTimer = QSharedPointer<QElapsedTimer>::create();
+    requestTimer->start();
+
+    QVariantList currentArguments;
+    currentArguments << requestedContext.configName << requestedContext.number1;
+
+    requestStringReply(QStringLiteral("GetFileChanges"), currentArguments,
+                       [this, requestedContext, requestGeneration, requestTimer](bool ok,
+                                                                                   const QString &currentOutput,
+                                                                                   const QString &error) {
+        // 条件変更または後続要求の開始後に届いた応答は、モデルへ絶対に公開しない。
+        // 後続の「比較元 --> 比較先」要求もここで打ち切る。
+        if (requestGeneration != m_loadRequestGeneration
+                || !(requestedContext == currentComparisonContext())) {
+            return;
+        }
+
+        if (!ok) {
+            qWarning() << "Failed to get file changes via D-Bus:" << error;
+            m_loading = false;
+            emit loadingChanged();
+            emit errorOccurred(QStringLiteral("Failed to get file changes: %1").arg(error));
+            return;
+        }
+
+        QVariantList betweenArguments;
+        betweenArguments << requestedContext.configName << requestedContext.number1 << requestedContext.number2;
+
+        requestStringReply(QStringLiteral("GetFileChangesBetween"), betweenArguments,
+                           [this, requestedContext, requestGeneration, requestTimer, currentOutput](bool betweenOk,
+                                                                                                      const QString &betweenOutput,
+                                                                                                      const QString &betweenError) {
+            if (requestGeneration != m_loadRequestGeneration
+                    || !(requestedContext == currentComparisonContext())) {
+                return;
+            }
+
+            if (!betweenOk) {
+                qWarning() << "Failed to get file changes via D-Bus:" << betweenError;
+                m_loading = false;
+                emit loadingChanged();
+                emit errorOccurred(QStringLiteral("Failed to get file changes: %1").arg(betweenError));
+                return;
+            }
+
+            publishFilteredChangeList(requestedContext, betweenOutput, currentOutput);
+            qInfo() << "FileChangeModel timing: dbusWait=" << requestTimer->elapsed() << "ms";
+        });
+    });
+}
+
+/**
+ * @brief 絞り込んだ変更一覧をモデルへ公開する
+ *
+ * 絞り込みの結果が空になるのは「比較元と現在のシステムに差異がもう無い = 全て復元済み」という
+ * 正常な状態であるため、エラーとして扱わず「差分なし」表示へ落とす。
+ *
+ * @param requestedContext この要求を発行した時点の比較条件
+ * @param betweenOutput 比較元 --> 比較先 の変更一覧
+ * @param currentOutput 比較元 --> 現在のシステム の変更一覧
+ */
+void FileChangeModel::publishFilteredChangeList(const ComparisonContext &requestedContext,
+                                                const QString &betweenOutput,
+                                                const QString &currentOutput)
+{
+    const QSet<QString> pathsDifferingFromCurrent = collectChangedPaths(currentOutput);
+    const QString filteredOutput = filterChangeOutputByPaths(betweenOutput, pathsDifferingFromCurrent);
+
+    setupModelData(filteredOutput, requestedContext.flatMode);
+
+    const bool hasChanges = m_rootItem != nullptr && m_rootItem->childCount() > 0;
+    if (m_hasChanges != hasChanges) {
+        m_hasChanges = hasChanges;
+        emit hasChangesChanged();
+    }
+
+    m_loading = false;
+    emit loadingChanged();
+}
+
+/**
  * @brief 任意の2つのスナップショット間のファイル変更を読み込む
  *
  * num1 --> num2 の差分を取得し、ツリー構造を構築する
@@ -877,15 +986,17 @@ void FileChangeModel::loadChanges()
  * @param number1 比較元スナップショット番号 (このモードでの復元元)
  * @param number2 比較先スナップショット番号
  * @param flat trueの場合はフラットモデルを構築する
+ * @param filterUnchangedAgainstCurrent trueの場合、number1と現在のシステムの間に差異が無いエントリを除外する
  */
-void FileChangeModel::loadChangesBetween(int number1, int number2, bool flat)
+void FileChangeModel::loadChangesBetween(int number1, int number2, bool flat,
+                                         bool filterUnchangedAgainstCurrent)
 {
     if (m_configName.isEmpty() || number1 <= 0 || number2 <= 0) {
         emit errorOccurred("Invalid config name or snapshot numbers");
         return;
     }
 
-    setComparisonRange(number1, number2, flat);
+    setComparisonRange(number1, number2, flat, filterUnchangedAgainstCurrent);
     loadChanges();
 }
 
@@ -895,14 +1006,17 @@ void FileChangeModel::loadChangesBetween(int number1, int number2, bool flat)
  * @param number1 比較元スナップショット番号 (このモードでの復元元)
  * @param number2 比較先スナップショット番号
  * @param flat trueの場合はフラットモデルを構築する
+ * @param filterUnchangedAgainstCurrent trueの場合、number1と現在のシステムの間に差異が無いエントリを除外する
  */
-void FileChangeModel::setComparisonRange(int number1, int number2, bool flat)
+void FileChangeModel::setComparisonRange(int number1, int number2, bool flat,
+                                         bool filterUnchangedAgainstCurrent)
 {
     const ComparisonContext previousContext = currentComparisonContext();
     m_betweenMode     = true;
     m_flatMode        = flat;  // true = フラット (比較ダイアログ), false = ツリー (復元プレビュー)
     m_compareNumber1  = number1;
     m_compareNumber2  = number2;
+    m_filterUnchangedAgainstCurrent = filterUnchangedAgainstCurrent;
 
     // 対カレント比較へ戻った際の既定表示に備えて、比較先スナップショットを保持しておく
     // 復元元としては使用しない (このモードの復元元はcurrentRestoreSourceNumber()がm_compareNumber1を返す)
@@ -924,7 +1038,8 @@ bool FileChangeModel::ComparisonContext::operator==(const ComparisonContext &oth
         && betweenMode == other.betweenMode
         && number1     == other.number1
         && number2     == other.number2
-        && flatMode    == other.flatMode;
+        && flatMode    == other.flatMode
+        && filterUnchangedAgainstCurrent == other.filterUnchangedAgainstCurrent;
 }
 
 /**
@@ -942,6 +1057,7 @@ FileChangeModel::ComparisonContext FileChangeModel::currentComparisonContext() c
     context.number1     = m_betweenMode ? m_compareNumber1 : m_snapshotNumber;
     context.number2     = m_betweenMode ? m_compareNumber2 : 0;
     context.flatMode    = m_flatMode;
+    context.filterUnchangedAgainstCurrent = m_betweenMode && m_filterUnchangedAgainstCurrent;
     return context;
 }
 
@@ -1453,6 +1569,63 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
             << "ms detachedTreeConstruction=" << detachedTreeConstructionMs
             << "ms modelResetPublication=" << modelPublicationMs
             << "ms records=" << changes.size();
+}
+
+/**
+ * @brief 変更レコード出力から正規化済みパスの集合を抽出する
+ *
+ * @param changeOutput Snapperの変更出力
+ * @return 出力に含まれる正規化済みパスの集合
+ */
+QSet<QString> FileChangeModel::collectChangedPaths(const QString &changeOutput)
+{
+    QSet<QString> paths;
+    const QStringList lines = changeOutput.split('\n', Qt::SkipEmptyParts);
+    paths.reserve(lines.size());
+
+    for (const QString &line : lines) {
+        ChangeInfo info;
+        if (!parseChangeRecord(line, &info)) {
+            continue;
+        }
+        // parseChangeRecord()が末尾スラッシュを除去するため、ディレクトリが一方の比較でのみ
+        // 末尾スラッシュ付きで報告されても同一パスとして突き合わせられる。
+        paths.insert(info.path);
+    }
+
+    return paths;
+}
+
+/**
+ * @brief 変更レコード出力を、許可パス集合に含まれる行だけへ絞り込む
+ *
+ * @param changeOutput 絞り込み対象のSnapperの変更出力
+ * @param allowedPaths 表示を許可する正規化済みパスの集合
+ * @return 絞り込み後の変更出力
+ */
+QString FileChangeModel::filterChangeOutputByPaths(const QString &changeOutput,
+                                                   const QSet<QString> &allowedPaths)
+{
+    if (allowedPaths.isEmpty()) {
+        return QString();
+    }
+
+    QString filteredOutput;
+    filteredOutput.reserve(changeOutput.size());
+
+    const QStringList lines = changeOutput.split('\n', Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        ChangeInfo info;
+        // 行はステータスフラグごと元のまま転記する。変更種別を書き換えないことで、
+        // 復元時のcreated (削除) / deleted (コピー) の解釈が絞り込み前と完全に一致する。
+        if (!parseChangeRecord(line, &info) || !allowedPaths.contains(info.path)) {
+            continue;
+        }
+        filteredOutput += line;
+        filteredOutput += QLatin1Char('\n');
+    }
+
+    return filteredOutput;
 }
 
 /**

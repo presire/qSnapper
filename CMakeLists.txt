@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.8 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.9 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -21,13 +21,13 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml QuickControls2 DBus LinguistTools)
 find_package(PolkitQt6-1 REQUIRED)
 
-# D-Busサービスはpolkitの非同期認可API (polkit_authority_check_authorization) を
-# 直接使用する。polkit-qt6-1の非同期APIはシングルトンのシグナル1本しか持たず、
-# 完了通知に要求識別子が含まれないため、同時実行時にどのD-Bus呼び出しの結果か
-# を判別できず、rootサービスでは認可の取り違えに繋がるため使用しない。
-# polkit-gobject-1の.pcはopenSUSE/Fedoraではpolkit-develに含まれる一方、
-# Debianではlibpolkit-gobject-1-devが必須 (libpolkit-qt6-1-devはこれに依存しないため
-# ビルド環境では明示的なインストールが必要。CIのDebianジョブの依存リストを参照)
+# D-Busサービスはpolkitの非同期認可API (polkit_authority_check_authorization) を直接使用する
+#
+# polkit-qt6-1の非同期APIはシングルトンのシグナル1本しか持たず、完了通知に要求識別子が含まれないため、
+# 同時実行時にどのD-Bus呼び出しの結果かを判別できず、rootサービスでは認可の取り違えに繋がるため使用しない
+#
+# polkit-gobject-1の.pcはSUSE / Fedoraではpolkit-develに含まれる一方、Debianではlibpolkit-gobject-1-devが必須
+# (libpolkit-qt6-1-devはこれに依存しないため、ビルド環境では明示的なインストールが必要。CIのDebianジョブの依存リストを参照)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POLKIT_GOBJECT REQUIRED IMPORTED_TARGET polkit-gobject-1)
 
@@ -69,7 +69,7 @@ target_include_directories(qsnapper PRIVATE
 )
 
 # 注意: NO_IMPORT_SCANは共有ライブラリQt向け
-# QMLプラグインは実行時にロードされるため、finalize段でのスキャン/リンクは不要
+# QMLプラグインは実行時にロードされるため、finalize段でのスキャン / リンクは不要
 # 静的Qtビルドに切り替える場合はこのオプションを外すこと
 qt6_add_qml_module(qsnapper
     URI QSnapper
@@ -142,6 +142,7 @@ set(DBUS_SERVICE_SOURCES
     src/dbusservice/inputvalidator.cpp
     src/dbusservice/filesystemhelpers.cpp
     src/dbusservice/restoremanifest.cpp
+    src/dbusservice/restorevalidation.cpp
     src/dbusservice/restoreplanexecutor.cpp
 )
 
@@ -150,12 +151,18 @@ set(DBUS_SERVICE_HEADERS
     src/dbusservice/inputvalidator.h
     src/dbusservice/filesystemhelpers.h
     src/dbusservice/restoremanifest.h
+    src/dbusservice/restorevalidation.h
     src/dbusservice/restoreplanexecutor.h
 )
 
 qt6_add_executable(qsnapper-dbus-service
     ${DBUS_SERVICE_SOURCES}
     ${DBUS_SERVICE_HEADERS}
+)
+
+# include/csvrecord.hをスナップショット一覧CSVのproducer/consumer両方から参照する
+target_include_directories(qsnapper-dbus-service PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(qsnapper-dbus-service PRIVATE
@@ -183,7 +190,7 @@ else()
     set(SNAPPER_VERSION_MINOR 0)
 endif()
 
-# ログ出力ディレクトリ (-DQSNAPPER_LOG_DIR=/path/to/dir で変更可能)
+# ログ出力ディレクトリ (""-DQSNAPPER_LOG_DIR=/path/to/dir"で変更可能)
 set(QSNAPPER_LOG_DIR "/var/log/qsnapper" CACHE PATH "Log directory for qsnapper-dbus-service")
 message(STATUS "Log directory: ${QSNAPPER_LOG_DIR}")
 
@@ -248,8 +255,7 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qsnapper.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
 )
 
-# 注意:
-# qt_import_qml_plugins / qt_finalize_executableは静的Qtビルド向け
+# 注意: qt_import_qml_plugins / qt_finalize_executableは静的Qtビルド向け
 # 共有ライブラリのQtでは、qt6_standard_project_setup() + qt6_add_executable() が自動でfinalizeするため明示呼び出しは不要
 # (呼ぶと存在しないプラグインターゲットのリンク警告が発生する)
 

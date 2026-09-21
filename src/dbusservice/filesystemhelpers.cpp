@@ -38,7 +38,8 @@ namespace qsnapper::security {
         /**
          * @brief close()漏れを防ぐためのfd所有ガード (RAII)
          *
-         * コピー禁止。エラー路径を含めて全てのfd解放を保証する
+         * コピー禁止
+         * エラー路径を含めて全てのfd解放を保証する
          */
         class UniqueFd {
         public:
@@ -97,9 +98,8 @@ namespace qsnapper::security {
         /**
          * @brief dirfd相対パスを検証してUTF-8へ符号化する
          *
-         * 空パス・絶対パス・"." / ".." 成分・制御文字を拒否する。
-         * openat系は絶対パスを渡すとdirfdを無視するため、pin済みdirfdから
-         * 意図しない位置へ解決されるのを入力段階で防ぐ
+         * 空パス・絶対パス・"." / ".." 成分・制御文字を拒否する
+         * openat系は絶対パスを渡すとdirfdを無視するため、pin済みdirfdから意図しない位置へ解決されるのを入力段階で防ぐ
          *
          * @param relativePath 検証対象の相対パス
          * @param encodedOut 符号化結果の格納先 (省略可)
@@ -470,6 +470,227 @@ namespace qsnapper::security {
 
             return true;
         }
+
+        /**
+         * @brief dirfd基点で親成分列をopenat2(RESOLVE_IN_ROOT)で解決する (内部用)
+         *
+         * snapshot dirfdは"/"のbtrfs snapshotであるため、"var/run -> /run" のような
+         * 絶対symlinkはsnapshot内で正当な存在であり、chrootと同じくroot内解決が要求される
+         * RESOLVE_IN_ROOTはカーネル内でroot外への逸脱を構造的に不可能にする
+         * RESOLVE_NO_MAGICLINKSにより/proc系のmagic linkも追従しない
+         *
+         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+         * @param parentComponents leaf成分を除いた親成分列 (非空)
+         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
+         */
+        int openParentDirectoryInRootAtOpenat2(int dirFd, const QStringList &parentComponents)
+        {
+            struct open_how how = {};
+            how.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+            how.resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS;
+
+            const QByteArray encodedParent =
+                    parentComponents.join(QLatin1Char('/')).toUtf8();
+
+            constexpr int MAX_EAGAIN_RETRIES = 3;
+            for (int attempt = 0; attempt < MAX_EAGAIN_RETRIES; ++attempt) {
+                const long result = ::syscall(SYS_openat2, dirFd, encodedParent.constData(),
+                                              &how, sizeof(how));
+                if (result >= 0) {
+                    return static_cast<int>(result);
+                }
+                if (errno != EAGAIN || attempt == MAX_EAGAIN_RETRIES - 1) {
+                    return -1;
+                }
+            }
+            return -1;
+        }
+
+        /**
+         * @brief dirfd基点で親成分列を手動のin-root解決で辿る (openat2非対応カーネル用フォールバック)
+         *
+         * RESOLVE_IN_ROOT相当の解決をfdスタックで再現する:
+         *  - 各成分はfstatat(AT_SYMLINK_NOFOLLOW)で検査してからopenat(O_NOFOLLOW)で開く
+         *  - symlinkのtargetはroot内で解釈し、絶対targetならrootへ巻き戻す
+         *  - ".." はroot自身ではrootに留まる ("/.." が"/"であるのと同じ挙動)
+         * このため絶対symlink targetがdirfdの外へ解決されることは構造的にない
+         *
+         * symlink targetは生バイト列であり、非UTF-8のファイル名を含み得る
+         * work listをQByteArrayで保持することで、検証済み成分もtarget成分もバイト単位で扱う
+         *
+         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+         * @param parentComponents leaf成分を除いた親成分列 (非空)
+         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
+         */
+        int openParentDirectoryInRootAtNoFollow(int dirFd, const QStringList &parentComponents)
+        {
+            // symlink連鎖とwork listの無制限成長に対する上限 (カーネルの40回相当)
+            constexpr int MAX_SYMLINK_FOLLOWS = 40;
+            constexpr int MAX_PROCESSED_COMPONENTS = 4096;
+
+            const int rootFd = ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (rootFd < 0) {
+                return -1;
+            }
+
+            // stack[0]はrootであり、決してpopしない
+            QList<int> stack;
+            stack.append(rootFd);
+
+            auto closeStack = [&stack]() {
+                for (int fd : stack) {
+                    ::close(fd);
+                }
+                stack.clear();
+            };
+
+            int symlinkBudget = MAX_SYMLINK_FOLLOWS;
+            int processedCount = 0;
+            QList<QByteArray> workList;
+            for (const QString &component : parentComponents) {
+                workList.append(component.toUtf8());
+            }
+
+            while (!workList.isEmpty()) {
+                if (++processedCount > MAX_PROCESSED_COMPONENTS) {
+                    closeStack();
+                    errno = ELOOP;
+                    return -1;
+                }
+
+                const QByteArray component = workList.takeFirst();
+                if (component == ".") {
+                    continue;
+                }
+                if (component == "..") {
+                    // RESOLVE_IN_ROOT相当: root自身の".."はrootに留まる
+                    if (stack.size() > 1) {
+                        ::close(stack.takeLast());
+                    }
+                    continue;
+                }
+
+                struct stat st;
+                if (::fstatat(stack.last(), component.constData(), &st,
+                              AT_SYMLINK_NOFOLLOW) < 0) {
+                    const int savedErrno = errno;
+                    closeStack();
+                    errno = savedErrno;
+                    return -1;
+                }
+
+                if (S_ISLNK(st.st_mode)) {
+                    if (--symlinkBudget < 0) {
+                        closeStack();
+                        errno = ELOOP;
+                        return -1;
+                    }
+
+                    // 固定PATH_MAXで切り詰めないよう、必要に応じてバッファを拡張する
+                    QByteArray buffer(256, '\0');
+                    for (;;) {
+                        const ssize_t len = ::readlinkat(stack.last(), component.constData(),
+                                                         buffer.data(),
+                                                         static_cast<size_t>(buffer.size()));
+                        if (len < 0) {
+                            const int savedErrno = errno;
+                            closeStack();
+                            errno = savedErrno;
+                            return -1;
+                        }
+                        if (len < buffer.size()) {
+                            buffer.truncate(static_cast<qsizetype>(len));
+                            break;
+                        }
+                        buffer.resize(buffer.size() * 2);
+                    }
+
+                    // 空targetはカーネルの解決でもENOENTとなる
+                    if (buffer.isEmpty()) {
+                        closeStack();
+                        errno = ENOENT;
+                        return -1;
+                    }
+
+                    // 絶対targetはdirfdの外ではなくrootへ巻き戻す (RESOLVE_IN_ROOTの解決)
+                    if (buffer.startsWith('/')) {
+                        while (stack.size() > 1) {
+                            ::close(stack.takeLast());
+                        }
+                    }
+
+                    // target成分を解決済みパスの先頭へ挿入する ("//" は単一の区切りとして扱う)
+                    const QList<QByteArray> targetComponents =
+                            buffer.split('/');
+                    for (int i = targetComponents.size() - 1; i >= 0; --i) {
+                        if (!targetComponents.at(i).isEmpty()) {
+                            workList.prepend(targetComponents.at(i));
+                        }
+                    }
+                    continue;
+                }
+
+                const int nextFd = ::openat(stack.last(), component.constData(),
+                                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                if (nextFd < 0) {
+                    const int savedErrno = errno;
+                    closeStack();
+                    errno = savedErrno;
+                    return -1;
+                }
+                stack.append(nextFd);
+            }
+
+            // 成功: 最上位fdの所有を呼び出し側へ移し、残りを全てcloseする
+            const int resultFd = stack.takeLast();
+            closeStack();
+            return resultFd;
+        }
+
+        /**
+         * @brief dirfd基点で親ディレクトリをin-root解決により開き、leaf名も返す
+         *
+         * 検証済みrelativePathと同一の入力から親dirfdとleaf名を導出することで、
+         * 「検証した値」と「操作する対象」の一致 (TOCTOUなし) を保証する
+         *
+         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+         * @param components 検証済み相対パスの成分列 (非空)
+         * @param leafNameOut 最終成分名の返却先 (省略可)
+         * @param forceNoOpenat2 openat2を使わずフォールバック経路を強制するか (テスト用)
+         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
+         */
+        int openParentDirectoryInRootAt(int dirFd, const QStringList &components,
+                                        QByteArray *leafNameOut,
+                                        bool forceNoOpenat2 = false)
+        {
+            if (dirFd < 0 || components.isEmpty()) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            if (leafNameOut) {
+                *leafNameOut = components.constLast().toUtf8();
+            }
+
+            // leafが1成分のみの場合、親はdirfd自身
+            // 呼び出し側が常にcloseできるように、所有fdを複製して返す
+            if (components.size() == 1) {
+                return ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            }
+
+            const QStringList parentComponents =
+                    components.mid(0, components.size() - 1);
+
+            if (!forceNoOpenat2) {
+                const int parentFd =
+                        openParentDirectoryInRootAtOpenat2(dirFd, parentComponents);
+                if (parentFd >= 0 || errno != ENOSYS) {
+                    return parentFd;
+                }
+            }
+
+            return openParentDirectoryInRootAtNoFollow(dirFd, parentComponents);
+        }
     } // namespace
 
     /**
@@ -534,7 +755,7 @@ namespace qsnapper::security {
             return -1;
         }
 
-        // 親ディレクトリfdを固定したopenat()により、leafを作成 / 上書きする。
+        // 親ディレクトリfdを固定したopenat()により、leafを作成 / 上書きする
         const int fd = ::openat(parentFd, leafName.constData(),
                                 O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
                                 mode);
@@ -791,13 +1012,26 @@ namespace qsnapper::security {
             return false;
         }
 
-        QByteArray encodedPath;
-        if (!validateRelativePathAt(relativePath, &encodedPath)) {
+        if (!validateRelativePathAt(relativePath, nullptr)) {
             return false;
         }
 
-        return ::fstatat(dirFd, encodedPath.constData(), out,
-                         AT_SYMLINK_NOFOLLOW) == 0;
+        // 検証済みの同一relativePathから親dirfdとleaf名を導出する (TOCTOUなし)
+        const QStringList components =
+                relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QByteArray leafName;
+        const int parentFd = openParentDirectoryInRootAt(dirFd, components, &leafName);
+        if (parentFd < 0) {
+            return false;
+        }
+
+        // leaf自体はsymlink非追従のまま (leaf symlinkはsymlinkとして報告する契約)
+        const bool ok = ::fstatat(parentFd, leafName.constData(), out,
+                                  AT_SYMLINK_NOFOLLOW) == 0;
+        const int savedErrno = errno;
+        ::close(parentFd);
+        errno = savedErrno;
+        return ok;
     }
 
     bool isConfirmedAbsentAt(int dirFd, const QString &relativePath)
@@ -814,7 +1048,7 @@ namespace qsnapper::security {
             return false;
         }
 
-        // 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながらopenat(..., O_DIRECTORY | O_NOFOLLOW)で辿る。
+        // 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながらopenat(..., O_DIRECTORY | O_NOFOLLOW)で辿る
         // O_DIRECTORY | O_NOFOLLOW は中間symlinkに対してENOTDIRを返し、「親が実ファイル」の場合と区別できないため、symlinkの検出をfstatat側で行う
         // fstatat()のAT_SYMLINK_NOFOLLOWはleafにしか効かないため、中間成分の解決をfstatat()に任せるとpin済みdirfdの外へ解決され得る
         int currentFd = ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -872,13 +1106,24 @@ namespace qsnapper::security {
             return -1;
         }
 
-        QByteArray encodedPath;
-        if (!validateRelativePathAt(relativePath, &encodedPath)) {
+        if (!validateRelativePathAt(relativePath, nullptr)) {
             return -1;
         }
 
-        const int fd = ::openat(dirFd, encodedPath.constData(),
+        // 検証済みの同一relativePathから親dirfdとleaf名を導出する (TOCTOUなし)
+        const QStringList components =
+                relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QByteArray leafName;
+        const int parentFd = openParentDirectoryInRootAt(dirFd, components, &leafName);
+        if (parentFd < 0) {
+            return -1;
+        }
+
+        const int fd = ::openat(parentFd, leafName.constData(),
                                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        const int savedErrno = errno;
+        ::close(parentFd);
+        errno = savedErrno;
         if (fd < 0) {
             return -1;
         }
@@ -900,22 +1145,35 @@ namespace qsnapper::security {
             return false;
         }
 
-        QByteArray encodedPath;
-        if (!validateRelativePathAt(relativePath, &encodedPath)) {
+        if (!validateRelativePathAt(relativePath, nullptr)) {
+            return false;
+        }
+
+        // 検証済みの同一relativePathから親dirfdとleaf名を導出する (TOCTOUなし)
+        const QStringList components =
+                relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QByteArray leafName;
+        const int parentFd = openParentDirectoryInRootAt(dirFd, components, &leafName);
+        if (parentFd < 0) {
             return false;
         }
 
         // 固定PATH_MAXで切り詰めないよう、必要に応じてバッファを拡張する
         QByteArray buffer(256, '\0');
         for (;;) {
-            const ssize_t len = ::readlinkat(dirFd, encodedPath.constData(), buffer.data(), static_cast<size_t>(buffer.size()));
+            const ssize_t len = ::readlinkat(parentFd, leafName.constData(), buffer.data(),
+                                             static_cast<size_t>(buffer.size()));
             if (len < 0) {
+                const int savedErrno = errno;
+                ::close(parentFd);
+                errno = savedErrno;
                 return false;
             }
 
             if (len < buffer.size()) {
                 buffer.truncate(static_cast<qsizetype>(len));
                 *targetOut = buffer;
+                ::close(parentFd);
                 return true;
             }
 
@@ -923,12 +1181,33 @@ namespace qsnapper::security {
         }
     }
 
+    namespace detail {
+        int openParentDirectoryInRootForTesting(int dirFd, const QString &relativePath,
+                                                QByteArray *leafNameOut, bool forceNoOpenat2)
+        {
+            if (dirFd < 0) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            if (!validateRelativePathAt(relativePath, nullptr)) {
+                return -1;
+            }
+
+            const QStringList components =
+                    relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+            return openParentDirectoryInRootAt(dirFd, components, leafNameOut,
+                                               forceNoOpenat2);
+        }
+    } // namespace detail
+
     /**
      * @brief 宛先絶対パスがrootPath配下であることを検証し、rootからの相対表現を取り出す
      *
      * 文字列レベルの入力解析を行うのみで、ファイルシステムにはアクセスしない
-     * 本関数を通過しても安全は保証されない。実際の保証は、本関数の結果を用いて
-     * root dirfdからcomponentwiseなO_NOFOLLOW走査を行う各変異ヘルパーが担う
+     * 本関数を通過しても安全は保証されない
+     *
+     * 実際の保証は、本関数の結果を用いて、root dirfdからcomponentwiseなO_NOFOLLOW走査を行う各変異ヘルパーが担う
      *
      * @param rootPath 基点ルートディレクトリ (絶対パス)
      * @param absolutePath 検証対象の宛先絶対パス

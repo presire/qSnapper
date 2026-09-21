@@ -20,7 +20,7 @@ namespace qsnapper::security {
      *
      * 各パス成分を openat(..., O_DIRECTORY | O_NOFOLLOW) で辿り、最終ディレクトリのfdを返す
      *
-     * @return 成功時は file descriptor、失敗時は -1。
+     * @return 成功時は file descriptor、失敗時は-1
      */
     int safeOpenDirectory(const QString &path);
 
@@ -96,6 +96,18 @@ namespace qsnapper::security {
      * relativePathは絶対パス・"." / ".." 成分・制御文字を含んではならない
      * (絶対パスはopenat系と同じくdirfdを無視してしまうため入力段階で拒否する)
      *
+     * 中間成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) で解決する
+     * (カーネル5.6未満は同等のin-root解決をfdスタックで再現するフォールバックを使用する)
+     * snapshot dirfdは"/"のbtrfs snapshotであるため、"var/run -> /run" のような絶対symlinkは
+     * snapshot内で正当な存在であり、chrootと同じくroot内解決を採用する
+     * これにより中間symlinkがdirfdの外 (live filesystem) へ解決されることは構造的にない
+     *
+     * isConfirmedAbsentAt()と中間symlinkの方針が異なるのは意図的である:
+     * isConfirmedAbsentAt()は破壊的削除の直前の不在確認であり、中間symlinkの追跡結果がlive filesystemへ依存するためfail-closedで拒否する
+     * 一方、本関数群は読み取り専用であり、root内解決で閉じ込めた上でsnapshot自身の内容を取得することが目的である
+     *
+     * leaf自体はAT_SYMLINK_NOFOLLOWのままのため、leafがsymlinkならsymlinkとして報告する
+     *
      * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
      * @param relativePath dirFdからの相対パス
      * @param out stat構造体の出力先
@@ -115,7 +127,7 @@ namespace qsnapper::security {
      *   - ENOENT (不在) と、親成分が非ディレクトリであることを示すENOTDIR (この場合も対象は確定的に存在し得ない) の場合のみtrue
      *   - それ以外 (EACCES / ELOOP / EINVAL等) は「不在を確認できなかった」であって「不在である」ではないため、falseを返す (fail-closed)
      *
-     * 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながら、openat(..., O_DIRECTORY | O_NOFOLLOW) で辿る。
+     * 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながら、openat(..., O_DIRECTORY | O_NOFOLLOW) で辿る
      * O_DIRECTORY | O_NOFOLLOW は中間symlinkに対してENOTDIRを返し、「親が実ファイル」の場合と区別できないため、
      * symlinkの検出をfstatat側で行い、symlink成分では「不在を確認できなかった」(ELOOP相当) として扱う
      *
@@ -131,7 +143,11 @@ namespace qsnapper::security {
     /**
      * @brief 指定dirfd相対で通常ファイルを安全に読み取りオープンする
      *
-     * openat(dirFd, relativePath, O_RDONLY | O_NOFOLLOW) で開き、fstat()でregular fileであることを再確認する
+     * 親成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) でin-root解決し
+     * (カーネル5.6未満は同等のフォールバックを使用)、leafを openat(..., O_NOFOLLOW) で開き、
+     * fstat()でregular fileであることを再確認する
+     * 中間成分が絶対symlinkでもdirfdの外へ解決されることはなく、snapshot内の同一位置へ収まる
+     * leaf自体はsymlink非追従のため、leafがsymlinkならELOOPで拒否される
      * 相対パス検証は、safeLstatAtと共通
      *
      * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
@@ -143,7 +159,9 @@ namespace qsnapper::security {
     /**
      * @brief 指定dirfd相対でreadlinkat()によりsymlink targetを取得する
      *
-     * leaf自体はsymlink非追従で読み出す
+     * 親成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) でin-root解決し
+     * (カーネル5.6未満は同等のフォールバックを使用)、leaf自体はsymlink非追従で読み出す
+     * 中間成分が絶対symlinkでもdirfdの外へ解決されることはなく、snapshot内の同一位置へ収まる
      * 相対パス検証は、safeLstatAtと共通
      *
      * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
@@ -153,6 +171,29 @@ namespace qsnapper::security {
      */
     bool safeReadLinkNoFollowAt(int dirFd, const QString &relativePath,
                                 QByteArray *targetOut);
+
+    /**
+     * @brief 単体テスト専用の内部入口
+     *
+     * production codeからは使用しない
+     */
+    namespace detail {
+        /**
+         * @brief safeLstatAt系が使う親ディレクトリのin-root解決を直接呼び出す
+         *
+         * openat2フォールバック (カーネル5.6未満向け) は対応カーネル上では到達しないため、
+         * forceNoOpenat2で明示的に選択できるようにしてテストで検証する
+         *
+         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+         * @param relativePath dirFdからの相対パス (leaf成分を含む)
+         * @param leafNameOut 最終成分名の返却先 (省略可)
+         * @param forceNoOpenat2 trueならopenat2を使わずフォールバック経路を強制する
+         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
+         */
+        int openParentDirectoryInRootForTesting(int dirFd, const QString &relativePath,
+                                                QByteArray *leafNameOut,
+                                                bool forceNoOpenat2);
+    }
 
     /**
      * @brief 宛先絶対パスがrootPath配下であることを検証し、rootからの相対表現を取り出す
@@ -167,8 +208,8 @@ namespace qsnapper::security {
      *   - 連続する '/' や末尾 '/' は空成分として正規化して扱う
      *   - ファイルシステムには一切アクセスしない
      *
-     * @note 本関数は入力解析 (境界の一部) でありセキュリティ境界そのものではない。
-     *       実際の保証は safeOpenDirectoryBeneathRoot 以降のdirfdベース走査が担う。
+     * @note 本関数は入力解析 (境界の一部) でありセキュリティ境界そのものではない
+     *       実際の保証は、safeOpenDirectoryBeneathRoot以降のdirfdベース走査が担う
      *       文字列比較 (startsWith等) を唯一の根拠とした宛先書き込みを行ってはならない
      *
      * @param rootPath 基点ルートディレクトリ (絶対パス)

@@ -17,7 +17,7 @@ namespace qsnapper {
             /**
              * @brief configName許容文字の正規表現 (ASCII-only allowlist)
              *
-             * プログラム開始時に1度だけコンパイルされ、以降の呼び出しで使い回される。
+             * プログラム開始時に1度だけコンパイルされ、以降の呼び出しで使い回される
              * QRegularExpressionは、thread-safeなconst操作のみを行えば再入可能
              */
             const QRegularExpression &configNameRegex()
@@ -96,7 +96,7 @@ namespace qsnapper {
         /**
          * @brief snapshot root containmentを純粋文字列処理で判定する
          *
-         * 詳細な設計意図と制約は inputvalidator.h 側の説明を参照すること
+         * 詳細な設計意図と制約は、inputvalidator.h側の説明を参照すること
          */
         bool isPathWithinSnapshotRoot(const QString &filePath, const QString &snapshotRoot)
         {
@@ -145,6 +145,16 @@ namespace qsnapper {
             catch (const std::exception &) {
                 return false;
             }
+        }
+
+        /**
+         * @brief レコード区切りを破壊する文字が含まれていないかを検証する
+         *
+         * 詳細な契約は、inputvalidator.h側の説明を参照すること
+         */
+        bool isRecordSafeText(const QString &value)
+        {
+            return !containsDangerousChar(value);
         }
     } // namespace security
 } // namespace qsnapper

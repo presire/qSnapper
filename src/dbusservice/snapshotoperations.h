@@ -31,17 +31,16 @@ class SnapshotOperations : public QObject, protected QDBusContext
 
 private:
     /**
-     * @brief 非同期復元計画がchunk間で必要とする固定実行context
+     * @brief 非同期復元計画がchunk間で必要とする固定実行コンテキスト
      */
     struct RestoreExecution {
         QString owner;
         QString configName;
         int snapshotNumber = -1;
         QString snapshotDir;
-        // 認可時に開いて計画寿命の間保持するsnapshot dirfd。
-        // ソース読み取りを全て本fd相対で行うことで、実行中のsnapshot削除 /
-        // 同番号snapshotの再作成 / mount状態の変化に依存せず、
-        // 認可された計画が参照したsnapshotそのものから復元し続ける
+        // 認可時に開いて計画寿命の間保持するsnapshot dirfd
+        // ソース読み取りを全て本fd相対で行うことで、実行中のスナップショット削除 / 同番号スナップショットの再作成 / mount状態の変化に依存せず、
+        // 認可された計画が参照したスナップショットそのものから復元し続ける
         int snapshotDirFd = -1;
         bool useReflink = false;
         bool removeOnTypechanged = false;
@@ -49,17 +48,16 @@ private:
     };
 
     /**
-     * @brief 認可待ちを跨いで応答するためにcaptureしたD-Bus呼び出しcontext
+     * @brief 認可待ちを跨いで応答するためにキャプチャしたD-Bus呼び出しコンテキスト
      *
-     * QDBusContext::message() / sendErrorReply() はスロットから戻った後は使えない。
-     * polkitプロンプトを待って遅延応答する経路では、スロット冒頭でcaptureした
-     * 本構造体の値を用いて返信する
+     * QDBusContext::message() / sendErrorReply() はスロットから戻った後は使用できない
+     * polkitプロンプトを待って遅延応答する経路では、スロット冒頭でキャプチャした本構造体の値を用いて返信する
      */
     struct CallReply {
-        QDBusMessage message;                                       // 返信先のcapture済みmessage
+        QDBusMessage message;                                       // 返信先のキャプチャ済みメッセージ
         QDBusConnection connection = QDBusConnection::systemBus();  // 応答送出に用いる接続
         bool fromDBus = false;                                      // D-Bus経由の呼び出しか
-        bool replied = false;                                       // error/valueを送出済みか
+        bool replied = false;                                       // error / valueを送出済みか
     };
 
     /**
@@ -71,35 +69,25 @@ private:
         Deferred    // polkitプロンプト待ち。応答は完了継続から送出される
     };
 
-    /**
-     * @brief アイドルタイムアウト (5分)
-     *
-     * 最後のD-Busメソッド呼び出しから本値を超えてアクセスが無い場合、サービスプロセスは自律的に終了する。
-     */
-    static constexpr int IdleTimeoutMs = 5 * 60 * 1000;
-
-    /**
-     * @brief 同時に保持できるpolkitプロンプト待ちの上限
-     *
-     * プロンプトはタイムアウトを持たないため、未応答のまま滞留し得る。
-     * 1呼び出しあたりの保持量は小さいが、無制限に積ませない
-     */
-    static constexpr int MaxPendingAuthorizations = 8;
-    std::unique_ptr<snapper::Snapper> m_snapper;        // 現在のSnapperインスタンス
-    // m_comparisonCache は m_snapper の後に宣言 (デストラクション順序:
-    // Comparisonが所有するmounts/FilesがSnapperより先に破棄されるようにするため)
-    ComparisonCache<snapper::Comparison> m_comparisonCache;
-    QString m_currentConfig;                            // 現在選択中のSnapper設定名
-    QTimer m_idleTimer;                                 // アイドルタイムアウト用タイマ
+    static constexpr int IdleTimeoutMs = 5 * 60 * 1000;     // アイドルタイムアウト (5分)
+                                                            // 最後のD-Busメソッド呼び出しから本値を超えてアクセスが無い場合、サービスプロセスは自律的に終了する
+    static constexpr int MaxPendingAuthorizations = 8;      // 同時に保持できるPolkitプロンプト待ちの上限
+                                                            // プロンプトはタイムアウトを持たないため、未応答のまま滞留し得る
+                                                            // 1呼び出しあたりの保持量は小さいが、無制限に積ませない
+    std::unique_ptr<snapper::Snapper> m_snapper;            // 現在のSnapperインスタンス
+    ComparisonCache<snapper::Comparison> m_comparisonCache; // m_comparisonCacheは、m_snapperの後に宣言
+                                                            // (デストラクション順序: Comparisonが所有するmounts/FilesがSnapperより先に破棄されるようにするため)
+    QString m_currentConfig;                                // 現在選択中のSnapper設定名
+    QTimer m_idleTimer;                                     // アイドルタイムアウト用タイマ
     qsnapper::restore::RestoreManifestRegistry m_restoreRegistry;
     qsnapper::restore::RestorePlanExecutor m_restoreExecutor;
     QDBusServiceWatcher *m_ownerWatcher = nullptr;
     QMap<QString, RestoreExecution> m_restoreExecutions;
     QMap<QString, QString> m_restorePlanOwners;
-    // 遅延応答の継続を実行している間のみ有効。
-    // replyError()がsendErrorReply()ではなくcapture済みmessageを使う判断に用いる
-    std::optional<CallReply> m_deferredReply;
-    int m_pendingAuthorizations = 0;                    // polkitプロンプト待ちの件数
+
+    std::optional<CallReply> m_deferredReply;               // 遅延応答の継続を実行している間のみ有効
+                                                            // replyError()がsendErrorReply()ではなくキャプチャ済みmessageを使う判断に用いる
+    int m_pendingAuthorizations = 0;                        // polkitプロンプト待ちの件数
 
 private:
     /**
@@ -112,19 +100,18 @@ private:
     void resetIdleTimer();
 
     /**
-     * @brief 現在のD-Bus呼び出しの応答contextをcaptureする
+     * @brief 現在のD-Bus呼び出しの応答コンテキストをキャプチャする
      *
-     * message()はスロットから戻ると無効になるため、認可待ちを跨ぐ経路では
-     * 本関数の戻り値を保持して応答する
+     * message()はスロットから戻ると無効になるため、認可待ちを跨ぐ経路では本関数の戻り値を保持して応答する
      *
-     * @return capture済み応答context (D-Bus経由でなければfromDBus=false)
+     * @return キャプチャ済み応答コンテキスト (D-Bus経由でなければfromDBus=false)
      */
     CallReply captureCallReply() const;
 
     /**
      * @brief 同期応答と遅延応答のどちらでも正しくD-Busエラーを返す
      *
-     * 継続実行中 (m_deferredReplyが有効) はcapture済みmessageから
+     * 継続実行中 (m_deferredReplyが有効) はキャプチャ済みmessageから
      * createErrorReply()して送出し、それ以外はQDBusContext::sendErrorReply()に委ねる
      *
      * @param type 返すD-Busエラー種別
@@ -135,20 +122,16 @@ private:
     /**
      * @brief polkit認可を要求する (対話が必要な場合のみ非同期化する)
      *
-     * 高速経路として対話を許可しない問い合わせを先に行う。allow_active=yesや
-     * auth_admin_keepのキャッシュ済み認可はここでGrantedとなり、プロンプトが
-     * 出ないためevent loopはミリ秒しか止まらない。
-     * 対話が必要 (challenge) な場合のみ非同期APIへ回し、setDelayedReply(true)を
-     * 立てた上でDeferredを返す。同期版はタイムアウトを持たず、未応答プロンプト
-     * 1つでサービス全体のevent loopが無期限に凍結するため、対話経路では使わない
+     * 高速経路として対話を許可しない問い合わせを先に行う
+     * allow_active=yesやauth_admin_keepのキャッシュ済み認可はここでGrantedとなり、プロンプトが出ないためイベントループはミリ秒しか止まらない。
+     * 対話が必要 (challenge) な場合のみ非同期APIへ回し、setDelayedReply(true)を立てた上でDeferredを返す
+     * 同期版はタイムアウトを持たず、未応答プロンプト1つでサービス全体のイベントループが無期限に凍結するため、対話経路では使わない
      *
-     * @param actionId Polkitアクションid
-     * @param continuation 認可完了時に呼ぶ継続 (capture済み応答contextと可否を受け取る)
+     * @param actionId PolkitアクションID
+     * @param continuation 認可完了時に呼ぶ継続 (キャプチャ済み応答コンテキストと可否を受け取る)
      * @return 即時許可 / 即時拒否 / 遅延のいずれか
      */
-    AuthorizationOutcome beginAuthorization(
-        const QString &actionId,
-        std::function<void(const CallReply &, bool)> continuation);
+    AuthorizationOutcome beginAuthorization(const QString &actionId, std::function<void(const CallReply &, bool)> continuation);
 
     /**
      * @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
@@ -161,7 +144,7 @@ private:
      * 本体が既にreplyError()でエラーを返している場合は値応答を送らない
      *
      * @tparam T 対象D-Busメソッドの戻り値型
-     * @param reply capture済み応答context
+     * @param reply キャプチャ済み応答コンテキスト
      * @param body 認可済みの本体処理
      * @param granted 認可されたか
      */
@@ -189,11 +172,11 @@ private:
     /**
      * @brief 認可してから本体を実行する共通ゲート
      *
-     * 対話不要ならその場で本体を同期実行して戻り値を返す (従来と同じ挙動)。
+     * 対話不要ならその場で本体を同期実行して戻り値を返す (従来と同じ挙動)
      * 対話が必要な場合は遅延応答へ切り替え、既定値を返して呼び出しを終える
      *
      * @tparam T 対象D-Busメソッドの戻り値型
-     * @param actionId Polkitアクションid
+     * @param actionId PolkitアクションID
      * @param body 認可済みの本体処理
      * @return 同期実行時は本体の戻り値、それ以外はT{}
      */
@@ -215,15 +198,14 @@ private:
     /**
      * @brief configNameを正規化＋検証し、不正ならD-Busエラー応答を返す
      *
-     * 空文字列の入力は "root" に正規化した上で、qsnapper::security::validateConfigNameで検証する
-     * これにより呼び出し側の "空なら root" デフォルト割当パターンが不要になり、
-     * 空入力に対する一貫した扱い (常に "root" として受理) を保証する
+     * 空文字列の入力は"root"に正規化した上で、qsnapper::security::validateConfigNameで検証する
+     * これにより呼び出し側の"空ならroot"デフォルト割当パターンが不要になり、空入力に対する一貫した扱い (常に"root"として受理) を保証する
      *
      * 各D-Busスロットの先頭 (beginAuthorization より前) で呼び出すこと
-     * Polkitプロンプトが出てから "invalid config name" で蹴られるUXを避けるため順序が重要
+     * Polkitプロンプトが出てから"invalid config name"で蹴られるUXを避けるため順序が重要
      *
-     * @param configName 検査対象の設定名 (空文字列は "root" として扱う)
-     * @return 正規化後の設定名 (有効な場合)、無効でエラー応答済みなら std::nullopt
+     * @param configName 検査対象の設定名 (空文字列は"root"として扱う)
+     * @return 正規化後の設定名 (有効な場合) で、無効でエラー応答済みならstd::nullopt
      */
     std::optional<QString> resolveConfigOrFail(const QString &configName);
 
@@ -291,7 +273,7 @@ private:
     /**
      * @brief 認可済みのGetFileDiffAndDetails本体
      * @param configName 検証済み設定名
-     * @param filePath 検証済み絶対path
+     * @param filePath 検証済み絶対パス
      */
     QString getFileDiffAndDetailsAuthorized(const QString &configName,
                                             int snapshotNumber,
@@ -300,7 +282,7 @@ private:
     /**
      * @brief 認可済みのGetFileDiffBetween本体
      * @param configName 検証済み設定名
-     * @param filePath 検証済み絶対path
+     * @param filePath 検証済み絶対パス
      */
     QString getFileDiffBetweenAuthorized(const QString &configName,
                                          int number1,
@@ -323,26 +305,26 @@ private:
     /**
      * @brief 認可済みのCommitRestorePlan本体
      *
-     * 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が
-     * 起こり得るため、mountやexecutor起動の前に状態を再検証する
+     * 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が起こり得るため、
+     * mountやexecutor起動の前に状態を再検証する
      *
-     * @param manifestId owner束縛されたmanifest id
-     * @param owner 認可前にcaptureした呼び出し元unique name
-     * @return 実行開始を受理した場合true
+     * @param manifestId owner束縛されたマニフェストID
+     * @param owner 認可前にキャプチャした呼び出し元unique name
+     * @return 実行開始を受理した場合: true
      */
     bool commitRestorePlanAuthorized(const QString &manifestId,
                                      const QString &owner);
 
     /**
      * @brief 認可が得られなかった復元計画をFailedで終端する
-     * @param manifestId 対象manifest id
-     * @param owner 認可前にcaptureした呼び出し元unique name
+     * @param manifestId 対象マニフェストID
+     * @param owner 認可前にキャプチャした呼び出し元unique name
      */
     void failRestorePlanAuthorization(const QString &manifestId,
                                       const QString &owner);
 
     /**
-     * @brief Snapperインスタンスを取得 (必要に応じて生成/再生成)
+     * @brief Snapperインスタンスを取得 (必要に応じて生成 / 再生成)
      * @param configName 設定名
      * @param forceReload 強制再生成フラグ
      */
@@ -368,7 +350,7 @@ private:
      * @brief RestoreFiles / RestoreFilesDirect 共通実装
      *
      * 両エントリポイントは差分フラグを引数にして本関数へ委譲する
-     * 入力パスはqsnapper::security::isPathWithinSnapshotRootでsnapshot root内に収まっていることを検証する
+     * 入力パスはqsnapper::security::isPathWithinSnapshotRootでスナップショットroot内に収まっていることを検証する
      *
      * @param configName      Snapper設定名
      * @param snapshotNumber  復元元スナップショット番号
@@ -376,7 +358,7 @@ private:
      * @param changeTypes     各ファイルのchange種別
      * @param useReflink      通常ファイルコピー時にFICLONE (btrfs CoW) を試行するか
      * @param removeOnTypechanged typechanged時に既存ファイルを先に削除するか
-     * @param logTag          ログ前置詞 ("RestoreFiles"など)
+     * @param logTag          ログ前置詞 ("RestoreFiles"等)
      */
     bool restoreFilesImpl(const QString &configName,
                           int snapshotNumber,
@@ -418,15 +400,15 @@ private:
     /**
      * @brief live宛先をroot配下で再解決して通常ファイルをコピーする
      *
-     * ソースはpin済みsnapshot dirfd相対で解決する。実行中にsnapshotDirの
-     * path上で削除 / 再作成 / 差し替えが起きても、fdが指すinodeを読み続けるため、
+     * ソースはpin済みスナップショット dirfd相対で解決する
+     * 実行中にsnapshotDirのパス上で削除 / 再作成 / 差し替えが起きても、fdが指すinodeを読み続けるため、
      * 認可時と異なる内容を読み込むことがない
      *
      * @param sourceDirFd pin済みのsnapshot dirfd
-     * @param sourceRelativePath snapshotDirからの相対source path (絶対パス・".."/"."成分は不可)
-     * @param dst live filesystem上の絶対path
+     * @param sourceRelativePath snapshotDirからの相対ソースパス (絶対パス・".."/"."成分は不可)
+     * @param dst live filesystem上の絶対パス
      * @param tryReflink FICLONEを先行試行するか
-     * @return dataと必須metadataを適用できた場合true
+     * @return dataと必須metadataを適用できた場合: true
      */
     static bool copyRegularFileBeneathRoot(int sourceDirFd,
                                            const QString &sourceRelativePath,
@@ -436,20 +418,20 @@ private:
     /**
      * @brief live宛先をroot配下で再解決してsymlinkをコピーする
      *
-     * ソースはpin済みsnapshot dirfd相対で解決する (copyRegularFileBeneathRootと同じ理由)
+     * ソースはpin済みスナップショット dirfd相対で解決する (copyRegularFileBeneathRootと同じ理由)
      *
-     * @param sourceDirFd pin済みのsnapshot dirfd
-     * @param sourceRelativePath snapshotDirからの相対source path
-     * @param dst live filesystem上の絶対path
-     * @return symlinkを作成できた場合true
+     * @param sourceDirFd pin済みのスナップショット dirfd
+     * @param sourceRelativePath snapshotDirからの相対ソースパス
+     * @param dst live filesystem上の絶対パス
+     * @return symlinkを作成できた場合: true
      */
     static bool copySymlinkBeneathRoot(int sourceDirFd,
                                        const QString &sourceRelativePath,
                                        const QString &dst);
 
     /**
-     * @brief live pathをroot配下で再解決して一時的な兄弟pathへ退避する
-     * @param path 退避対象の絶対path
+     * @brief live パスをroot配下で再解決して一時的な兄弟パスへ退避する
+     * @param path 退避対象の絶対パス
      * @param movedPath 実際の退避先。対象不存在時は空文字列
      * @return 退避または対象不存在時true
      */
@@ -463,14 +445,14 @@ private:
     QString callerOwner() const;
 
     /**
-     * @brief manifest操作エラーを情報漏洩しないD-Bus errorへ変換して送信する
+     * @brief マニフェスト操作エラーを情報漏洩しないD-Bus errorへ変換して送信する
      * @param error registryが返したエラー
      * @return 常にfalse
      */
     bool sendManifestError(qsnapper::restore::ManifestError error);
 
     /**
-     * @brief manifest状態をD-Bus contractの小文字表現へ変換する
+     * @brief マニフェスト状態をD-Bus contractの小文字表現へ変換する
      * @param state 変換対象状態
      * @return staging/frozen/running/completed/failed/cancelledのいずれか
      */
@@ -480,24 +462,23 @@ private:
     /**
      * @brief 復元方式をD-Bus contractの文字列表現へ変換する
      * @param mode 変換対象方式
-     * @return yastまたはdirect
+     * @return YaSTまたはダイレクト
      */
     static QString restoreModeString(qsnapper::restore::RestoreMode mode);
 
     /**
-     * @brief RFC4180形式で必要なCSV fieldをquoteする
+     * @brief RFC4180形式で必要なCSVフィールドをクォートする
      *
-     * commaまたはdouble quoteを含むfieldはdouble quoteで囲み、内部の
-     * double quoteを二重化する。
+     * カンマまたはダブルクォートを含むフィールドはダブルクォートで囲み、内部のダブルクォートを2重化する
      *
-     * @param field quote対象文字列
-     * @return CSVへ安全に埋め込めるfield
+     * @param field クォート対象文字列
+     * @return CSVへ安全に埋め込めるフィールド
      */
     static QString quoteRestoreStatusCsvField(const QString &field);
 
     /**
-     * @brief executor callbackから単一の凍結済みentryをlive filesystemへ適用する
-     * @param manifestId 実行contextを選択するmanifest id
+     * @brief executor callbackから単一の凍結済みエントリをlive filesystemへ適用する
+     * @param manifestId 実行コンテキストを選択するマニフェストID
      * @param entry 適用対象entry
      * @return entry全体の適用成功時true
      */
@@ -506,7 +487,7 @@ private:
 
     /**
      * @brief 終端計画の安全ネット・unmount・signal・registry削除を実行する
-     * @param manifestId 終端したmanifest id
+     * @param manifestId 終端したマニフェストid
      * @param terminal 終端状態
      * @param message 終端理由
      */
@@ -515,35 +496,35 @@ private:
                            const QString &message);
 
     /**
-     * @brief 指定manifestのmountを可能な限り解除して実行contextを削除する
-     * @param manifestId cleanup対象manifest id
+     * @brief 指定マニフェストのmountを可能な限り解除して実行コンテキストを削除する
+     * @param manifestId クリーンアップ対象マニフェストID
      */
     void cleanupRestoreExecution(const QString &manifestId);
 
     /**
-     * @brief execution contextに記録されたsnapshot mountを解除する
-     * @param execution mount元設定とsnapshot番号を持つcontext
+     * @brief execution コンテキストに記録されたスナップショットマウントを解除する
+     * @param execution マウント元設定とスナップショット番号を持つコンテキスト
      */
     void unmountRestoreExecution(const RestoreExecution &execution);
 
     /**
-     * @brief owner消失時に予約済み実行とmountとmanifestを全て破棄する
-     * @param owner unregisterされたD-Bus unique name
+     * @brief owner消失時に予約済み実行・マウント・マニフェストを全て破棄する
+     * @param owner unregisterされたD-Busユニーク名
      */
     void handleRestoreOwnerUnregistered(const QString &owner);
 
     /**
-     * @brief TTL purgeで消えたactive計画をabandonしmountもcleanupする
+     * @brief TTL purgeで消えたactive計画をabandonしマウントおよびクリーンアップする
      */
     void purgeExpiredRestorePlans();
 
     /**
-     * @brief manifestを持たないownerをservice watcherから除外する
+     * @brief マニフェストを持たないownerをservice watcherから除外する
      */
     void removeUnusedRestoreOwnerWatches();
 
     /**
-     * @brief 復元後にroot subvolumeがread-onlyならrwへ戻す安全ネットを実行する
+     * @brief 復元後にrootサブボリュームがread-onlyならrwへ戻す安全ネットを実行する
      */
     static void restoreRootReadWriteSafetyNet();
 
@@ -561,14 +542,14 @@ public:
 
 public slots:
     /**
-     * @brief 既存の Snapper 設定名の一覧を返す
+     * @brief 既存のSnapper設定名の一覧を返す
      * @return 設定名の配列
      */
     QStringList ListConfigs();
 
     /**
      * @brief 指定設定のスナップショット一覧をCSVで返す
-     * @param configName 設定名 (空文字列時は "root")
+     * @param configName 設定名 (空文字列時は"root")
      */
     QString ListSnapshots(const QString &configName);
 
@@ -578,7 +559,7 @@ public slots:
      * @param type "single" / "pre" / "post"
      * @param description 説明
      * @param preNumber postタイプ時の対応pre番号
-     * @param cleanup cleanup アルゴリズム名
+     * @param cleanup クリーンアップアルゴリズム名
      * @param userdata 追加メタデータ
      * @param important 重要フラグ
      */
@@ -652,7 +633,7 @@ public slots:
     /**
      * @brief ファイルをスナップショットから復元する (高速経路)
      *
-     * btrfs reflinkを優先、typechangedは既存ファイル削除後にコピー。
+     * btrfs reflinkを優先。typechangedは既存ファイル削除後にコピー
      */
     bool RestoreFilesDirect(const QString &configName,
                              int snapshotNumber,
@@ -662,9 +643,9 @@ public slots:
     /**
      * @brief ownerに束縛された空のstaged restore計画を開始する
      * @param configName Snapper設定名
-     * @param snapshotNumber 復元元snapshot番号
+     * @param snapshotNumber 復元元スナップショット番号
      * @param restoreMode yastまたはdirect
-     * @return 成功時manifest id
+     * @return 成功時マニフェストID
      */
     QString BeginRestorePlan(const QString &configName,
                              int snapshotNumber,
@@ -672,10 +653,10 @@ public slots:
 
     /**
      * @brief staging計画へ検証済みentry chunkを原子的に追加する
-     * @param manifestId owner束縛されたmanifest id
-     * @param filePaths 復元対象絶対path列
-     * @param changeTypes pathと対応する変更種別列
-     * @return chunk全体を追加できた場合true
+     * @param manifestId owner束縛されたマニフェストID
+     * @param filePaths 復元対象絶対パス列
+     * @param changeTypes パスと対応する変更種別列
+     * @return chunk全体を追加できた場合: true
      */
     bool StageRestoreEntries(const QString &manifestId,
                              const QStringList &filePaths,
@@ -683,29 +664,29 @@ public slots:
 
     /**
      * @brief 計画をfreeze後に1度だけ認可し非同期実行を開始する
-     * @param manifestId owner束縛されたmanifest id
-     * @return 実行開始を受理した場合true
+     * @param manifestId owner束縛されたマニフェストID
+     * @return 実行開始を受理した場合: true
      */
     bool CommitRestorePlan(const QString &manifestId);
 
     /**
      * @brief owner確認済みRunning計画のidle loopを再開する
-     * @param manifestId owner束縛されたmanifest id
-     * @return nudgeを受理した場合true
+     * @param manifestId owner束縛されたマニフェストID
+     * @return nudgeを受理した場合: true
      */
     bool ContinueRestorePlan(const QString &manifestId);
 
     /**
      * @brief owner確認済み計画状態をRFC4180 escaping済みCSVで返す
-     * @param manifestId owner束縛されたmanifest id
-     * @return ManifestStatus field順のCSV、失敗時空文字列
+     * @param manifestId owner束縛されたマニフェストID
+     * @return ManifestStatusフィールド順のCSV、失敗時空文字列
      */
     QString GetRestorePlanStatus(const QString &manifestId);
 
     /**
      * @brief owner確認済み非終端計画へ境界cancellationを要求する
-     * @param manifestId owner束縛されたmanifest id
-     * @return cancellationを受理した場合true
+     * @param manifestId owner束縛されたマニフェストID
+     * @return cancellationを受理した場合: true
      */
     bool CancelRestorePlan(const QString &manifestId);
 
@@ -739,9 +720,9 @@ signals:
 
     /**
      * @brief staged restore計画の進捗通知
-     * @param manifestId 実行中計画id
-     * @param current 完了entry数
-     * @param total 凍結時の総entry数
+     * @param manifestId 実行中計画ID
+     * @param current 完了エントリ数
+     * @param total 凍結時の総エントリ数
      * @param filePath 情報漏洩を抑えたbasename
      */
     void restorePlanProgress(const QString &manifestId,
@@ -751,8 +732,8 @@ signals:
 
     /**
      * @brief staged restore計画の終端通知
-     * @param manifestId 終端した計画id
-     * @param terminalState completed/failed/cancelledのいずれか
+     * @param manifestId 終端した計画ID
+     * @param terminalState completed / failed / cancelledのいずれか
      * @param message 終端理由
      */
     void restorePlanFinished(const QString &manifestId,

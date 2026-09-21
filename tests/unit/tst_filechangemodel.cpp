@@ -2,7 +2,6 @@
 #include <QDir>
 #include <QSettings>
 #include <QSignalSpy>
-
 #include "filechangemodel.h"
 
 class TestableFileChangeModel : public FileChangeModel
@@ -39,9 +38,8 @@ public:
 /**
  * @brief RestorePlanTransportのテスト用モック
  *
- * 全ての呼び出しを記録し、コールバックの完了をテスト側から駆動できる。
- * シグナル推送はsubscribePlanSignals()で登録されたreceiverのスロットを
- * QMetaObject::invokeMethodで直接呼び出すことで模倣する。
+ * 全ての呼び出しを記録し、コールバックの完了をテスト側から駆動できる
+ * シグナル推送はsubscribePlanSignals()で登録されたreceiverのスロットをQMetaObject::invokeMethodで直接呼び出すことで模倣する
  */
 class FakeRestorePlanTransport : public RestorePlanTransport
 {
@@ -272,9 +270,18 @@ private slots:
     void staleFilteredComparisonResponseIsIgnored();
     void filteredComparisonPreservesRestoreSourceAndChangeTypes();
 
+    // --- 行指向出力への改行注入に対する多層防御 ---
+    void createdParentWithNonCreatedDescendantSuppressesOnlyParent();
+    void legitimateCreatedDirectoryTreeStillReachesThePlan();
+    void syntheticIntermediateDirectoriesDoNotSuppressCreatedParent();
+    void createdParentWithOnlyCreatedDescendantsIsIndistinguishable();
+
 private:
     void prepareStagedRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
-                              const QString &changeOutput, const QStringList &pathsToCheck, int batchSize);
+                              const QString &changeOutput, const QStringList &pathsToCheck, int batchSize,
+                              bool flatMode = true);
+    static QStringList stagedPathsOf(const FakeRestorePlanTransport &fake);
+    static QStringList stagedChangeTypesOf(const FakeRestorePlanTransport &fake);
     void prepareComparisonRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
                                   int number1, int number2,
                                   const QString &changeOutput, const QStringList &pathsToCheck);
@@ -290,24 +297,47 @@ void TestFileChangeModel::initTestCase()
 }
 
 void TestFileChangeModel::prepareStagedRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
-                                               const QString &changeOutput, const QStringList &pathsToCheck, int batchSize)
+                                               const QString &changeOutput, const QStringList &pathsToCheck, int batchSize,
+                                               bool flatMode)
 {
     model->setConfigName(QStringLiteral("root"));
     model->setSnapshotNumber(42);
     model->setUseDirectRestore(true);
     model->setRestoreBatchSize(batchSize);
-    model->setupModelData(changeOutput, true);
+    model->setupModelData(changeOutput, flatMode);
     model->setRestorePlanTransportForTesting(fake);
     for (const QString &path : pathsToCheck) {
         model->setItemChecked(path, true);
     }
 }
 
+QStringList TestFileChangeModel::stagedPathsOf(const FakeRestorePlanTransport &fake)
+{
+    QStringList paths;
+    for (const FakeRestorePlanTransport::Call &call : fake.calls) {
+        if (call.kind == FakeRestorePlanTransport::Call::Stage) {
+            paths += call.paths;
+        }
+    }
+    return paths;
+}
+
+QStringList TestFileChangeModel::stagedChangeTypesOf(const FakeRestorePlanTransport &fake)
+{
+    QStringList changeTypes;
+    for (const FakeRestorePlanTransport::Call &call : fake.calls) {
+        if (call.kind == FakeRestorePlanTransport::Call::Stage) {
+            changeTypes += call.changeTypes;
+        }
+    }
+    return changeTypes;
+}
+
 /**
  * @brief 2スナップショット比較モードの復元前提条件を組み立てる
  *
- * loadChangesBetween()は実D-Busサービスを起動してしまうため、比較条件だけを直接設定して
- * Pre <--> Post差分ビューと同じ状態を再現する。
+ * loadChangesBetween()は実D-Busサービスを起動してしまうため、
+ * 比較条件だけを直接設定して、Pre <--> Post差分ビューと同じ状態を再現する
  */
 void TestFileChangeModel::prepareComparisonRestore(TestableFileChangeModel *model, FakeRestorePlanTransport *fake,
                                                    int number1, int number2,
@@ -681,8 +711,8 @@ void TestFileChangeModel::stagedRestoreStageFailureAbortsFlowWithError()
     QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
     QVERIFY(model.restoreCheckedItems());
 
-    fake.completePending(true, fake.nextManifestId);  // beginPlan成功
-    fake.completePending(true);                        // チャンク0成功
+    fake.completePending(true, fake.nextManifestId);                           // beginPlan成功
+    fake.completePending(true);                                                // チャンク0成功
     fake.completePending(false, QString(), QStringLiteral("chunk rejected"));  // チャンク1失敗
 
     // 以降のstageEntriesもcommitPlanも発行されない
@@ -721,8 +751,8 @@ void TestFileChangeModel::stagedRestoreCommitFailureAbortsFlowWithError()
     QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
     QVERIFY(model.restoreCheckedItems());
 
-    fake.completePending(true, fake.nextManifestId);  // beginPlan成功
-    fake.completePending(true);                        // チャンク0成功
+    fake.completePending(true, fake.nextManifestId);                            // beginPlan成功
+    fake.completePending(true);                                                 // チャンク0成功
     fake.completePending(false, QString(), QStringLiteral("commit rejected"));  // commit失敗
 
     QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Stage), 1);
@@ -908,7 +938,7 @@ void TestFileChangeModel::stagedRestoreCancelDuringStagingFinishesLocally()
     QVERIFY(model.restoreCheckedItems());
 
     fake.completePending(true, fake.nextManifestId);  // beginPlan成功
-    fake.completePending(true);                        // チャンク0成功 (チャンク1が発行済み)
+    fake.completePending(true);                       // チャンク0成功 (チャンク1が発行済み)
 
     // staging中 (commit前) にキャンセルするとローカルで完了扱いになる
     model.cancelRestore();
@@ -933,7 +963,7 @@ void TestFileChangeModel::prePostRestoreUsesComparisonSourceAndPreservesBetweenM
     FakeRestorePlanTransport fake;
     TestableFileChangeModel model;
 
-    // Pre #100 --> Post #101 の比較結果
+    // Pre #100 --> Post #101の比較結果
     // createdはPostにだけ存在する = Preには無いため、Preへの復元ではlive側から削除される
     const QString output = QStringLiteral("+.... /etc/installed.conf\n"
                                           "-.... /etc/removed.conf\n"
@@ -948,7 +978,8 @@ void TestFileChangeModel::prePostRestoreUsesComparisonSourceAndPreservesBetweenM
 
     QVERIFY(model.restoreCheckedItemsFrom(100));
 
-    // 復元元は比較の第1オペランド (Pre #100)。比較先 (Post #101) であってはならない
+    // 復元元は比較の第1オペランド (Pre #100)
+    // 比較先 (Post #101) であってはならない
     const FakeRestorePlanTransport::Call &beginCall = fake.calls.first();
     QCOMPARE(beginCall.kind, FakeRestorePlanTransport::Call::Begin);
     QCOMPARE(beginCall.configName, QStringLiteral("root"));
@@ -965,8 +996,8 @@ void TestFileChangeModel::prePostRestoreUsesComparisonSourceAndPreservesBetweenM
 
     fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("completed"), QString());
 
-    // 復元しても比較モードは維持されるため、引数なしの復元も比較元 (Pre #100) を使う
-    // (snapshotNumberプロパティは比較先 #101 を保持しているので、リセットが起きれば #101 になる)
+    // 復元しても比較モードは維持されるため、引数なしの復元も比較元 (Pre #100) を使用する
+    // (snapshotNumberプロパティは比較先#101を保持しているので、リセットが起きれば#101になる)
     fake.calls.clear();
     for (const QString &path : pathsToCheck) {
         model.setItemChecked(path, true);
@@ -990,7 +1021,7 @@ void TestFileChangeModel::prePostRestoreFromComparisonTargetIsRejected()
     QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
     QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
 
-    // Post #101 を復元元にするとcreated/deletedの意味が反転し、残すべきファイルを削除してしまう
+    // Post #101を復元元にするとcreated/deletedの意味が反転し、残すべきファイルを削除してしまう
     QVERIFY(!model.restoreCheckedItemsFrom(101));
     QVERIFY(fake.calls.isEmpty());
     QCOMPARE(errorSpy.count(), 1);
@@ -1131,8 +1162,8 @@ void TestFileChangeModel::filteredComparisonHidesEntriesUnchangedAgainstCurrentS
 
     model.loadChangesBetween(100, 101, true, true);
 
-    // 2つの比較は直列に要求する。並行させるとPolkit認可のキャッシュ前に2件の認可要求が飛び、
-    // 認証プロンプトが二重に出る可能性があるため
+    // 2つの比較は直列に要求する
+    // 並行させるとPolkit認可のキャッシュ前に2件の認可要求が飛び、認証プロンプトが二重に出る可能性があるため
     QCOMPARE(model.pendingStringReplies.size(), 1);
     QCOMPARE(model.pendingStringReplies.at(0).methodName, QStringLiteral("GetFileChanges"));
     QCOMPARE(model.pendingStringReplies.at(0).arguments.at(1).toInt(), 100);
@@ -1143,8 +1174,8 @@ void TestFileChangeModel::filteredComparisonHidesEntriesUnchangedAgainstCurrentS
                                              "-.... /etc/removed.conf\n"
                                              "+.... /etc/manually-added.conf\n"));
 
-    // 対カレント比較を先に完了させることで、サービス側の単一スロットComparisonキャッシュには
-    // 「比較元 --> 比較先」が最後に残り、後続のファイル差分取得が再利用できる
+    // 対カレント比較を先に完了させることで、
+    // サービス側の単一スロットComparisonキャッシュには「比較元 --> 比較先」が最後に残り、後続のファイル差分取得が再利用できる
     QCOMPARE(model.pendingStringReplies.size(), 1);
     QCOMPARE(model.pendingStringReplies.at(0).methodName, QStringLiteral("GetFileChangesBetween"));
     QCOMPARE(model.pendingStringReplies.at(0).arguments.at(1).toInt(), 100);
@@ -1161,8 +1192,8 @@ void TestFileChangeModel::filteredComparisonHidesEntriesUnchangedAgainstCurrentS
     QVERIFY(!model.isLoading());
     QVERIFY(model.hasChanges());
 
-    // 既に復元済みの /etc/already-restored.conf は消え、
-    // Pre <--> Post の範囲外にある /etc/manually-added.conf は追加されない
+    // 既に復元済みの/etc/already-restored.confは消え、
+    // Pre <--> Postの範囲外にある/etc/manually-added.confは追加されない
     QCOMPARE(model.rowCount(), 3);
     QCOMPARE(model.data(model.index(0, 0), FileChangeModel::PathRole).toString(),
              QStringLiteral("/usr/bin/newtool"));
@@ -1327,6 +1358,132 @@ void TestFileChangeModel::filteredComparisonPreservesRestoreSourceAndChangeTypes
                                            QStringLiteral("/etc/removed.conf")}));
     QCOMPARE(stageCall.changeTypes, QStringList({QStringLiteral("created"),
                                                  QStringLiteral("deleted")}));
+}
+
+/**
+ * @brief 矛盾するcreated親ディレクトリを復元計画から落とし、配下の本物は残すことを検証する
+ *
+ * 攻撃者はパスに改行を混入させることで、1エントリを複数行へ割り、"+.... /etc"のような偽の親ディレクトリ行を注入できる
+ * createdディレクトリはlive側の再帰削除になるため、そのまま計画へ載ると配下の非選択パスごと削除され得る
+ * 復元元に存在しないディレクトリの配下は必ずcreatedになるという不変条件により、非createdの実レコードを含む場合は親自身だけを落とす
+ */
+void TestFileChangeModel::createdParentWithNonCreatedDescendantSuppressesOnlyParent()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    // "+.... /etc"は、carrierディレクトリ名に埋め込まれた改行によって注入された偽の行
+    const QString output = QStringLiteral("+.... /etc\n"
+                                          "c.... /etc/existing.conf\n"
+                                          "+.... /etc/added.conf\n");
+    prepareStagedRestore(&model, &fake, output,
+                         {QStringLiteral("/etc/")}, 100, /*flatMode=*/false);
+
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    const QStringList stagedPaths = stagedPathsOf(fake);
+
+    // 偽の親は計画に載らない
+    QVERIFY(!stagedPaths.contains(QStringLiteral("/etc")));
+
+    // 配下の本物は従来どおり載る (過剰に落とさない)
+    QCOMPARE(stagedPaths, QStringList({
+        QStringLiteral("/etc/added.conf"),
+        QStringLiteral("/etc/existing.conf"),
+    }));
+    QCOMPARE(stagedChangeTypesOf(fake), QStringList({
+        QStringLiteral("created"),
+        QStringLiteral("modified"),
+    }));
+}
+
+/**
+ * @brief 正規のcreatedディレクトリ木は従来どおり計画に載ることを検証する
+ *
+ * README.mdに明記された「Preへ戻すと新規ディレクトリを再帰削除する」挙動を壊さないこと
+ */
+void TestFileChangeModel::legitimateCreatedDirectoryTreeStillReachesThePlan()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    // パッケージインストールで"/etc/foo/"が丸ごと新設された場合の典型的な出力
+    const QString output = QStringLiteral("+.... /etc/foo\n"
+                                          "+.... /etc/foo/a.conf\n"
+                                          "+.... /etc/foo/b.conf\n");
+    prepareStagedRestore(&model, &fake, output,
+                         {QStringLiteral("/etc/foo/")}, 100, /*flatMode=*/false);
+
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    QCOMPARE(stagedPathsOf(fake), QStringList({
+        QStringLiteral("/etc/foo"),
+        QStringLiteral("/etc/foo/a.conf"),
+        QStringLiteral("/etc/foo/b.conf"),
+    }));
+    QCOMPARE(stagedChangeTypesOf(fake), QStringList({
+        QStringLiteral("created"),
+        QStringLiteral("created"),
+        QStringLiteral("created"),
+    }));
+}
+
+/**
+ * @brief ツリー構築で合成された中間ディレクトリが誤検知を起こさないことを検証する
+ *
+ * 合成ノードはstatusFlagsが空でchangeTypeがModifiedになるが、比較結果に由来しないため矛盾の証拠にはならない
+ * Pre/Post表示フィルタが実レコードを間引いた場合にも生じる
+ */
+void TestFileChangeModel::syntheticIntermediateDirectoriesDoNotSuppressCreatedParent()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    // /etc/foo/barは出力に現れず、ツリー構築時に合成される
+    const QString output = QStringLiteral("+.... /etc/foo\n"
+                                          "+.... /etc/foo/bar/baz.conf\n");
+    prepareStagedRestore(&model, &fake, output,
+                         {QStringLiteral("/etc/foo/")}, 100, /*flatMode=*/false);
+
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    const QStringList stagedPaths = stagedPathsOf(fake);
+
+    // 合成された/etc/foo/barは実レコードではないため計画に載らず、かつ/etc/fooの抑止理由にもならない
+    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo")));
+    QVERIFY(!stagedPaths.contains(QStringLiteral("/etc/foo/bar")));
+    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo/bar/baz.conf")));
+}
+
+/**
+ * @brief 配下が全てcreatedの偽親は、クライアントからは識別できないことを記録する
+ *
+ * 行形式だけを受け取るクライアントにとって、この入力は「新規ファイルだけが追加された正規の新設ディレクトリ」と完全に同一である
+ * 由来を示す情報がレコードに存在しないため、本ケースを止められるのはクライアント側の判定ではなく、
+ * サーバ側のシリアライズfail-closedと、created削除前の復元元存在確認である
+ *
+ * hasOnlyCreatedRecordsBeneath()をここまで拡張しようとすると正規の出力を拒否してしまうため、本テストは現在の挙動を仕様として固定する
+ */
+void TestFileChangeModel::createdParentWithOnlyCreatedDescendantsIsIndistinguishable()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    const QString output = QStringLiteral("+.... /etc\n"
+                                          "+.... /etc/added.conf\n");
+    prepareStagedRestore(&model, &fake, output,
+                         {QStringLiteral("/etc/")}, 100, /*flatMode=*/false);
+
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    QCOMPARE(stagedPathsOf(fake), QStringList({
+        QStringLiteral("/etc"),
+        QStringLiteral("/etc/added.conf"),
+    }));
 }
 
 QTEST_APPLESS_MAIN(TestFileChangeModel)

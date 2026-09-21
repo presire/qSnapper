@@ -59,10 +59,8 @@ namespace qsnapper {
          *     (C0: U+0000..U+001F / DEL: U+007F / C1: U+0080..U+009F) を含む場合は拒否
          *   - filePath の長さが PATH_MAX (4096) を超える場合は拒否
          *   - std::filesystem::path::lexically_normal() で正規化した上で、
-         *     filePath の文字列が snapshotRoot を完全プレフィクスとして持ち、
-         *     かつ境界が「完全一致」または「直後がパス区切り '/'」であることを要求する
-         *     単純な find()==0 では sibling root trick
-         *     (例: root="/a/b/snapshot" / p="/a/b/snapshot-evil/...") を取り逃すため、
+         *     filePath の文字列が snapshotRoot を完全プレフィクスとして持ち、かつ境界が「完全一致」または「直後がパス区切り '/'」であることを要求する
+         *     単純な find()==0 では sibling root trick (例: root="/a/b/snapshot" / p="/a/b/snapshot-evil/...") を取り逃すため、
          *     '/' 境界チェックを必須としている
          *   - シンボリックリンクの解決は呼び出し側で openat(O_NOFOLLOW) にて行う
          *     (この関数ではFSにタッチしない)
@@ -75,6 +73,28 @@ namespace qsnapper {
          * @return 基底内に収まっている場合: true、そうでなければ: false
          */
         bool isPathWithinSnapshotRoot(const QString &filePath, const QString &snapshotRoot);
+
+        /**
+         * @brief レコード区切りを破壊しない文字列かどうかを判定する
+         *
+         * D-Busの応答には「1行 = 1エントリ」の行指向テキスト (GetFileChanges系) と「1行 = 1スナップショット」のCSV (ListSnapshots系) があり、
+         * いずれも区切りが改行である
+         * 値に改行を混入できると1エントリが複数行に割れ、クライアントは実在しないエントリを独立したレコードとして解釈してしまう
+         * 偽の `created` エントリによる任意パス削除や、偽のスナップショット番号による誤削除 / 誤rollbackへ繋がる
+         *
+         * 仕様:
+         *   - 制御文字 (C0: U+0000..U+001F / DEL: U+007F / C1: U+0080..U+009F) を含む場合は拒否する
+         *     LF / CR はC0に含まれる
+         *   - 空文字列は安全とみなす (description等は空になり得るため)
+         *   - カンマは判定対象外。CSVの列ずれは表示上の破損に留まり、レコード境界そのものは壊さないため、本関数の責務ではない
+         *
+         * @note 呼び出し側はエントリを黙って捨てず、メソッド全体をエラー応答にすること (fail-closed)
+         *       1件だけ落とすと、クライアントは不完全な一覧を完全な一覧として扱ってしまう
+         *
+         * @param value 検査対象の文字列 (パス / description / cleanup / userdata)
+         * @return レコード区切りを破壊しない場合: true、拒否すべき場合: false
+         */
+        bool isRecordSafeText(const QString &value);
     } // namespace security
 } // namespace qsnapper
 

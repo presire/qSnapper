@@ -8,11 +8,13 @@
 #include <QFile>
 #include <QDebug>
 #include <QPointer>
-// glibのGDBusInterfaceInfo / GDBusObjectSkeletonは "signals" というメンバ名を持ち、
-// Qtの signals マクロと衝突する。polkitヘッダの取り込み中だけマクロを外す
+
+// glibのGDBusInterfaceInfo / GDBusObjectSkeletonは"signals"というメンバ名を持ち、Qtのsignalsマクロと衝突する
+// polkitヘッダの取り込み中だけマクロを外す
 #undef signals
 #include <polkit/polkit.h>
 #define signals Q_SIGNALS
+
 #include <snapper/Snapper.h>
 #include <snapper/Snapshot.h>
 #include <snapper/Comparison.h>
@@ -63,17 +65,13 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 // ============================================================================
 // Polkit非同期認可
 //
-// polkit-qt6-1の非同期API (Authority::checkAuthorization + checkAuthorizationFinished)
-// は使用しない。Authorityはシングルトンであり、完了シグナルはResult値しか運ばず、
-// 完了callbackのuser_dataもAuthority自身であるため、同時に2件の認可が進行すると
-// どのD-Bus呼び出しに対する結果なのかを判別できない (rootサービスでは
-// 「別要求の許可」を流用してしまう認可の取り違えに直結する)。
-// またcancellableとエラー状態がシングルトンで共有されており、1件の失敗が
-// 後続の全呼び出しを黙って落とす。
+// polkit-qt6-1の非同期API (Authority::checkAuthorization + checkAuthorizationFinished) は使用しない
+// Authorityはシングルトンであり、完了シグナルはResult値しか運ばず、完了callbackのuser_dataもAuthority自身であるため、
+// 同時に2件の認可が進行すると、どのD-Bus呼び出しに対する結果なのかを判別できない (rootサービスでは「別要求の許可」を流用してしまう認可の取り違えに直結する)
+// またcancellableとエラー状態がシングルトンで共有されており、1件の失敗が後続の全呼び出しを黙って落とす
 //
-// polkitのGObject APIは呼び出しごとにGSimpleAsyncResultとuser_dataを確保するため、
-// 完了callbackを発行元の呼び出しへ厳密に対応付けられる。完了callbackは呼び出し時点の
-// thread-default GMainContext (=Qtのイベントループが回すdefault context) で発火する
+// polkitのGObject APIは呼び出しごとにGSimpleAsyncResultとuser_dataを確保するため、完了callbackを発行元の呼び出しへ厳密に対応付けられる
+// 完了callbackは呼び出し時点のthread-default GMainContext (=Qtのイベントループが回すdefault context) で発火する
 // ============================================================================
 
 namespace {
@@ -111,8 +109,7 @@ namespace {
     /**
      * @brief polkit非同期認可の完了callback
      *
-     * user_dataは本呼び出し専用に確保したAsyncAuthorizationであり、
-     * 他の認可要求の結果と混ざらない
+     * user_dataは本呼び出し専用に確保したAsyncAuthorizationであり、他の認可要求の結果と混ざらない
      *
      * @param source 認可を行ったPolkitAuthority
      * @param result 完了結果
@@ -159,7 +156,7 @@ namespace {
 
 namespace {
 
-    // 新規inodeへ差し替える復元経路で、snapshot側のSELinux labelを引き継ぐ。
+    // 新規inodeへ差し替える復元経路で、snapshot側のSELinux labelを引き継ぐ
     // SELinux無効環境やlabel非対応FSではENODATA / ENOTSUPになるため、成否は非致命として扱う
     void copySecurityContextBestEffort(int sourceFd, int destinationFd)
     {
@@ -197,8 +194,8 @@ namespace {
                 + QStringLiteral(".") + QString::number(QDateTime::currentMSecsSinceEpoch())
                 + QStringLiteral(".") + QString::number(attempt);
 
-        // leaf名はNAME_MAX (bytes) を超えられない。長いbase名はここで切り詰めるが、
-        // suffixのpid / ms / attemptにより一意性は保たれる。
+        // leaf名はNAME_MAX (bytes) を超えられない
+        // 長いbase名はここで切り詰めるが、suffixのpid / ms / attemptにより一意性は保たれる
         // UTF-8の途中で切らないよう、収まるまで文字単位で削る
         const qsizetype maxBaseBytes = static_cast<qsizetype>(NAME_MAX) - 1 - suffix.size();
         QString trimmedBase = baseName;
@@ -213,8 +210,8 @@ namespace {
                 + suffix;
     }
 
-    // live path 上の退避 rename も parent dirfd を固定した renameat() に寄せる。
-    // これにより intermediate parent の symlink 差し替えに依存しない。
+    // live path上の退避リネームも、parent dirfdを固定したrenameat()に寄せる
+    // これにより、intermediate parentのsymlink差し替えに依存しない
     bool movePathAsideNoFollow(const QString &path, QString *movedPath)
     {
         if (movedPath) {
@@ -365,7 +362,7 @@ namespace {
                 x = px; y = py;
             }
 
-            // d=0の初期 snake (等号行のみ、編集なし)
+            // d=0の初期snake (等号行のみ、編集なし)
             while (x > 0 && y > 0) {
                 x--; y--;
                 revTypes.append(DiffOp::Equal);
@@ -567,8 +564,7 @@ SnapshotOperations::~SnapshotOperations()
  * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長する
  *
  * polkitプロンプトの応答待ちが1件でも残っている間はタイマを止めたままにする
- * (プロンプトはタイムアウトを持たないため、認証中にアイドル終了してしまうと
- *  ユーザがパスワードを入力した直後に呼び出しが失われる)
+ * (プロンプトはタイムアウトを持たないため、認証中にアイドル終了してしまうと、ユーザがパスワードを入力した直後に呼び出しが失われる)
  */
 void SnapshotOperations::resetIdleTimer()
 {
@@ -677,9 +673,9 @@ QString SnapshotOperations::restoreModeString(
 }
 
 /**
- * @brief RFC4180形式で必要なCSV fieldをquoteする
- * @param field quote対象文字列
- * @return CSVへ安全に埋め込めるfield
+ * @brief RFC4180形式で必要なCSVフィールドをquoteする
+ * @param フィールドquote対象文字列
+ * @return CSVへ安全に埋め込めるフィールド
  */
 QString SnapshotOperations::quoteRestoreStatusCsvField(const QString &field)
 {
@@ -838,11 +834,9 @@ void SnapshotOperations::purgeExpiredRestorePlans()
             qsnapper::restore::ManifestError::None;
         const QString owner = m_restorePlanOwners.value(manifestId);
         if (!m_restoreRegistry.status(manifestId, owner, &error)) {
-            // executorが同じ計画をもう1度終端しないよう先にabandonしてから、
-            // finishRestorePlanで終端する。
+            // executorが同じ計画をもう1度終端しないよう先にabandonしてから、finishRestorePlanで終端する
             // ここでcleanupRestoreExecutionだけを呼ぶとrestorePlanFinishedが発火せず、
-            // クライアントは完了通知を永久に待ち続け、復元でread-onlyになった
-            // root subvolumeをrwへ戻す安全ネットも実行されない
+            // クライアントは完了通知を永久に待ち続け、復元でread-onlyになったrootサブボリュームをrwへ戻す安全ネットも実行されない
             m_restoreExecutor.abandon(manifestId);
             finishRestorePlan(
                 manifestId, qsnapper::restore::ManifestState::Failed,
@@ -1166,8 +1160,7 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
         POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION, nullptr,
         asyncAuthorizationFinished, request);
 
-    // polkit_authority_check_authorization()はsubjectを同期的にGVariant化するため、
-    // 呼び出し直後に解放してよい
+    // polkit_authority_check_authorization()はsubjectを同期的にGVariant化するため、呼び出し直後に解放してよい
     g_object_unref(subject);
 
     ++m_pendingAuthorizations;
@@ -1261,6 +1254,36 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
     for (auto it = snapshots.begin(); it != snapshots.end(); ++it) {
         const snapper::Snapshot &snapshot = *it;
 
+        // 本CSVは「1行 = 1スナップショット」である
+        // description / cleanup / userdataは、snapper CLIやpluginからも書き込まれる信頼できない値であり、
+        // 改行を混入されると行が割れて攻撃者の選んだnumberを持つ偽のスナップショット行が生まれる
+        // 偽のnumberはクライアントからDeleteSnapshot / RollbackSnapshotへそのまま渡るため、1件でも検出したら一覧全体を失敗させる (fail-closed)
+        // カンマは列をずらすだけでnumberは壊さず、正当なdescriptionにも現れ得るため対象外とする
+        const QString cleanup     = QString::fromStdString(snapshot.getCleanup());
+        const QString description = QString::fromStdString(snapshot.getDescription());
+
+        // ユーザデータを key1=value1,key2=value2形式に変換
+        const std::map<std::string, std::string> &userdata = snapshot.getUserdata();
+        QStringList userdataPairs;
+        bool recordSafe = qsnapper::security::isRecordSafeText(cleanup)
+                && qsnapper::security::isRecordSafeText(description);
+        for (const auto &pair : userdata) {
+            const QString key   = QString::fromStdString(pair.first);
+            const QString value = QString::fromStdString(pair.second);
+            if (!qsnapper::security::isRecordSafeText(key) || !qsnapper::security::isRecordSafeText(value)) {
+                recordSafe = false;
+                break;
+            }
+            userdataPairs.append(key + "=" + value);
+        }
+        if (!recordSafe) {
+            // 攻撃者が制御する値はログにもエラー本文にも載せない (ログ注入防止)
+            qWarning() << "Rejected snapshot listing: snapshot" << snapshot.getNum()
+                       << "has metadata containing control characters";
+            replyError(QDBusError::Failed, QStringLiteral("Snapshot metadata contains control characters"));
+            return QString();
+        }
+
         csv += QString::number(snapshot.getNum()) + ",";
         csv += snapshotTypeToString(snapshot.getType()) + ",";
         csv += QString::number(snapshot.getPreNum()) + ",";
@@ -1270,16 +1293,9 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
         csv += dateTime.toString(Qt::ISODate) + ",";
 
         csv += QString::number(snapshot.getUid()) + ",";
-        csv += QString::fromStdString(snapshot.getCleanup()) + ",";
-        csv += QString::fromStdString(snapshot.getDescription()) + ",";
+        csv += cleanup + ",";
+        csv += description + ",";
 
-        // ユーザデータを key1=value1,key2=value2形式に変換
-        const std::map<std::string, std::string> &userdata = snapshot.getUserdata();
-        QStringList userdataPairs;
-        for (const auto &pair : userdata) {
-            userdataPairs.append(QString::fromStdString(pair.first) + "=" +
-                               QString::fromStdString(pair.second));
-        }
         csv += userdataPairs.join(",");
         csv += "\n";
     }
@@ -1424,6 +1440,22 @@ QString SnapshotOperations::createSnapshotAuthorized(
             return QString();
         }
 
+        // 格納前にレコード境界を破壊する値を拒否する理由はmodifySnapshotAuthorized()側の注記を参照すること
+        if (!qsnapper::security::isRecordSafeText(description)
+                || !qsnapper::security::isRecordSafeText(cleanup)) {
+            replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Snapshot metadata must not contain control characters"));
+            return QString();
+        }
+        for (auto it = userdata.constBegin(); it != userdata.constEnd(); ++it) {
+            if (!qsnapper::security::isRecordSafeText(it.key())
+                    || !qsnapper::security::isRecordSafeText(it.value())) {
+                replyError(QDBusError::InvalidArgs,
+                           QStringLiteral("Snapshot metadata must not contain control characters"));
+                return QString();
+            }
+        }
+
         // スナップショット作成 (スナップショット一覧の変化) 前にComparisonキャッシュを無効化
         m_comparisonCache.clear();
 
@@ -1477,6 +1509,31 @@ QString SnapshotOperations::createSnapshotAuthorized(
         logPluginReport(report);
 #endif
 
+        // レコード境界を破壊する値を拒否する理由はformatSnapshotToCSV()側の注記を参照すること
+        const QString cleanup     = QString::fromStdString(newSnapshot->getCleanup());
+        const QString description = QString::fromStdString(newSnapshot->getDescription());
+
+        const std::map<std::string, std::string> &userdata = newSnapshot->getUserdata();
+        QStringList userdataPairs;
+        bool recordSafe = qsnapper::security::isRecordSafeText(cleanup) && qsnapper::security::isRecordSafeText(description);
+        for (const auto &pair : userdata) {
+            const QString key   = QString::fromStdString(pair.first);
+            const QString value = QString::fromStdString(pair.second);
+            if (!qsnapper::security::isRecordSafeText(key) || !qsnapper::security::isRecordSafeText(value)) {
+                recordSafe = false;
+                break;
+            }
+            userdataPairs.append(key + "=" + value);
+        }
+        if (!recordSafe) {
+            // スナップショット自体は作成済みである。応答だけを拒否し、
+            // 偽装可能なCSVをクライアントへ渡さない
+            qWarning() << "Rejected snapshot creation reply: snapshot" << newSnapshot->getNum()
+                       << "has metadata containing control characters";
+            replyError(QDBusError::Failed, QStringLiteral("Snapshot metadata contains control characters"));
+            return QString();
+        }
+
         // 新しく作成されたスナップショットのCSV情報を返す
         QString csv = "number,type,pre-number,date,user,cleanup,description,userdata\n";
         csv += QString::number(newSnapshot->getNum()) + ",";
@@ -1487,15 +1544,9 @@ QString SnapshotOperations::createSnapshotAuthorized(
         csv += dateTime.toString(Qt::ISODate) + ",";
 
         csv += QString::number(newSnapshot->getUid()) + ",";
-        csv += QString::fromStdString(newSnapshot->getCleanup()) + ",";
-        csv += QString::fromStdString(newSnapshot->getDescription()) + ",";
+        csv += cleanup + ",";
+        csv += description + ",";
 
-        const std::map<std::string, std::string> &userdata = newSnapshot->getUserdata();
-        QStringList userdataPairs;
-        for (const auto &pair : userdata) {
-            userdataPairs.append(QString::fromStdString(pair.first) + "=" +
-                                 QString::fromStdString(pair.second));
-        }
         csv += userdataPairs.join(",");
 
         return csv;
@@ -1550,6 +1601,20 @@ bool SnapshotOperations::modifySnapshotAuthorized(
     const QString &configName, int number, const QString &description,
     const QString &cleanup, const QMap<QString, QString> &userdata)
 {
+    // 格納前にレコード境界を破壊する値を拒否する
+    // ここを通過したmetadataはListSnapshots等でそのまま連結されるため、qSnapper自身が一覧取得を不能にする値を保存しない
+    // カンマは列をずらすだけでレコード境界を壊さないため対象外とする
+    if (!qsnapper::security::isRecordSafeText(description) || !qsnapper::security::isRecordSafeText(cleanup)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Snapshot metadata must not contain control characters"));
+        return false;
+    }
+    for (auto it = userdata.constBegin(); it != userdata.constEnd(); ++it) {
+        if (!qsnapper::security::isRecordSafeText(it.key()) || !qsnapper::security::isRecordSafeText(it.value())) {
+            replyError(QDBusError::InvalidArgs, QStringLiteral("Snapshot metadata must not contain control characters"));
+            return false;
+        }
+    }
+
     try {
         snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
@@ -1626,14 +1691,11 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
 {
     resetIdleTimer();
 
-    // 実行中の復元計画が復元元として参照しているスナップショットは削除しない。
-    // pin済みdirfdがソース読み取りの同一性を保証するが、復元中の削除は
-    // 「認可時に存在した復元元」の消失につながるため、ここで明示的に拒否する
+    // 実行中の復元計画が復元元として参照しているスナップショットは削除しない
+    // pin済みdirfdがソース読み取りの同一性を保証するが、復元中の削除は「認可時に存在した復元元」の消失につながるため、ここで明示的に拒否する
     for (const RestoreExecution &executionItem : m_restoreExecutions) {
-        if (executionItem.configName == configName
-                && executionItem.snapshotNumber == number) {
-            replyError(QDBusError::Failed,
-                           QStringLiteral("Snapshot is in use by an active restore plan"));
+        if (executionItem.configName == configName && executionItem.snapshotNumber == number) {
+            replyError(QDBusError::Failed, QStringLiteral("Snapshot is in use by an active restore plan"));
             return false;
         }
     }
@@ -1702,8 +1764,7 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
  * @param number ロールバック先のスナップショット番号
  * @return 設定成功時: true、失敗時: false
  */
-bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName,
-                                                    int number)
+bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, int number)
 {
     try {
         snapper::Snapper *snapper = getSnapper(configName);
@@ -1722,7 +1783,7 @@ bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName,
         // ロールバックはスナップショット一覧・現在状態を変化させるためComparisonキャッシュを無効化
         m_comparisonCache.clear();
 
-        // "sudo snapper rollback N"と同等の挙動を再現する。
+        // "sudo snapper rollback N"と同等の挙動を再現する
         //
         // CLI (client/snapper/cmd-rollback.cc) はambitを以下で判定する:
         //   - previous_defaultがread-only --> TRANSACTIONAL
@@ -1908,7 +1969,23 @@ QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
             // パディングして出力フォーマットを整える
             statusStr = statusStr.leftJustified(5, '.');
 
-            output += statusStr + " " + QString::fromStdString(file.getName()) + "\n";
+            // 本出力は「1行 = 1エントリ」の行指向テキストである。
+            // パスに改行を混入できると1エントリが複数行に割れ、2行目以降が
+            // 攻撃者の選んだstatusとパスを持つ独立エントリとしてクライアントに解釈される。
+            // 検証した文字列をそのまま連結し、再取得した値を使わないこと
+            const QString fileName = QString::fromStdString(file.getName());
+            if (!qsnapper::security::isRecordSafeText(fileName)) {
+                // 該当エントリだけを落とすと、クライアントは欠落した一覧を完全な一覧として
+                // 扱ってしまうため、メソッド全体を失敗させる。
+                // 攻撃者が制御するパスはログにもエラー本文にも載せない (ログ注入防止)
+                qWarning() << "Rejected file change listing: snapshot" << snapshotNumber
+                           << "of config" << configName
+                           << "contains a path with control characters";
+                replyError(QDBusError::Failed, QStringLiteral("Snapshot contains a file path with control characters"));
+                return QString();
+            }
+
+            output += statusStr + " " + fileName + "\n";
         }
 
         return output;
@@ -1997,7 +2074,18 @@ QString SnapshotOperations::getFileChangesBetweenAuthorized(
             if (statusStr.isEmpty()) statusStr = ".....";
             statusStr = statusStr.leftJustified(5, '.');
 
-            output += statusStr + " " + QString::fromStdString(file.getName()) + "\n";
+            // fail-closeする理由と、検証した文字列をそのまま連結する理由は
+            // getFileChangesAuthorized()側の注記を参照すること
+            const QString fileName = QString::fromStdString(file.getName());
+            if (!qsnapper::security::isRecordSafeText(fileName)) {
+                qWarning() << "Rejected file change listing: snapshots" << number1 << "->" << number2
+                           << "of config" << configName
+                           << "contain a path with control characters";
+                replyError(QDBusError::Failed, QStringLiteral("Snapshot contains a file path with control characters"));
+                return QString();
+            }
+
+            output += statusStr + " " + fileName + "\n";
         }
 
         return output;
@@ -2340,9 +2428,8 @@ bool SnapshotOperations::StageRestoreEntries(
         return false;
     }
 
-    // stagingは認可を要さないため、グローバル予算を消費する唯一の経路でもある。
-    // 失効済み計画をここで回収しておかないと、放置された計画が予算を占有し続け、
-    // 正規の利用者がGlobalLimitで弾かれる
+    // stagingは認可を要さないため、グローバル予算を消費する唯一の経路でもある
+    // 失効済み計画をここで回収しておかないと、放置された計画が予算を占有し続け、正規の利用者がGlobalLimitで弾かれる
     purgeExpiredRestorePlans();
 
     if (filePaths.size() != changeTypes.size()) {
@@ -2408,10 +2495,9 @@ bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
         return false;
     }
 
-    // 復元はlive filesystemを書き換える排他的な操作である。
+    // 復元はlive filesystemを書き換える排他的な操作である
     // 複数計画がchunk境界で交互実行されると最終状態が非決定になり、
-    // libsnapperのmount_user_requestがbool (カウンタではない) であることも
-    // 相まってmount管理が衝突し得るため、同時に1計画のみ実行を許す
+    // libsnapperのmount_user_requestがbool (カウンタではない) であることも相まってmount管理が衝突し得るため、同時に1計画のみ実行を許す
     if (!m_restoreExecutions.isEmpty()) {
         replyError(QDBusError::Failed,
                        QStringLiteral("Another restore plan is already running"));
@@ -2443,9 +2529,8 @@ bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
         return sendManifestError(error);
     }
 
-    // 認可対象は凍結済みの不変計画である。
-    // 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が起こり得るため、
-    // 実際のmountとexecutor起動は継続側で状態を再検証してから行う
+    // 認可対象は凍結済みの不変計画である
+    // 認可待ちの間にcancel / TTL失効 / owner消失 / 他計画の実行開始が起こり得るため、実際のmountとexecutor起動は継続側で状態を再検証してから行う
     const AuthorizationOutcome outcome = beginAuthorization(
         QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
         [this, manifestId, owner](const CallReply &reply, bool granted) {
@@ -2499,7 +2584,7 @@ void SnapshotOperations::failRestorePlanAuthorization(const QString &manifestId,
 /**
  * @brief 認可済みのCommitRestorePlan本体
  *
- * 認可待ちの間にevent loopが回るため、凍結済み計画が生き残っている保証はない。
+ * 認可待ちの間にevent loopが回るため、凍結済み計画が生き残っている保証はない
  * mountやexecutor起動といった不可逆な操作の前に、以下を必ず再検証する:
  *   - 他の計画が実行を開始していないこと (復元はlive filesystemへの排他操作)
  *   - 計画がownerに束縛されたまま存在し、まだFrozenであること
@@ -2571,9 +2656,8 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         m_restoreExecutions.insert(manifestId, execution);
         m_restoreExecutions[manifestId].snapshotDir = snapshotDir;
 
-        // ソースsnapshotをdirfdでpinする。
-        // 以降のソース読み取りは本fd相対で行うため、chunk境界でevent loopが回る間に
-        // path上のsnapshotが削除 / 同番号で再作成 / 差し替えられても、
+        // ソースsnapshotをdirfdでpinする
+        // 以降のソース読み取りは本fd相対で行うため、chunk境界でevent loopが回る間にpath上のsnapshotが削除 / 同番号で再作成 / 差し替えられても、
         // 認可時に参照したsnapshotそのものから復元し続ける
         const int snapshotDirFd = ::open(snapshotDir.toUtf8().constData(),
                                          O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -2675,8 +2759,7 @@ QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
         return {};
     }
 
-    qsnapper::restore::ManifestError error =
-        qsnapper::restore::ManifestError::None;
+    qsnapper::restore::ManifestError error = qsnapper::restore::ManifestError::None;
     const auto status = m_restoreRegistry.status(manifestId, owner, &error);
     if (!status) {
         sendManifestError(error);
@@ -2790,9 +2873,8 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
         return false;
     }
 
-    // 入力検証は認可より前に行う。
-    // polkitプロンプトを出してから "No files specified" で蹴るUXを避けるとともに、
-    // 攻撃者が不正な入力でpolkitを浪費するのを防ぐ
+    // 入力検証は認可より前に行う
+    // polkitプロンプトを出してから"No files specified"で蹴るUXを避けるとともに、攻撃者が不正な入力でpolkitを浪費するのを防ぐ
     if (filePaths.isEmpty()) {
         replyError(QDBusError::InvalidArgs, "No files specified for restore");
         return false;
@@ -2816,7 +2898,7 @@ bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapsho
 /**
  * @brief 認可済みのrestoreFilesImpl本体
  *
- * configName / filePaths / changeTypes の検証はrestoreFilesImpl側で認可前に完了している
+ * configName / filePaths / changeTypesの検証はrestoreFilesImpl側で認可前に完了している
  *
  * @param configName 検証済みSnapper設定名
  * @return 全ファイル成功時true
@@ -2871,7 +2953,7 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                     || changeType == QStringLiteral("modified")
                     || changeType == QStringLiteral("typechanged");
 
-            // 入力検証 (進捗 emit より前に行い、未検証パスをD-Busシグナルへ漏出させない)
+            // 入力検証 (進捗emitより前に行い、未検証パスをD-Busシグナルへ漏出させない)
             // (1) 絶対パスでなければ拒否
             if (!filePath.startsWith(QLatin1Char('/'))) {
                 qWarning() << logTag << ": Rejecting non-absolute path:" << filePath;
@@ -2879,7 +2961,7 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                 continue;
             }
 
-            // (2) 書き込み先として /.snapshots とその配下は禁止 (スナップショット木の破壊防止)
+            // (2) 書き込み先として、/.snapshotsとその配下は禁止 (スナップショット木の破壊防止)
             if (filePath == QStringLiteral("/.snapshots")
                     || filePath.startsWith(QStringLiteral("/.snapshots/"))) {
                 qWarning() << logTag << ": Skipping dangerous destination path:" << filePath;
@@ -2913,6 +2995,36 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
 
             if (changeType == "created") {
                 // スナップショット時点では存在しなかったファイル --> 削除
+                //
+                // staged restoreのapplyRestoreEntry()と同じ実行段ガードを適用する
+                // 旧APIもクライアント申告のentryを無検証で信頼するため、シリアライズ経路への注入等で偽装されたentryがここまで到達し得る
+                // 破壊の直前に「復元元snapshotに存在しないこと」を確認し、確認できなければ削除しない
+                QString relativePath;
+                if (!qsnapper::security::splitDestinationBeneathRoot(QStringLiteral("/"), systemFilePath, &relativePath)) {
+                    qWarning() << logTag << ": Rejecting malformed created path:" << filePath;
+                    skippedCount++;
+                    continue;
+                }
+
+                // 復元元snapshotはこのループ中に同期実行され、event loopへ制御を返さないため、
+                // mount済みsnapshotDirのpathから開いたfdは認可時のsnapshotと同一である
+                const int snapshotDirFd = ::open(snapshotDir.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+                if (snapshotDirFd < 0) {
+                    qWarning() << logTag << ": Failed to pin restore source snapshot:"
+                               << strerror(errno);
+                    allSuccess = false;
+                    continue;
+                }
+
+                const bool confirmedAbsent = qsnapper::security::isConfirmedAbsentAt(snapshotDirFd, relativePath);
+                ::close(snapshotDirFd);
+                if (!confirmedAbsent) {
+                    qWarning() << logTag << ": Refusing to remove a path that is not confirmed"
+                               << "absent from the restore source";
+                    skippedCount++;
+                    continue;
+                }
+
                 fileSuccess = qsnapper::security::safeRemoveAll(systemFilePath);
                 if (!fileSuccess) {
                     qWarning() << logTag << ": Failed to remove" << systemFilePath
@@ -2934,9 +3046,8 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                 struct stat snapshotFileInfo;
                 const bool hasSnapshotFileInfo = qsnapper::security::safeLstat(snapshotFilePath, &snapshotFileInfo);
 
-                // live側を破壊する前に復元元の可用性と種別を確定させる。
-                // 先に退避・削除してから "Source not restorable" で失敗すると、
-                // 復元元が存在しないままlive側のデータだけが失われる
+                // live側を破壊する前に復元元の可用性と種別を確定させる
+                // 先に退避・削除してから "Source not restorable" で失敗すると、復元元が存在しないままlive側のデータだけが失われる
                 const bool sourceIsLink = hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
                 const bool sourceIsDirectory = hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
                 const bool sourceIsRegular = hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
@@ -2965,7 +3076,7 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                     }
                 }
                 else if (sourceIsDirectory) {
-            // ディレクトリの場合: safeMkpath + safeOpenDirectory で取得した dirFd に対して fchown/fchmod
+            // ディレクトリの場合: safeMkpath + safeOpenDirectoryで取得したdirFdに対してfchown/fchmod
             if (!qsnapper::security::safeMkpath(systemFilePath)) {
                         qWarning() << logTag << ": Failed to safely create directory"
                                    << systemFilePath;
@@ -2979,7 +3090,7 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                             fileSuccess = false;
                         }
                         else {
-                            // パーミッションをコピー (snapshot から lstat した stat を、live dir の fd に対して fchown/fchmod)
+                            // パーミッションをコピー (snapshotからlstatしたstatを、live dirのfdに対してfchown/fchmod)
                             struct stat st;
                             if (qsnapper::security::safeLstat(snapshotFilePath, &st)) {
                                 const bool mustPreserveMetadata = (::geteuid() == 0);
@@ -3013,8 +3124,8 @@ bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
                     }
                 }
 
-                // 退避物の破棄は復元成功後にのみ行う。
-                // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない。
+                // 退避物の破棄は復元成功後にのみ行う
+                // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない
                 // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
                 if (!detachedPath.isEmpty()) {
                     if (fileSuccess) {
@@ -3176,8 +3287,8 @@ bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst,
     return true;
 }
 
-    /**
-    * @brief シンボリックリンクをコピー (readlinkat → symlinkat → fchownat(AT_SYMLINK_NOFOLLOW) + utimensat(AT_SYMLINK_NOFOLLOW))
+/**
+* @brief シンボリックリンクをコピー (readlinkat → symlinkat → fchownat(AT_SYMLINK_NOFOLLOW) + utimensat(AT_SYMLINK_NOFOLLOW))
  *
  * copySymlinkは、リンク先自体を保持しつつ、名前の変更やメタデータの更新を信頼できる親ディレクトリファイルへの参照に固定するため、
  * 中間にある親ディレクトリでのライブパスシンボリックリンクの置換によって、最終的な操作がリダイレクトされることはない
@@ -3262,8 +3373,7 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
     for (int attempt = 0; attempt < 16; ++attempt) {
         const QString candidate = siblingTemporaryPath(
             path, QStringLiteral("qsnapper-old"), attempt);
-        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(
-                QStringLiteral("/"), path, candidate)) {
+        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(QStringLiteral("/"), path, candidate)) {
             if (movedPath) {
                 *movedPath = candidate;
             }
@@ -3273,6 +3383,7 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
         if (errno == ENOENT) {
             return true;
         }
+
         if (errno == EEXIST || errno == ENOTEMPTY) {
             continue;
         }
@@ -3327,8 +3438,20 @@ bool SnapshotOperations::applyRestoreEntry(
     }
 
     if (entry.changeType == QStringLiteral("created")) {
-        const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(
-            QStringLiteral("/"), entry.path);
+        // "created"は「復元元snapshotに存在しない」という意味であり、だからこそlive側からの削除が正しい動作になる
+        // 逆に復元元に存在するパスは、削除ではなく復元が正しい
+        // サーバはクライアントが申告したentryを再計算しないため、シリアライズ経路への注入等で偽装されたentryがここまで到達し得る
+        // 破壊の直前に前提そのものを確認する
+        //
+        // 検証は認可時にpinしたsnapshotDirFd相対で行い、本関数の冒頭でsplitDestinationBeneathRootがentry.pathから導出したrelativePathをそのまま使用する
+        // 復元元snapshotはread-onlyかつfdでpin済みであり、検証対象と削除対象は同一のentry.pathに由来するため、検証後に別の値を取り直す余地はない
+        if (!qsnapper::security::isConfirmedAbsentAt(context.snapshotDirFd, relativePath)) {
+            qWarning() << "Staged restore: Refused to delete a path that is not confirmed"
+                       << "absent from the restore source";
+            return false;
+        }
+
+        const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"), entry.path);
         if (!removed) {
             qWarning() << "Staged restore: Failed to remove live path:"
                        << strerror(errno);
@@ -3337,43 +3460,35 @@ bool SnapshotOperations::applyRestoreEntry(
     }
 
     const int slashIndex = entry.path.lastIndexOf(QLatin1Char('/'));
-    const QString parentPath = slashIndex <= 0
-        ? QStringLiteral("/")
-        : entry.path.left(slashIndex);
-    if (parentPath != QStringLiteral("/")
-            && !qsnapper::security::safeCreateDirectoryBeneathRoot(
-                QStringLiteral("/"), parentPath, 0755)) {
+    const QString parentPath = slashIndex <= 0 ? QStringLiteral("/")
+                                               : entry.path.left(slashIndex);
+    if (parentPath != QStringLiteral("/") && !qsnapper::security::safeCreateDirectoryBeneathRoot(QStringLiteral("/"), parentPath, 0755)) {
         qWarning() << "Staged restore: Failed to create live parent directory:"
                    << strerror(errno);
         return false;
     }
 
-    // ソースの種別判定はpin済みsnapshot dirfd相対で行う。
+    // ソースの種別判定はpin済みsnapshot dirfd相対で行う
     // 実行中にsnapshotDirのpath上で何が起きても、認可時にpinしたinodeを観測する
     // (AT_SYMLINK_NOFOLLOWによりleafのsymlinkも展開しない)
     struct stat snapshotFileInfo;
     const bool hasSnapshotFileInfo = qsnapper::security::safeLstatAt(
         context.snapshotDirFd, relativePath, &snapshotFileInfo);
 
-    // live側を破壊する前に復元元の可用性と種別を確定させる。
-    // 凍結・認可の時点でsnapshotDirを検証していても、認可から本entryの適用までには
-    // chunk境界でevent loopが回るため、その間に復元元snapshotが削除 / unmountされ得る。
-    // 先に退避・削除してから "Source is not restorable" で失敗すると、
-    // 復元元が存在しないままlive側のデータだけが失われる
-    const bool sourceIsLink =
-        hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
-    const bool sourceIsDirectory =
-        hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
-    const bool sourceIsRegular =
-        hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
+    // live側を破壊する前に復元元の可用性と種別を確定させる
+    // 凍結・認可の時点でsnapshotDirを検証していても、認可から本entryの適用までにはchunk境界でevent loopが回るため、
+    // その間に復元元snapshotが削除 / unmountされ得る
+    // 先に退避・削除してから "Source is not restorable" で失敗すると、復元元が存在しないままlive側のデータだけが失われる
+    const bool sourceIsLink = hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
+    const bool sourceIsDirectory = hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
+    const bool sourceIsRegular = hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
     if (!sourceIsLink && !sourceIsDirectory && !sourceIsRegular) {
         qWarning() << "Staged restore: Source is not restorable";
         return false;
     }
 
     QString detachedPath;
-    if (context.removeOnTypechanged
-            && entry.changeType == QStringLiteral("typechanged")) {
+    if (context.removeOnTypechanged && entry.changeType == QStringLiteral("typechanged")) {
         if (!movePathAsideBeneathRoot(entry.path, &detachedPath)) {
             qWarning() << "Staged restore: Failed to move live path aside:"
                        << strerror(errno);
@@ -3383,20 +3498,16 @@ bool SnapshotOperations::applyRestoreEntry(
 
     bool applied = false;
     if (sourceIsLink) {
-        applied = copySymlinkBeneathRoot(context.snapshotDirFd, relativePath,
-                                         entry.path);
+        applied = copySymlinkBeneathRoot(context.snapshotDirFd, relativePath, entry.path);
     }
     else if (sourceIsDirectory) {
-        if (!qsnapper::security::safeCreateDirectoryBeneathRoot(
-                QStringLiteral("/"), entry.path, 0755)) {
+        if (!qsnapper::security::safeCreateDirectoryBeneathRoot(QStringLiteral("/"), entry.path, 0755)) {
             qWarning() << "Staged restore: Failed to create live directory:"
                        << strerror(errno);
         }
         else {
             const int directoryFd =
-                qsnapper::security::safeOpenDirectoryBeneathRoot(
-                    QStringLiteral("/"), relativePath,
-                    /*createMissing=*/false, 0755);
+                qsnapper::security::safeOpenDirectoryBeneathRoot(QStringLiteral("/"), relativePath, /*createMissing=*/false, 0755);
             if (directoryFd < 0) {
                 qWarning() << "Staged restore: Failed to open live directory:"
                            << strerror(errno);
@@ -3404,8 +3515,7 @@ bool SnapshotOperations::applyRestoreEntry(
             else {
                 const bool mustPreserveMetadata = (::geteuid() == 0);
                 bool metadataOk = true;
-                if (::fchown(directoryFd, snapshotFileInfo.st_uid,
-                             snapshotFileInfo.st_gid) < 0) {
+                if (::fchown(directoryFd, snapshotFileInfo.st_uid, snapshotFileInfo.st_gid) < 0) {
                     qWarning() << "Staged restore: Failed to preserve directory owner:"
                                << strerror(errno);
                     metadataOk = !mustPreserveMetadata;
@@ -3421,23 +3531,20 @@ bool SnapshotOperations::applyRestoreEntry(
         }
     }
     else {
-        applied = copyRegularFileBeneathRoot(
-            context.snapshotDirFd, relativePath, entry.path, context.useReflink);
+        applied = copyRegularFileBeneathRoot(context.snapshotDirFd, relativePath, entry.path, context.useReflink);
     }
 
-    // 退避物の破棄は復元成功後にのみ行う。
-    // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない。
+    // 退避物の破棄は復元成功後にのみ行う
+    // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない
     // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
     if (!detachedPath.isEmpty()) {
         if (applied) {
-            if (!qsnapper::security::safeRemoveAllBeneathRoot(
-                    QStringLiteral("/"), detachedPath)) {
+            if (!qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"), detachedPath)) {
                 qWarning() << "Staged restore: Failed to remove detached live path:"
                            << strerror(errno);
             }
         }
-        else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
-                     QStringLiteral("/"), detachedPath, entry.path)) {
+        else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(QStringLiteral("/"), detachedPath, entry.path)) {
             qCritical() << "Staged restore: Failed to reattach live path after a failed"
                         << "restore. Previous content is preserved at:" << detachedPath;
         }
@@ -3449,9 +3556,8 @@ bool SnapshotOperations::applyRestoreEntry(
 /**
  * @brief live宛先をroot配下で再解決して通常ファイルをコピーする
  *
- * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や
- * 稼働中のサービス) がETXTBSYで拒否されるため、同一ディレクトリの一時ファイルへ
- * 書き出してから renameat() で差し替える (copySymlinkBeneathRootと同じ手法)。
+ * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や稼働中のサービス) がETXTBSYで拒否されるため、
+ * 同一ディレクトリの一時ファイルへ書き出してから、renameat()で差し替える (copySymlinkBeneathRootと同じ手法)
  * metadataは差し替え前に一時ファイルへ適用するため、live側から不完全な状態は観測されない
  *
  * @param sourceDirFd pin済みのsnapshot dirfd
@@ -3484,13 +3590,12 @@ bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
     QString temporaryPath;
     int dstFd = -1;
     for (int attempt = 0; attempt < 16; ++attempt) {
-        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-copy"),
-                                             attempt);
-        dstFd = qsnapper::security::safeCreateRegularFileExclusiveBeneathRoot(
-            QStringLiteral("/"), temporaryPath, srcStat.st_mode & 07777);
+        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-copy"), attempt);
+        dstFd = qsnapper::security::safeCreateRegularFileExclusiveBeneathRoot(QStringLiteral("/"), temporaryPath, srcStat.st_mode & 07777);
         if (dstFd >= 0) {
             break;
         }
+
         if (errno != EEXIST) {
             qWarning() << "copyRegularFileBeneathRoot: Failed to create temporary file:"
                        << strerror(errno);
@@ -3554,7 +3659,7 @@ bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
         }
     }
 
-    // 新規inodeへ差し替えるため、live側の既存labelは引き継がれない。
+    // 新規inodeへ差し替えるため、live側の既存labelは引き継がれない
     // snapshot側のlabelを明示的にコピーする
     copySecurityContextBestEffort(srcFd, dstFd);
 

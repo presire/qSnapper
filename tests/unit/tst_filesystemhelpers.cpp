@@ -72,6 +72,11 @@ private slots:
     void safeReadLinkNoFollowAtReadsRelativeToDirFd();
     void safeReadLinkNoFollowAtRejectsInvalidPaths();
 
+    // --- created entry削除前の復元元不在確認 ---
+    void isConfirmedAbsentAtRejectsPathsPresentInSource();
+    void isConfirmedAbsentAtConfirmsOnlyDefiniteAbsence();
+    void isConfirmedAbsentAtRefusesIntermediateSymlinks();
+
 private:
     static bool isAttackRejectionErrno(int err);
     static bool isSafeHandlingErrno(int err);
@@ -1453,6 +1458,125 @@ void TestFilesystemHelpers::safeReadLinkNoFollowAtRejectsInvalidPaths()
     errno = 0;
     QVERIFY(!safeReadLinkNoFollowAt(dirFd, QStringLiteral("sub"), &observedTarget));
     QCOMPARE(errno, EINVAL);
+
+    QVERIFY(::close(dirFd) == 0);
+}
+
+/**
+ * @brief 復元元snapshotに存在するパスを不在と誤判定しないことを検証する
+ *
+ * 復元の `created` entryはlive側からの削除として実行されるため、
+ * ここでtrueを返してしまうと復元元に存在するパスが削除される
+ */
+void TestFilesystemHelpers::isConfirmedAbsentAtRejectsPathsPresentInSource()
+{
+    QTemporaryDir sourceDir;
+    QVERIFY(sourceDir.isValid());
+
+    QVERIFY(QDir().mkpath(sourceDir.path() + QStringLiteral("/etc")));
+    const QString presentFile = sourceDir.path() + QStringLiteral("/etc/important");
+    {
+        QFile file(presentFile);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+        file.write("victim");
+    }
+    const QString danglingLink = sourceDir.path() + QStringLiteral("/etc/dangling");
+    QVERIFY(::symlink("missing-target", danglingLink.toUtf8().constData()) == 0);
+
+    const int dirFd = ::open(sourceDir.path().toUtf8().constData(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(dirFd >= 0);
+
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/important")));
+
+    // leafがdangling symlinkでも、symlink自体は存在するので不在とはみなさない
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/dangling")));
+
+    QVERIFY(::close(dirFd) == 0);
+}
+
+/**
+ * @brief 不在を確定できた場合だけtrueを返すことを検証する
+ *
+ * 「不在」と「確認できなかった」を混同すると fail-closed が成立しない
+ */
+void TestFilesystemHelpers::isConfirmedAbsentAtConfirmsOnlyDefiniteAbsence()
+{
+    QTemporaryDir sourceDir;
+    QVERIFY(sourceDir.isValid());
+
+    QVERIFY(QDir().mkpath(sourceDir.path() + QStringLiteral("/etc")));
+    const QString blockingFile = sourceDir.path() + QStringLiteral("/blocking");
+    {
+        QFile file(blockingFile);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+        file.write("not a directory");
+    }
+
+    const int dirFd = ::open(sourceDir.path().toUtf8().constData(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(dirFd >= 0);
+
+    // ENOENT: 正当な created entry はここを通って削除へ進む
+    QVERIFY(isConfirmedAbsentAt(dirFd, QStringLiteral("etc/created-after-snapshot")));
+    QVERIFY(isConfirmedAbsentAt(dirFd, QStringLiteral("absent-top-level")));
+
+    // ENOTDIR: 親成分が通常ファイルなので、配下は確定的に存在し得ない
+    QVERIFY(isConfirmedAbsentAt(dirFd, QStringLiteral("blocking/child")));
+
+    // 相対パス検証で弾かれる入力は EINVAL であり「不在を確認できなかった」に当たる
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("/etc/important")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("../escape")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/../etc/important")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/car\nrier")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QString()));
+
+    // 無効なdirfdでも不在とは判定しない
+    QVERIFY(!isConfirmedAbsentAt(-1, QStringLiteral("etc/created-after-snapshot")));
+
+    QVERIFY(::close(dirFd) == 0);
+}
+
+/**
+ * @brief 中間symlinkを辿って不在判定しないことを検証する
+ *
+ * fstatat()のAT_SYMLINK_NOFOLLOWはleafにしか効かないため、中間成分の解決を
+ * fstatat()に任せるとpin済みdirfdの外へ解決され得る。symlinkに当たった場合は
+ * 「不在を確認できなかった」として削除を許可してはならない
+ */
+void TestFilesystemHelpers::isConfirmedAbsentAtRefusesIntermediateSymlinks()
+{
+    QTemporaryDir sourceDir;
+    QVERIFY(sourceDir.isValid());
+
+    QVERIFY(QDir().mkpath(sourceDir.path() + QStringLiteral("/etc")));
+
+    // 相対target / 絶対target / 存在するディレクトリへのtarget の3種を用意する
+    const QString danglingLink = sourceDir.path() + QStringLiteral("/etc/dangling");
+    QVERIFY(::symlink("missing-dir", danglingLink.toUtf8().constData()) == 0);
+    const QString absoluteLink = sourceDir.path() + QStringLiteral("/etc/absolute");
+    QVERIFY(::symlink("/", absoluteLink.toUtf8().constData()) == 0);
+    QVERIFY(QDir().mkpath(sourceDir.path() + QStringLiteral("/etc/real-dir")));
+    const QString realLink = sourceDir.path() + QStringLiteral("/etc/real-link");
+    QVERIFY(::symlink("real-dir", realLink.toUtf8().constData()) == 0);
+
+    const int dirFd = ::open(sourceDir.path().toUtf8().constData(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(dirFd >= 0);
+
+    // いずれも不在判定としてはfalse (不在を確認できていない) でなければならない
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/dangling/victim")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/absolute/etc/passwd")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/real-link/child")));
+
+    // leafのsymlink自体は「存在する」扱いとなる
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/dangling")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/absolute")));
+    QVERIFY(!isConfirmedAbsentAt(dirFd, QStringLiteral("etc/real-link")));
+
+    // 比較用: 中間成分が実在しない場合は確定的な不在としてtrue
+    QVERIFY(isConfirmedAbsentAt(dirFd, QStringLiteral("etc/no-such-dir/child")));
 
     QVERIFY(::close(dirFd) == 0);
 }

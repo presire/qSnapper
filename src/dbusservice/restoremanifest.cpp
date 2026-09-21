@@ -1,10 +1,8 @@
-#include "restoremanifest.h"
-
 #include <QDateTime>
 #include <QUuid>
-
 #include <algorithm>
 #include <utility>
+#include "restoremanifest.h"
 
 namespace qsnapper::restore {
 
@@ -129,14 +127,12 @@ bool RestoreManifest::isTerminal() const
 
 bool RestoreManifest::isExpired(qint64 nowMs) const
 {
-    // 実行中の計画はTTLで回収しない。
-    // TTLは「認可前に放置されたStaging / Frozen計画」を回収するための仕組みである。
-    // 既に認可されて実行中の計画へ適用すると、別クライアントのPolkitプロンプトが
-    // 単一スレッドのevent loopを長時間ブロックしただけでchunkの進行が止まり、
-    // keepAliveも呼ばれずTTLが満了して、進行中の復元が黙って破棄される。
-    // その結果live filesystemが中途半端な状態のまま残るため、Runningは対象外とする。
-    // (owner消失時はQDBusServiceWatcher経由のremoveByOwnerが確実に回収するため、
-    //  TTLで回収しなくても実行中計画が滞留することはない)
+    // 実行中の計画はTTLで回収しない
+    // TTLは「認可前に放置されたStaging / Frozen計画」を回収するための仕組みである
+    // 既に認可されて実行中の計画へ適用すると、別クライアントのPolkitプロンプトが単一スレッドのイベントループを長時間ブロックしただけでchunkの進行が止まり、
+    // keepAliveも呼ばれずTTLが満了して、進行中の復元が黙って破棄される
+    // その結果live filesystemが中途半端な状態のまま残るため、Runningは対象外とする
+    // (owner消失時はQDBusServiceWatcher経由のremoveByOwnerが確実に回収するため、TTLで回収しなくても実行中計画が滞留することはない)
     if (m_state == ManifestState::Running) {
         return false;
     }
@@ -329,10 +325,10 @@ bool RestoreManifestRegistry::stageEntries(const QString &id,
         additionalPathBytes += pathBytes;
     }
 
-    // グローバル予算。stagingは認可を要さないため、manifest単位の上限だけでは
-    // 攻撃者が複数のD-Bus接続 (unique nameごとに別owner) を開いて上限を
-    // 掛け算できる。プロセス全体の保持量をここで閉じる。
-    // 変更を加える前に判定し、拒否時はmanifestを一切変化させない
+    // グローバル予算
+    // stagingは認可を要さないため、マニフェスト単位の上限だけでは攻撃者が複数のD-Bus接続 (unique nameごとに別owner) を開いて上限を掛け算できる
+    // プロセス全体の保持量をここで閉じる
+    // 変更を加える前に判定し、拒否時はマニフェストを一切変化させない
     if (globalEntries() + paths.size() > m_maxEntriesGlobal) {
         setError(err, ManifestError::GlobalLimit);
         return false;

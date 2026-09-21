@@ -277,6 +277,7 @@ private:
     static QString changeTypeToString(FileChangeItem::ChangeType type);                     // 変更タイプを文字列に変換する
     static QString normalizeRestorePlanPath(const QString &path);                           // 復元パスを正規化する
     static bool isValidRestorePlanEntry(const QString &path, const QString &changeType);    // 復元エントリの妥当性を検証する
+    static bool hasOnlyCreatedRecordsBeneath(FileChangeItem *item);                         // 配下の実レコードが全てCreatedかを返す
 
     // 比較条件の同一性・復元可否
     ComparisonContext currentComparisonContext() const;                                     // 現在の比較条件を返す

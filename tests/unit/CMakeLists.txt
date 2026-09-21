@@ -1,14 +1,14 @@
 # tests/unit/CMakeLists.txt
-# Qt Test ベースのセキュリティ修正向け単体テスト。
-# ルート CMakeLists.txt 側で次のように取り込む想定:
+# Qt Test ベースのセキュリティ修正向け単体テスト
+# プロジェクトルートのCMakeLists.txt側で次のように取り込む想定:
 #
 #   if(QSNAPPER_BUILD_TESTS)
 #       enable_testing()
 #       add_subdirectory(tests/unit)
 #   endif()
 #
-# 実装本体 (inputvalidator.cpp) は src/dbusservice/ に P0-3/P0-4 で追加され、
-# 本テストはそれを直接リンクする (D-Bus層を介さずに純粋関数を検証)。
+# 実装本体 (inputvalidator.cpp) は、"src/dbusservice/"にP0-3 / P0-4で追加され、本テストはそれを直接リンクする
+# (D-Bus層を介さずに純粋関数を検証)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Test)
 
@@ -50,6 +50,21 @@ target_link_libraries(tst_filepaths PRIVATE
 set_target_properties(tst_filepaths PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filepaths COMMAND tst_filepaths)
 
+# --- tst_recordsafety ---
+add_executable(tst_recordsafety
+    tst_recordsafety.cpp
+    ${INPUTVALIDATOR_SOURCES}
+)
+target_include_directories(tst_recordsafety PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_recordsafety PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_recordsafety PROPERTIES AUTOMOC ON)
+add_test(NAME tst_recordsafety COMMAND tst_recordsafety)
+
 # --- tst_filesystemhelpers ---
 add_executable(tst_filesystemhelpers
     tst_filesystemhelpers.cpp
@@ -83,7 +98,7 @@ set_target_properties(tst_filechangemodel PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filechangemodel COMMAND tst_filechangemodel)
 
 # --- tst_comparisoncache ---
-# ComparisonCache<T> はヘッダオンリのテンプレートなので、テスト本体以外のソース不要
+# ComparisonCache<T>はヘッダオンリのテンプレートなので、テスト本体以外のソース不要
 add_executable(tst_comparisoncache
     tst_comparisoncache.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/comparisoncache.h
@@ -130,9 +145,9 @@ target_link_libraries(tst_restoreplanexecutor PRIVATE
 set_target_properties(tst_restoreplanexecutor PROPERTIES AUTOMOC ON)
 add_test(NAME tst_restoreplanexecutor COMMAND tst_restoreplanexecutor)
 
-# ASan/UBSan を全テストに適用 (Debugビルド時に-DQSNAPPER_TEST_SANITIZE=ONで)
+# ASan / UBSanを全テストに適用 (Debugビルド時に"-DQSNAPPER_TEST_SANITIZE=ON")
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restoreplanexecutor)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restoreplanexecutor)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

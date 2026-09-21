@@ -145,10 +145,8 @@ namespace qsnapper::security {
         /**
          * @brief 基点ディレクトリrootPathを全成分O_NOFOLLOWで開く
          *
-         * 単純なopen(rootPath, O_NOFOLLOW)は末尾成分にしかO_NOFOLLOWが効かず、
-         * rootPathの中間成分がsymlink化されていた場合に追従してしまう。
-         * そのため既存のsafeOpenDirectory() (「/」起点の成分単位no-follow walk) へ委譲し、
-         * root祖先の差し替えも拒否する
+         * 単純なopen(rootPath, O_NOFOLLOW)は末尾成分にしかO_NOFOLLOWが効かず、rootPathの中間成分がsymlink化されていた場合に追従してしまう
+         * そのため既存のsafeOpenDirectory() (「/」起点の成分単位no-follow walk) へ委譲し、root祖先の差し替えも拒否する
          *
          * @param rootPath 基点ルートディレクトリ (絶対パス、実ディレクトリであること)
          * @return 成功時: dirfd、失敗時: -1
@@ -167,13 +165,13 @@ namespace qsnapper::security {
         /**
          * @brief baseFd配下の成分列をO_NOFOLLOWで辿りながらディレクトリfdを開く
          *
-         * baseFdの所有は取らない (openat(baseFd, ".") で同一ディレクトリの所有fdを得る)。
+         * baseFdの所有は取らない (openat(baseFd, ".") で同一ディレクトリの所有fdを得る)
          * 成功時は呼び出し側がcloseすべきleaf fd、失敗時は-1を返す
          *
          * @param baseFd 走査基点のディレクトリfd
          * @param components 相対パス成分列
          * @param componentCount 辿る成分数
-         * @param createMissing 存在しない成分を mkdirat() で作成するか
+         * @param createMissing 存在しない成分をmkdirat()で作成するか
          * @param mode createMissing = true時の作成モード
          * @return 成功時: 最終ディレクトリのfd、失敗時: -1
          */
@@ -338,9 +336,8 @@ namespace qsnapper::security {
         /**
          * @brief rootPathを開き、相対成分列のleaf「親」までO_NOFOLLOWで辿る
          *
-         * root自身はO_NOFOLLOWで開くため、rootがsymlinkへ差し替えられている場合も拒否する。
-         * 中間成分は openat(..., O_DIRECTORY | O_NOFOLLOW) の連鎖で解決するため、
-         * どの階層のsymlink差し替えでもELOOPで失敗する
+         * root自身はO_NOFOLLOWで開くため、rootがsymlinkへ差し替えられている場合も拒否する
+         * 中間成分は openat(..., O_DIRECTORY | O_NOFOLLOW) の連鎖で解決するため、どの階層のsymlink差し替えでもELOOPで失敗する
          *
          * @param rootPath 基点ルートディレクトリ
          * @param relativeComponents splitDestinationComponents由来の相対成分列 (非空)
@@ -411,7 +408,7 @@ namespace qsnapper::security {
                 return errno == ENOENT;
             }
 
-            // symlink / regular file / fifo / deviceは unlinkat() 側で削除する
+            // symlink / regular file / fifo / deviceは、unlinkat()側で削除する
             if (!S_ISDIR(st.st_mode)) {
                 return ::unlinkat(parentFd, entryName.constData(), 0) == 0 || errno == ENOENT;
             }
@@ -537,7 +534,7 @@ namespace qsnapper::security {
             return -1;
         }
 
-        // 親ディレクトリ fd を固定した openat() により leaf を作成/上書きする。
+        // 親ディレクトリfdを固定したopenat()により、leafを作成 / 上書きする。
         const int fd = ::openat(parentFd, leafName.constData(),
                                 O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
                                 mode);
@@ -618,7 +615,7 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief 親dirfdを固定した renameat() でパスを移動する
+     * @brief 親dirfdを固定したrenameat()でパスを移動する
      *
      * @param sourcePath 移動元の絶対パス
      * @param destinationPath 移動先の絶対パス
@@ -651,7 +648,7 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief symlink targetを readlinkat() で取得する
+     * @brief symlink targetをreadlinkat()で取得する
      *
      * @param path 対象symlinkの絶対パス
      * @param targetOut 読み出したtargetの格納先
@@ -694,7 +691,7 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief symlinkat() を用いてsymlinkを作成する
+     * @brief symlinkat()を用いてsymlinkを作成する
      *
      * @param target 作成するsymlinkのtarget
      * @param path 作成先の絶対パス
@@ -769,7 +766,7 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief read-only用途で lstat() を行う
+     * @brief read-only用途でlstat()を行う
      *
      * @param path 対象パス
      * @param out stat 構造体の出力先
@@ -782,7 +779,7 @@ namespace qsnapper::security {
             return false;
         }
 
-        // 契約および使用上の制約は、filesystemhelpers.h を参照すること
+        // 契約および使用上の制約は、filesystemhelpers.hを参照すること
         const QByteArray encodedPath = path.toUtf8();
         return ::lstat(encodedPath.constData(), out) == 0;
     }
@@ -801,6 +798,71 @@ namespace qsnapper::security {
 
         return ::fstatat(dirFd, encodedPath.constData(), out,
                          AT_SYMLINK_NOFOLLOW) == 0;
+    }
+
+    bool isConfirmedAbsentAt(int dirFd, const QString &relativePath)
+    {
+        // 契約 (どのerrnoを不在と認めるか) は、filesystemhelpers.hを参照すること
+        if (!validateRelativePathAt(relativePath, nullptr)) {
+            return false;
+        }
+
+        const QStringList components =
+                relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        if (components.isEmpty()) {
+            errno = EINVAL;
+            return false;
+        }
+
+        // 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながらopenat(..., O_DIRECTORY | O_NOFOLLOW)で辿る。
+        // O_DIRECTORY | O_NOFOLLOW は中間symlinkに対してENOTDIRを返し、「親が実ファイル」の場合と区別できないため、symlinkの検出をfstatat側で行う
+        // fstatat()のAT_SYMLINK_NOFOLLOWはleafにしか効かないため、中間成分の解決をfstatat()に任せるとpin済みdirfdの外へ解決され得る
+        int currentFd = ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (currentFd < 0) {
+            return false;
+        }
+
+        bool confirmedAbsent = false;
+        for (int i = 0; i < components.size(); ++i) {
+            const QByteArray encodedComponent = components.at(i).toUtf8();
+
+            struct stat info;
+            if (::fstatat(currentFd, encodedComponent.constData(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
+                // ENOENTなら中間 / leafを問わず対象は確定的に存在しない
+                // それ以外は不在を確認できていない
+                confirmedAbsent = errno == ENOENT;
+                break;
+            }
+
+            // symlink成分は、targetが存在してもしなくても追跡しない
+            // 絶対targetならpin済みdirfdの外 (live filesystem) へ解決され得るため、「不在を確認できなかった」扱いとする (ELOOP相当)
+            if (S_ISLNK(info.st_mode)) {
+                errno = ELOOP;
+                break;
+            }
+
+            if (i == components.size() - 1) {
+                // leafが実在する (通常ファイル / ディレクトリ)
+                break;
+            }
+
+            if (!S_ISDIR(info.st_mode)) {
+                // 中間成分が非ディレクトリなら、その配下は確定的に存在し得ない
+                confirmedAbsent = true;
+                break;
+            }
+
+            const int nextFd = ::openat(currentFd, encodedComponent.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (nextFd < 0) {
+                // fstatatで確認したdirがopenatできない = 状態を確認できていない
+                break;
+            }
+            ::close(currentFd);
+            currentFd = nextFd;
+        }
+
+        ::close(currentFd);
+        return confirmedAbsent;
     }
 
     int safeOpenRegularFileReadAt(int dirFd, const QString &relativePath)
@@ -831,8 +893,7 @@ namespace qsnapper::security {
         return fd;
     }
 
-    bool safeReadLinkNoFollowAt(int dirFd, const QString &relativePath,
-                                QByteArray *targetOut)
+    bool safeReadLinkNoFollowAt(int dirFd, const QString &relativePath, QByteArray *targetOut)
     {
         if (!targetOut || dirFd < 0) {
             errno = EINVAL;
@@ -847,9 +908,7 @@ namespace qsnapper::security {
         // 固定PATH_MAXで切り詰めないよう、必要に応じてバッファを拡張する
         QByteArray buffer(256, '\0');
         for (;;) {
-            const ssize_t len = ::readlinkat(dirFd, encodedPath.constData(),
-                                             buffer.data(),
-                                             static_cast<size_t>(buffer.size()));
+            const ssize_t len = ::readlinkat(dirFd, encodedPath.constData(), buffer.data(), static_cast<size_t>(buffer.size()));
             if (len < 0) {
                 return false;
             }
@@ -867,7 +926,7 @@ namespace qsnapper::security {
     /**
      * @brief 宛先絶対パスがrootPath配下であることを検証し、rootからの相対表現を取り出す
      *
-     * 文字列レベルの入力解析を行うのみで、ファイルシステムにはアクセスしない。
+     * 文字列レベルの入力解析を行うのみで、ファイルシステムにはアクセスしない
      * 本関数を通過しても安全は保証されない。実際の保証は、本関数の結果を用いて
      * root dirfdからcomponentwiseなO_NOFOLLOW走査を行う各変異ヘルパーが担う
      *
@@ -902,13 +961,13 @@ namespace qsnapper::security {
         const QStringList pathComponents =
                 absolutePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
 
-        // 宛先が空や "/" の場合はleaf成分を持たないため宛先になり得ない
+        // 宛先が空や"/"の場合は、leaf成分を持たないため宛先になり得ない
         if (pathComponents.isEmpty()) {
             errno = EINVAL;
             return false;
         }
 
-        // "." / ".." 成分による相対脱出を入力段階で拒否する
+        // "." / ".."成分による相対脱出を入力段階で拒否する
         for (const QString &component : pathComponents) {
             if (component == QLatin1String(".") || component == QLatin1String("..")) {
                 errno = EINVAL;
@@ -937,7 +996,7 @@ namespace qsnapper::security {
     /**
      * @brief rootPathを基点に相対パスをO_NOFOLLOWで辿り、末端ディレクトリのfdを返す
      *
-     * 呼び出し側は返されたfdを変異に使い、直ちにcloseすること。
+     * 呼び出し側は返されたfdを変異に使い、直ちにcloseすること
      * fdを認可(凍結)時点から実行時点へ跨いで保持してはならない
      *
      * @param rootPath 基点ルートディレクトリ (実ディレクトリであること)
@@ -980,8 +1039,7 @@ namespace qsnapper::security {
     /**
      * @brief rootPath配下に宛先ディレクトリを作成する (中間成分も必要に応じて作成)
      *
-     * leafが既存の場合は fstatat(AT_SYMLINK_NOFOLLOW) で再確認し、
-     * ディレクトリ以外 (symlink含む) ならばEEXISTで拒否する
+     * leafが既存の場合はfstatat(AT_SYMLINK_NOFOLLOW) で再確認し、ディレクトリ以外 (symlink含む) ならばEEXISTで拒否する
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 作成先の絶対パス (rootPath配下であること)
@@ -1022,7 +1080,7 @@ namespace qsnapper::security {
      * @brief rootPath配下の通常ファイルを安全に新規/上書きオープンする
      *
      * leafは openat(..., O_NOFOLLOW) で開くためsymlinkならELOOPで拒否され、
-     * 開いた後に fstat() でregular fileであることを再確認する
+     * 開いた後にfstat()でregular fileであることを再確認する
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 対象ファイルの絶対パス (rootPath配下であること)
@@ -1063,8 +1121,7 @@ namespace qsnapper::security {
     /**
      * @brief rootPath配下に通常ファイルを排他的に新規作成してオープンする
      *
-     * leafは openat(..., O_CREAT | O_EXCL | O_NOFOLLOW) で作成するため、
-     * 既存エントリ (symlink含む) を掴むことはない
+     * leafはopenat(..., O_CREAT | O_EXCL | O_NOFOLLOW)で作成するため、既存エントリ (symlink含む) を掴むことはない
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 作成先の絶対パス (rootPath配下であること)
@@ -1104,9 +1161,9 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief rootPath配下で sourcePath を destinationPath へ移動する (rename-aside用)
+     * @brief rootPath配下でsourcePathをdestinationPathへ移動する (rename-aside用)
      *
-     * source / destination はそれぞれ独立してrootから再解決されるため、
+     * source / destinationはそれぞれ独立してrootから再解決されるため、
      * 片方の親だけが差し替えられた場合でも、変異は必ずroot配下に収まるか失敗する
      *
      * @param rootPath 基点ルートディレクトリ
@@ -1148,7 +1205,7 @@ namespace qsnapper::security {
     /**
      * @brief rootPath配下のパスをsymlink非追従で再帰削除する
      *
-     * 親までの解決に失敗した場合は何も削除しない。
+     * 親までの解決に失敗した場合は何も削除しない
      * leaf自体が存在しない場合のみENOENTを成功扱いとする (safeRemoveAllと同じ契約)
      *
      * @param rootPath 基点ルートディレクトリ
@@ -1173,7 +1230,7 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief rootPath配下に symlinkat() でsymlinkを作成する
+     * @brief rootPath配下にsymlinkat()でsymlinkを作成する
      *
      * leaf位置が既存の場合 (symlink含む) はEEXISTで失敗する
      *

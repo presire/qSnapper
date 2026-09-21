@@ -88,11 +88,11 @@ void collectParentPaths(const QString &path, QSet<QString> *parentPaths)
 RestorePlanTransport::~RestorePlanTransport() = default;
 
 /**
- * @brief RestorePlanTransportのsystem bus実装
+ * @brief RestorePlanTransportのシステムバス実装
  *
- * com.presire.qsnapper.Operations のstaged restoreメソッド群を非同期で呼び出す。
+ * com.presire.qsnapper.Operationsのstaged restoreメソッド群を非同期で呼び出す
  * Polkit認証はcommitPlan()の呼び出し時にサーバ側で1度だけ行われるため、
- * beginPlan() / stageEntries() は認証なしで呼び出せる。
+ * beginPlan() / stageEntries() は認証なしで呼び出せる
  */
 class SystemBusRestorePlanTransport : public QObject, public RestorePlanTransport
 {
@@ -112,8 +112,8 @@ public:
      *
      * @param configName Snapper設定名
      * @param snapshotNumber スナップショット番号
-     * @param restoreMode 復元方式 ("yast" または "direct")
-     * @param done 結果コールバック (ok, manifestId, error)
+     * @param restoreMode 復元方式 ("YaST" または "ダイレクト")
+     * @param done 結果コールバック (ok, マニフェストID, error)
      */
     void beginPlan(const QString &configName, int snapshotNumber, const QString &restoreMode,
                    std::function<void(bool ok, const QString &manifestId, const QString &error)> done) override
@@ -729,7 +729,7 @@ void FileChangeModel::onRestorePlanFinished(const QString &manifestId, const QSt
  * @brief 復元サービスの消失を失敗として処理する
  *
  * サービス消失後のcancelPlan呼び出しはD-Bus活性化で不要なサービス再起動を招くため、
- * 登録解除以外のtransport呼び出しは行わない。
+ * 登録解除以外のtransport呼び出しは行わない
  */
 void FileChangeModel::onRestorePlanServiceVanished()
 {
@@ -798,7 +798,7 @@ void FileChangeModel::setSnapshotNumber(int number)
  */
 void FileChangeModel::loadChanges()
 {
-    // loadChangesBetween()は、呼び出し側で比較条件を設定してからこの関数を呼ぶ。
+    // loadChangesBetween()は、呼び出し側で比較条件を設定してからこの関数を呼ぶ
     if (m_configName.isEmpty()
             || (!m_betweenMode && m_snapshotNumber <= 0)
             || (m_betweenMode && (m_compareNumber1 <= 0 || m_compareNumber2 <= 0))) {
@@ -807,7 +807,7 @@ void FileChangeModel::loadChanges()
         return;
     }
 
-    // 新しい要求を始める前に、失敗しても旧方向のエントリを復元できない状態にする。
+    // 新しい要求を始める前に、失敗しても旧方向のエントリを復元できない状態にする
     invalidateLoadedComparison();
     const ComparisonContext requestedContext = currentComparisonContext();
     const quint64 requestGeneration = m_loadRequestGeneration;
@@ -840,7 +840,7 @@ void FileChangeModel::loadChanges()
                        [this, requestedContext, requestGeneration, requestTimer](bool ok,
                                                                                    const QString &output,
                                                                                    const QString &error) {
-        // 条件変更または後続要求の開始後に届いた応答は、モデルへ絶対に公開しない。
+        // 条件変更または後続要求の開始後に届いた応答は、モデルへ絶対に公開しない
         if (requestGeneration != m_loadRequestGeneration
                 || !(requestedContext == currentComparisonContext())) {
             return;
@@ -877,18 +877,15 @@ void FileChangeModel::loadChanges()
 /**
  * @brief 現在のシステムと差異が無いエントリを除いた変更一覧を読み込む
  *
- * 「比較元 --> 現在のシステム」を先に取得し、その応答を受け取ってから「比較元 --> 比較先」を
- * 取得して、後者を前者のパス集合で絞り込んでからモデルへ公開する。
- * 公開されるエントリは常に後者の部分集合であり、エントリの変更種別も書き換えないため、
- * この絞り込みが復元対象を広げることはない。
+ * 「比較元 --> 現在のシステム」を先に取得し、その応答を受け取ってから「比較元 --> 比較先」を取得して、後者を前者のパス集合で絞り込んでからモデルへ公開する
+ * 公開されるエントリは常に後者の部分集合であり、エントリの変更種別も書き換えないため、この絞り込みが復元対象を広げることはない
  *
- * 2つの比較を並行させず直列化するのには理由が2つある。
- * 1. 両メソッドは同じPolkit action (view-diff) で個別に認可される。並行させると、初回の認可が
- *    キャッシュされる前に2件の認可要求が同時に飛び、認証プロンプトが二重に出る可能性がある。
- * 2. サービス側のComparisonキャッシュは1件しか保持しないため、直列化することで
- *    「比較元 --> 比較先」のComparisonが最後に残ることが確定し、後続のファイル差分取得が再利用できる。
- * サービス側の比較処理自体は単一のイベントループ上で直列に実行されるため、
- * 並行要求にしても所要時間は短縮されない。
+ * 2つの比較を並行させず直列化するのには理由が2つある
+ * 1. 両メソッドは同じPolkit action (view-diff) で個別に認可される
+ *    並行させると、初回の認可がキャッシュされる前に2件の認可要求が同時に飛び、認証プロンプトが二重に出る可能性がある
+ * 2. サービス側のComparisonキャッシュは1件しか保持しないため、直列化することで「比較元 --> 比較先」のComparisonが最後に残ることが確定し、
+ *    後続のファイル差分取得が再利用できる
+ *    サービス側の比較処理自体は単一のイベントループ上で直列に実行されるため、並行要求にしても所要時間は短縮されない
  *
  * @param requestedContext この要求を発行した時点の比較条件
  * @param requestGeneration この要求の世代
@@ -906,8 +903,8 @@ void FileChangeModel::requestFilteredChangeList(const ComparisonContext &request
                        [this, requestedContext, requestGeneration, requestTimer](bool ok,
                                                                                    const QString &currentOutput,
                                                                                    const QString &error) {
-        // 条件変更または後続要求の開始後に届いた応答は、モデルへ絶対に公開しない。
-        // 後続の「比較元 --> 比較先」要求もここで打ち切る。
+        // 条件変更または後続要求の開始後に届いた応答は、モデルへ絶対に公開しない
+        // 後続の「比較元 --> 比較先」要求もここで打ち切る
         if (requestGeneration != m_loadRequestGeneration
                 || !(requestedContext == currentComparisonContext())) {
             return;
@@ -926,8 +923,8 @@ void FileChangeModel::requestFilteredChangeList(const ComparisonContext &request
 
         requestStringReply(QStringLiteral("GetFileChangesBetween"), betweenArguments,
                            [this, requestedContext, requestGeneration, requestTimer, currentOutput](bool betweenOk,
-                                                                                                      const QString &betweenOutput,
-                                                                                                      const QString &betweenError) {
+                                                                                                    const QString &betweenOutput,
+                                                                                                    const QString &betweenError) {
             if (requestGeneration != m_loadRequestGeneration
                     || !(requestedContext == currentComparisonContext())) {
                 return;
@@ -951,7 +948,7 @@ void FileChangeModel::requestFilteredChangeList(const ComparisonContext &request
  * @brief 絞り込んだ変更一覧をモデルへ公開する
  *
  * 絞り込みの結果が空になるのは「比較元と現在のシステムに差異がもう無い = 全て復元済み」という
- * 正常な状態であるため、エラーとして扱わず「差分なし」表示へ落とす。
+ * 正常な状態であるため、エラーとして扱わず「差分なし」表示へ落とす
  *
  * @param requestedContext この要求を発行した時点の比較条件
  * @param betweenOutput 比較元 --> 比較先 の変更一覧
@@ -1045,7 +1042,7 @@ bool FileChangeModel::ComparisonContext::operator==(const ComparisonContext &oth
 /**
  * @brief 現在の比較条件を返す
  *
- * number1には常に、その比較の向きにおける復元元スナップショット番号を入れる。
+ * number1には常に、その比較の向きにおける復元元スナップショット番号を入れる
  *
  * @return 現在の比較条件
  */
@@ -1064,9 +1061,9 @@ FileChangeModel::ComparisonContext FileChangeModel::currentComparisonContext() c
 /**
  * @brief 公開済みエントリとその由来を無効化する
  *
- * 比較条件を変更した時点、および新しい読み込みを開始した時点で呼び出す。
+ * 比較条件を変更した時点、および新しい読み込みを開始した時点で呼び出す
  * これにより、置き換え先の読み込みが失敗しても古いエントリがモデルに残らず、
- * 新しい復元元と古いchangeTypeが結び付いてlive側のファイルを誤って削除する事故を防ぐ。
+ * 新しい復元元と古いchangeTypeが結び付いてlive側のファイルを誤って削除する事故を防ぐ
  */
 void FileChangeModel::invalidateLoadedComparison()
 {
@@ -1096,7 +1093,7 @@ void FileChangeModel::invalidateLoadedComparison()
  * @brief 公開済みエントリから復元してよいかを返す
  *
  * 読み込みに成功したエントリであること、その由来が現在の比較条件と完全に一致すること、
- * 読み込み中でないこと、実際にエントリが存在することを全て要求する。
+ * 読み込み中でないこと、実際にエントリが存在することを全て要求する
  *
  * @return 復元を許可してよい場合: true
  */
@@ -1112,11 +1109,11 @@ bool FileChangeModel::hasRestorableLoadedComparison() const
 /**
  * @brief 現在の比較条件に対応する復元元スナップショット番号を返す
  *
- * モデルが保持するエントリのchangeTypeは、読み込み時の比較の向きでしか正しく解釈できない。
- * 2スナップショット比較モードでは、loadChangesBetween()の第1引数 (m_compareNumber1) が復元元となる。
- * この向きではcreatedが「比較先にだけ存在する = 復元元には無い」を意味し、live側からの削除と一致する。
+ * モデルが保持するエントリのchangeTypeは、読み込み時の比較の向きでしか正しく解釈できない
+ * 2スナップショット比較モードでは、loadChangesBetween()の第1引数 (m_compareNumber1) が復元元となる
+ * この向きではcreatedが「比較先にだけ存在する = 復元元には無い」を意味し、live側からの削除と一致する
  * 対カレント比較モードでは、エントリはm_snapshotNumberと現在のシステムの差分であるため、
- * 復元元はm_snapshotNumber以外にはなり得ない。
+ * 復元元はm_snapshotNumber以外にはなり得ない
  *
  * @return 復元元として使用すべきスナップショット番号
  */
@@ -1128,9 +1125,9 @@ int FileChangeModel::currentRestoreSourceNumber() const
 /**
  * @brief 復元元と公開済みエントリの由来の整合性を検証する
  *
- * 呼び出し側が指定した復元元が、実際にモデルへ公開されたエントリの由来と一致するかを確認する。
+ * 呼び出し側が指定した復元元が、実際にモデルへ公開されたエントリの由来と一致するかを確認する
  * 不一致のまま復元するとcreatedとdeletedの意味が反転し、
- * 復元対象外のファイルをlive側から削除する事故につながるため、ここで遮断する。
+ * 復元対象外のファイルをlive側から削除する事故につながるため、ここで遮断する
  *
  * @param sourceSnapshotNumber 復元元スナップショット番号
  * @return 復元元として使用できる場合: true
@@ -1515,8 +1512,8 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
         QHash<QString, FileChangeItem*> itemMap;
         itemMap[""] = newRootItem;
 
-        // 変更リストをパス順に処理してツリーを構築する。親パスは解析時に収集済みであり、
-        // 全パスの接頭辞を総当たりする必要はない。
+        // 変更リストをパス順に処理してツリーを構築する
+        // 親パスは解析時に収集済みであり、全パスの接頭辞を総当たりする必要はない
         for (const ChangeInfo &info : treeChanges) {
             QStringList pathParts = info.path.split('/', Qt::SkipEmptyParts);
             QString currentPath = "";
@@ -1561,7 +1558,7 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
     const qint64 modelPublicationMs = modelPublicationTimer.elapsed();
     delete oldRootItem;
 
-    // この関数はロード成功後のモデル公開点であり、ここで初めて復元可能な由来を確定する。
+    // この関数はロード成功後のモデル公開点であり、ここで初めて復元可能な由来を確定する
     m_loadedComparison = currentComparisonContext();
     m_loadedComparisonValid = true;
 
@@ -1589,7 +1586,7 @@ QSet<QString> FileChangeModel::collectChangedPaths(const QString &changeOutput)
             continue;
         }
         // parseChangeRecord()が末尾スラッシュを除去するため、ディレクトリが一方の比較でのみ
-        // 末尾スラッシュ付きで報告されても同一パスとして突き合わせられる。
+        // 末尾スラッシュ付きで報告されても同一パスとして突き合わせられる
         paths.insert(info.path);
     }
 
@@ -1616,8 +1613,8 @@ QString FileChangeModel::filterChangeOutputByPaths(const QString &changeOutput,
     const QStringList lines = changeOutput.split('\n', Qt::SkipEmptyParts);
     for (const QString &line : lines) {
         ChangeInfo info;
-        // 行はステータスフラグごと元のまま転記する。変更種別を書き換えないことで、
-        // 復元時のcreated (削除) / deleted (コピー) の解釈が絞り込み前と完全に一致する。
+        // 行はステータスフラグごと元のまま転記する
+        // 変更種別を書き換えないことで、復元時のcreated (削除) / deleted (コピー) の解釈が絞り込み前と完全に一致する
         if (!parseChangeRecord(line, &info) || !allowedPaths.contains(info.path)) {
             continue;
         }
@@ -1891,7 +1888,8 @@ QString FileChangeModel::normalizeRestorePlanPath(const QString &path)
  * @brief 復元計画に送出できるエントリかどうかを判定する
  *
  * サーバ側 (StageRestoreEntries) は1件でも不正なエントリがあるとチャンク全体を拒否するため、
- * クライアント側で同じ規則を先に検査して不正エントリを除外する (レガシーのRestoreFiles*が不正エントリを黙ってスキップしていた挙動に合わせる)
+ * クライアント側で同じ規則を先に検査して不正エントリを除外する
+ * (レガシーのRestoreFiles*が不正エントリを黙ってスキップしていた挙動に合わせる)
  *
  * @param path 正規化済みのパス
  * @param changeType 変更タイプ文字列
@@ -1929,6 +1927,48 @@ bool FileChangeModel::isValidRestorePlanEntry(const QString &path, const QString
 }
 
 /**
+ * @brief 配下の実レコードが全てCreatedかどうかを返す
+ *
+ * 復元元に存在しないディレクトリ (= Created) の配下にあるパスは、復元元にも存在し得ないため必ずCreatedになる
+ * Created配下にModified / Deleted / TypeChangedの実レコードが現れるのは自己矛盾であり、
+ * 行指向出力への改行注入によって偽の親ディレクトリが差し込まれた場合に起きる
+ * Createdディレクトリは復元時にlive側の再帰削除として扱われるため、矛盾する親をそのまま復元計画へ載せると、意図しない範囲が削除され得る
+ *
+ * @note 本判定はベストエフォートの多層防御であって、完全な防御ではない
+ *       偽の親の配下が全てCreatedである変種 (新規ファイルだけが追加された正規のディレクトリと同じ形) は、
+ *       行形式だけを受け取るクライアントからは正規のレコードと区別できない
+ *       本欠陥に対する実質的な境界は、サーバ側のシリアライズfail-closedと、created削除前の復元元存在確認である
+ *
+ * ツリー構築時に中間ディレクトリとして合成されたノードはstatusFlagsが空であり、比較結果に由来しないため判定から除外する
+ * 合成ノードは復元元での状態が不明なだけで矛盾の証拠にはならず、Pre/Post表示フィルタが実レコードを間引いた結果としても生じ得る
+ *
+ * @param item 判定対象のノード
+ * @return 配下の実レコードが全てCreatedの場合はtrue
+ */
+bool FileChangeModel::hasOnlyCreatedRecordsBeneath(FileChangeItem *item)
+{
+    if (!item) {
+        return true;
+    }
+
+    for (int i = 0; i < item->childCount(); ++i) {
+        FileChangeItem *child = item->child(i);
+        if (!child) {
+            continue;
+        }
+
+        const bool isParsedRecord = !child->statusFlags().isEmpty();
+        if (isParsedRecord && child->changeType() != FileChangeItem::Created) {
+            return false;
+        }
+        if (!hasOnlyCreatedRecordsBeneath(child)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * @brief チェック済みアイテムをchangeType付きで再帰収集する
  *
  * ディレクトリは自身の変更と配下の変更を分けて扱い、
@@ -1959,9 +1999,19 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
 
             if (hasChildren) {
                 // 子要素があるアイテム = ディレクトリ
-                if (isActualChange && !itemPath.isEmpty() && itemPath != "/") {
+                // Createdディレクトリはlive側の再帰削除になるため、配下の実レコードが全てCreatedであるという整合性を満たす場合のみ計画へ載せる
+                // 矛盾する場合も配下の収集は必ず継続し、本物の選択パスは従来どおり載せる
+                const bool createdSubtreeIsConsistent =
+                        child->changeType() != FileChangeItem::Created
+                        || hasOnlyCreatedRecordsBeneath(child);
+                if (isActualChange && createdSubtreeIsConsistent
+                        && !itemPath.isEmpty() && itemPath != "/") {
                     paths.append(itemPath);
                     changeTypes.append(changeTypeToString(child->changeType()));
+                }
+                else if (isActualChange && !createdSubtreeIsConsistent) {
+                    qWarning() << "FileChangeModel: Dropped an inconsistent created directory"
+                               << "from the restore plan (non-created records beneath it)";
                 }
                 // 配下を再帰的に収集 (collectAllFilesRecursiveと同等の処理)
                 collectCheckedItemsWithTypes(child, paths, changeTypes);
@@ -1997,8 +2047,8 @@ bool FileChangeModel::restoreCheckedItems()
 /**
  * @brief 復元元スナップショットを明示してチェックされたアイテムを復元
  *
- * 復元元を引数で受け取ることで、比較モード (m_betweenMode) を維持したまま復元できる。
- * 指定された復元元は、現在読み込まれているエントリの解釈と一致する必要がある。
+ * 復元元を引数で受け取ることで、比較モード (m_betweenMode) を維持したまま復元できる
+ * 指定された復元元は、現在読み込まれているエントリの解釈と一致する必要がある
  *
  * @param sourceSnapshotNumber 復元元スナップショット番号
  * @return 復元処理が開始された場合: true、エラーの場合: false
@@ -2265,8 +2315,8 @@ void FileChangeModel::commitRestorePlan()
 /**
  * @brief 復元計画のcommit結果を処理する
  *
- * commitに成功したらフローはシグナル待ちに移行する。失敗した場合は
- * フローを中断する。
+ * commitに成功したらフローはシグナル待ちに移行する
+ * 失敗した場合は、フローを中断する
  *
  * @param ok commitに成功した場合: true
  * @param error 失敗時のエラーメッセージ

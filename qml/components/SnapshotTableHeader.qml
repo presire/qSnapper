@@ -1,14 +1,24 @@
-// スナップショットテーブルのヘッダ行
+/**
+ * @file SnapshotTableHeader.qml
+ * @brief スナップショットテーブルのヘッダ行
+ *
+ * SnapshotListPageのテーブル上部に表示する列見出し
+ * 親から渡されたcolumnWidthsで各列幅を決め、行デリゲート (SnapshotTableRow) と列位置を揃える
+ *
+ * 入力 : columnWidths (親が管理する列幅オブジェクト、null時は既定幅を使用)
+ * 出力 : なし
+ * 依存 : なし (QSnapperのC++型は未使用)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Rectangle {
     id: root
-    height: 36
-    color: palette.mid
+    height: 36                                     // ヘッダ行の高さ
+    color: palette.mid                             // テーマ連動の背景色
 
-    // カラム幅設定 (親から注入)
+    // 列幅設定 (親から注入、未設定時は各列の既定値を使用する)
     property var columnWidths: null
 
     RowLayout {
@@ -18,6 +28,7 @@ Rectangle {
         spacing: 0
 
         // チェックボックス列のスペーサー
+        // SnapshotTableRowのCheckBox列と同じ幅を確保して列を揃える
         Item {
             Layout.preferredWidth: 40
         }
@@ -62,7 +73,7 @@ Rectangle {
             leftPadding: 5
         }
 
-        // 説明列
+        // 説明列 (残り幅を占有する)
         Label {
             text: qsTr("Description")
             font.bold: true
@@ -83,12 +94,13 @@ Rectangle {
         }
 
         // 操作列のスペーサー
+        // SnapshotTableRowの詳細ボタン列と同じ幅を確保して列を揃える
         Item {
             Layout.preferredWidth: 70
         }
     }
 
-    // 下線
+    // ヘッダ下端の区切り線
     Rectangle {
         anchors.bottom: parent.bottom
         width: parent.width

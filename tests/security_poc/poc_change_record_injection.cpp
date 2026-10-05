@@ -102,7 +102,8 @@ namespace {
     /**
      * @brief 攻撃者が作るcarrierを実ファイルシステム上に構築する
      *
-     * ディレクトリ名に改行と末尾スペースを含める。いずれもLinuxのファイル名として正当であり、非特権ユーザが自分の書込可能領域に作成できる
+     * ディレクトリ名に改行と末尾スペースを含める
+     * いずれもLinuxのファイル名として正当であり、非特権ユーザが自分の書込可能領域に作成できる
      *
      * @param scratchRoot 全操作を閉じ込めるscratch root (絶対パス)
      * @param carrierFullPath 構築したcarrierのフルパスの格納先
@@ -292,7 +293,8 @@ int main(int argc, char *argv[])
         file.write("fixture\n");
     }
 
-    // 4a: 修正前と同じ無検証の削除。偽エントリがそのまま破壊に繋がることを示す
+    // 4a: 修正前と同じ無検証の削除
+    // 偽エントリがそのまま破壊に繋がることを示す
     bool unguardedRemoved = false;
     applyCreatedEntry(scratchRoot, sourceSnapshotDir,
                       QStringLiteral("/etc/important-unguarded"),

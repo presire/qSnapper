@@ -1,5 +1,13 @@
-// Qtライセンス情報ダイアログ
-// Qt Frameworkのライセンス情報を表示
+/**
+ * @file AboutQtDialog.qml
+ * @brief Qtのライセンス情報を表示するダイアログ
+ *
+ * Qt Frameworkのライセンスと著作権、公式サイトへのリンクを表示する
+ *
+ * 入力 : なし
+ * 出力 : なし
+ * 依存 : BorderedDialog (基底)、SnapperService::openExternalUrl (リンクを外部ブラウザで開く)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -7,21 +15,24 @@ import QSnapper 1.0
 
 BorderedDialog {
     id: root
-    title: qsTr("Qt License")
-    modal: true
+    title: qsTr("Qt License")                      // タイトルバーの表示名
+    modal: true                                    // 背後への操作をブロックする
+    // ウィンドウ幅の70%を基準に、800から1000の範囲へクランプする
     width: {
         if (!ApplicationWindow.window) return 800
         var calculated = ApplicationWindow.window.width * 0.7
         return Math.min(Math.max(calculated, 800), 1000)
     }
+    // ウィンドウ高さの70%を基準に、600から800の範囲へクランプする
     height: {
         if (!ApplicationWindow.window) return 600
         var calculated = ApplicationWindow.window.height * 0.7
         return Math.min(Math.max(calculated, 600), 800)
     }
-    anchors.centerIn: Overlay.overlay
-    standardButtons: Dialog.Close
+    anchors.centerIn: Overlay.overlay              // 常にオーバーレイ中央へ配置する
+    standardButtons: Dialog.Close                  // 閉じるボタンのみ表示する
 
+    // 内容が収まらない場合にスクロール可能にする
     ScrollView {
         anchors.fill: parent
         clip: true
@@ -33,6 +44,7 @@ BorderedDialog {
             width: parent.width
             spacing: 20
 
+            // ロゴとライセンス情報を左右に並べる
             RowLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: 20
@@ -78,10 +90,12 @@ BorderedDialog {
                         Layout.fillWidth: true
                         Layout.topMargin: 10
 
+                        // リンククリック時に外部ブラウザでURLを開く
                         onLinkActivated: function(link) {
                             SnapperService.openExternalUrl(link)
                         }
 
+                        // リンク上ではポインタカーソルを表示する
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }
@@ -105,10 +119,12 @@ BorderedDialog {
                         Layout.fillWidth: true
                         Layout.topMargin: 10
 
+                        // リンククリック時に外部ブラウザでURLを開く
                         onLinkActivated: function(link) {
                             SnapperService.openExternalUrl(link)
                         }
 
+                        // リンク上ではポインタカーソルを表示する
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }

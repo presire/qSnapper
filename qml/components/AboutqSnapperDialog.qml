@@ -1,5 +1,13 @@
-// qSnapperについてダイアログ
-// アプリケーション情報、バージョン、ライセンス、リンク情報を表示
+/**
+ * @file AboutqSnapperDialog.qml
+ * @brief qSnapperのアプリケーション情報を表示するダイアログ
+ *
+ * バージョン、アプリ説明、著作権、ライセンス、GitHub / Issuesへのリンクを表示する
+ *
+ * 入力 : なし
+ * 出力 : なし
+ * 依存 : BorderedDialog (基底)、SnapperService::openExternalUrl (リンクを外部ブラウザで開く)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -7,21 +15,24 @@ import QSnapper 1.0
 
 BorderedDialog {
     id: root
-    title: qsTr("About qSnapper")
-    modal: true
+    title: qsTr("About qSnapper")                  // タイトルバーの表示名
+    modal: true                                    // 背後への操作をブロックする
+    // ウィンドウ幅の70%を基準に、800から1000の範囲へクランプする
     width: {
         if (!ApplicationWindow.window) return 800
         var calculated = ApplicationWindow.window.width * 0.7
         return Math.min(Math.max(calculated, 800), 1000)
     }
+    // ウィンドウ高さの70%を基準に、600から800の範囲へクランプする
     height: {
         if (!ApplicationWindow.window) return 600
         var calculated = ApplicationWindow.window.height * 0.7
         return Math.min(Math.max(calculated, 600), 800)
     }
-    anchors.centerIn: Overlay.overlay
-    standardButtons: Dialog.Close
+    anchors.centerIn: Overlay.overlay              // 常にオーバーレイ中央へ配置する
+    standardButtons: Dialog.Close                  // 閉じるボタンのみ表示する
 
+    // 内容が収まらない場合にスクロール可能にする
     ScrollView {
         anchors.fill: parent
         clip: true
@@ -33,6 +44,7 @@ BorderedDialog {
             width: parent.width
             spacing: 20
 
+            // ロゴとアプリ情報を左右に並べる
             RowLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: 20
@@ -55,7 +67,7 @@ BorderedDialog {
                     Layout.fillWidth: true
                     spacing: 20
 
-                    // アプリケーション名とバージョン
+                    // アプリケーション名とバージョン (Qt.application.versionを併記する)
                     Label {
                         text: "qSnapper " + Qt.application.version
                         font.bold: true
@@ -92,10 +104,12 @@ BorderedDialog {
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
 
+                        // リンククリック時に外部ブラウザでURLを開く
                         onLinkActivated: function(link) {
                             SnapperService.openExternalUrl(link)
                         }
 
+                        // リンク上ではポインタカーソルを表示する
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }
@@ -109,10 +123,12 @@ BorderedDialog {
                         Layout.fillWidth: true
                         Layout.topMargin: 10
 
+                        // リンククリック時に外部ブラウザでURLを開く
                         onLinkActivated: function(link) {
                             SnapperService.openExternalUrl(link)
                         }
 
+                        // リンク上ではポインタカーソルを表示する
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }
@@ -125,10 +141,12 @@ BorderedDialog {
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
 
+                        // リンククリック時に外部ブラウザでURLを開く
                         onLinkActivated: function(link) {
                             SnapperService.openExternalUrl(link)
                         }
 
+                        // リンク上ではポインタカーソルを表示する
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }

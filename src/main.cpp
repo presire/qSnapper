@@ -1,3 +1,8 @@
+/**
+ * @file main.cpp
+ * @brief アプリケーションのエントリポイント
+ */
+
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -21,6 +26,12 @@
 #include "singleinstanceguard.h"
 #include "windowstatemanager.h"
 
+/**
+ * @brief アプリケーションを起動する
+ * @param argc コマンドライン引数の数
+ * @param argv コマンドライン引数の配列
+ * @return アプリケーションの終了コード
+ */
 int main(int argc, char *argv[])
 {
     // Qt GUIアプリケーションの初期化

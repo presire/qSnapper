@@ -1,3 +1,11 @@
+/**
+ * @file filechangemodel.h
+ * @brief ファイル変更ツリーの中心となるFileChangeModelの宣言
+ *
+ * Snapperの変更出力をFileChangeItemツリーへ変換して、QML向けのロールと選択状態とファイル差分取得と復元操作を提供する
+ * 変更種別の向きに関する不変条件はComparisonContextが保持する
+ */
+
 #ifndef FILECHANGEMODEL_H
 #define FILECHANGEMODEL_H
 
@@ -10,166 +18,19 @@
 #include <QVector>
 #include <QDBusInterface>
 #include <functional>
+#include "filechangeitem.h"
+#include "restoreplantransport.h"
 
 /**
- * @brief ファイル変更情報を保持するアイテムクラス
- */
-class FileChangeItem
-{
-public:
-    // ファイルシステム上の変更種別
-    enum ChangeType {
-        Created,    // 新規作成を表す
-        Modified,   // 内容または属性の変更を表す
-        Deleted,    // 削除を表す
-        TypeChanged // ファイル種別の変更を表す
-    };
-
-private:
-    // ファイル変更情報
-    QString m_path;                         // ファイル/ディレクトリのパス
-    ChangeType m_changeType;                // 変更タイプ
-    QString m_statusFlags;                  // 詳細ステータスフラグ (例: "cpu..")
-
-    // ツリー構造
-    QVector<FileChangeItem*> m_children;    // 子要素のリスト
-    FileChangeItem *m_parent;               // 親要素へのポインタ
-
-    // 選択状態
-    bool m_checked = false;                 // チェック状態
-    bool m_explicitlyUnchecked = false;     // 明示的にチェックを外されたフラグ
-
-public:
-    // ライフサイクル
-    explicit FileChangeItem(const QString &path,                    // 変更アイテムを生成する
-                            ChangeType type,
-                            const QString &statusFlags = QString(),
-                            FileChangeItem *parent = nullptr);
-    ~FileChangeItem();                                              // 子アイテムを含む変更アイテムを破棄する
-
-    // ツリー構造
-    void appendChild(FileChangeItem *child);                        // 子アイテムを末尾へ追加する
-    FileChangeItem *child(int row);                                 // 指定行の子アイテムを返す
-    int childCount() const;                                         // 子アイテム数を返す
-    int row() const;                                                // 親内での行番号を返す
-    FileChangeItem *parent();                                       // 親アイテムを返す
-
-    // 変更情報
-    QString path() const { return m_path; }                         // 完全パスを返す
-    QString name() const;                                           // パス末尾の名前を返す
-    ChangeType changeType() const { return m_changeType; }          // 変更種別を返す
-    QString statusFlags() const { return m_statusFlags; }           // 詳細ステータスフラグを返す
-    bool isDirectory() const;                                       // ディレクトリかどうかを返す
-
-    // 選択状態
-    bool isChecked() const { return m_checked; }                            // 選択状態を返す
-    void setChecked(bool checked) { m_checked = checked; }                  // 選択状態を設定する
-    bool isExplicitlyUnchecked() const { return m_explicitlyUnchecked; }    // 明示的な選択解除状態を返す
-    void setExplicitlyUnchecked(bool explicitlyUnchecked) { m_explicitlyUnchecked = explicitlyUnchecked; }  // 明示的な選択解除状態を設定する
-};
-
-/**
- * @brief 復元計画 (staged restore) のD-Bus転送を抽象化するインターフェース
- *
- * FileChangeModelとD-Bus呼び出しの間に注入可能な継ぎ目を設け、テストではモックtransportで呼び出し順序と結果を検証できるようにする
- * 各メソッドは非同期で、コールバックを必ず1回だけ (即時または後続のイベントループで) 呼び出す
- */
-class RestorePlanTransport
-{
-public:
-    /**
-     * @brief transportインターフェースを破棄する
-     */
-    virtual ~RestorePlanTransport();                        // 派生transportを安全に破棄する
-
-    // 復元計画操作
-    /**
-     * @brief staging計画の作成を要求する (この時点では認証されない)
-     *
-     * @param configName Snapper設定名
-     * @param snapshotNumber スナップショット番号 (復元元)
-     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
-     * @param restoreMode 復元方式 ("yast" または "direct")
-     * @param done 結果コールバック (ok, manifestId, error)
-     * @return なし
-     */
-    virtual void beginPlan(const QString &configName,       // 復元計画の作成を非同期で要求する
-                           int snapshotNumber,
-                           int counterpartSnapshotNumber,
-                           const QString &restoreMode,
-                           std::function<void(bool ok, const QString &manifestId, const QString &error)> done) = 0;
-
-    /**
-     * @brief staging計画へ検証済みエントリのチャンクを追加する (この時点では認証されない)
-     *
-     * @param manifestId 対象計画のマニフェストID
-     * @param paths エントリのパスリスト
-     * @param changeTypes パスに対応する変更タイプリスト
-     * @param done 結果コールバック (ok, error)
-     * @return なし
-     */
-    virtual void stageEntries(const QString &manifestId,    // 検証済みエントリのチャンクを計画へ追加する
-                              const QStringList &paths,
-                              const QStringList &changeTypes,
-                              std::function<void(bool ok, const QString &error)> done) = 0;
-
-    /**
-     * @brief 計画を凍結して認証と実行を開始させる (Polkitプロンプトはこの呼び出しで1度だけ出る)
-     *
-     * @param manifestId 対象計画のマニフェストID
-     * @param done 結果コールバック (ok, error)
-     * @return なし
-     */
-    virtual void commitPlan(const QString &manifestId,      // 計画を確定して復元を開始する
-                            std::function<void(bool ok, const QString &error)> done) = 0;
-
-    /**
-     * @brief 計画のキャンセルを要求する (次のサーバ側チャンク境界で反映される)
-     *
-     * @param manifestId 対象計画のマニフェストID
-     * @param done 結果コールバック (ok, error)
-     * @return なし
-     */
-    virtual void cancelPlan(const QString &manifestId,      // 計画のキャンセルを非同期で要求する
-                            std::function<void(bool ok, const QString &error)> done) = 0;
-
-    /**
-     * @brief 計画の状態をCSV形式で問い合わせる
-     *
-     * @param manifestId 対象計画のマニフェストID
-     * @param done 結果コールバック (ok, statusCsv, error)
-     * @return なし
-     */
-    virtual void requestStatus(const QString &manifestId,   // 計画の状態をCSVで取得する
-                               std::function<void(bool ok, const QString &statusCsv, const QString &error)> done) = 0;
-
-    // 復元計画シグナルの購読
-    /**
-     * @brief 復元計画の進捗/完了シグナルとサービス消失通知を受信側に登録する
-     *
-     * 復元サービスのバス名が消失した場合は、receiverのonRestorePlanServiceVanishedスロットを呼び出さなければならない
-     *
-     * @param receiver onRestorePlanProgress / onRestorePlanFinished / onRestorePlanServiceVanishedスロットを持つQObject
-     * @return 登録に成功した場合はtrue
-     */
-    virtual bool subscribePlanSignals(QObject *receiver) = 0;   // 復元計画関連シグナルの受信を登録する
-
-    /**
-     * @brief 復元計画の進捗 / 完了シグナルとサービス消失通知の受信を解除する
-     *
-     * subscribePlanSignals()で登録したonRestorePlanServiceVanishedスロットへの
-     * 通知も解除しなければならない。
-     *
-     * @param receiver 登録解除するQObject
-     */
-    virtual void unsubscribePlanSignals(QObject *receiver) = 0; // 復元計画関連シグナルの受信を解除する
-};
-
-/**
+ * @class FileChangeModel
  * @brief ファイル変更をツリー構造で表示するためのモデル
  *
- * Snapperの変更出力をFileChangeItemツリーへ変換し、QML向けのロール、
- * 選択状態、ファイル差分取得および復元操作を提供する。
+ * Snapperの変更出力をFileChangeItemツリーへ変換して、QML向けのロールと選択状態とファイル差分取得と復元操作を提供する
+ * 復元はstaged restore計画でのみ行い、commit時にPolkit認証を1度だけ受ける
+ *
+ * 公開済みエントリのchangeTypeは比較の向きに依存するため
+ * 復元時には由来の比較条件と現在の比較条件の完全一致を要求する
+ * 向きを取り違えるとcreatedとdeletedが反転し、復元対象外の削除に繋がる
  */
 class FileChangeModel : public QAbstractItemModel
 {
@@ -184,8 +45,7 @@ class FileChangeModel : public QAbstractItemModel
 public:
     /**
      * @brief 文字列を返すD-Bus呼び出しの非同期結果コールバック
-     *
-     * @param ok 呼び出しに成功した場合: true
+     * @param ok 呼び出しに成功した場合はtrue
      * @param value 成功時の応答文字列
      * @param error 失敗時のエラーメッセージ
      */
@@ -193,58 +53,57 @@ public:
 
 private:
     /**
+     * @struct ComparisonContext
      * @brief モデルへ公開したエントリがどの比較で得られたかを識別する値
      *
-     * エントリのchangeTypeは「number1 --> number2」の向きでしか正しく解釈できないため、
-     * 復元時には、エントリの由来となった比較条件と現在の比較条件が完全に一致している必要がある。
-     * number1は常に、その向きにおける復元元スナップショットを指す。
+     * エントリのchangeTypeはnumber1からnumber2への向きでしか正しく解釈できないため
+     * 復元時には由来の比較条件と現在の比較条件が完全に一致している必要がある
+     * number1は常に、その向きにおける復元元スナップショットを指す
      */
     struct ComparisonContext
     {
-        QString configName;                             // Snapper設定名
-        bool betweenMode = false;                       // 2スナップショット比較モードかどうか
-        int number1 = 0;                                // 比較元スナップショット番号 (この比較での復元元)
-        int number2 = 0;                                // 比較先スナップショット番号 (対カレント比較では0)
-        bool flatMode = false;                          // フラット表示として構築したかどうか
-        bool filterUnchangedAgainstCurrent = false;     // 現在のシステムと差異が無いエントリを除外したかどうか
+        QString configName;                         // Snapper設定名
+        bool betweenMode = false;                   // 2スナップショット比較モードかどうか
+        int number1 = 0;                            // 比較元スナップショット番号
+        int number2 = 0;                            // 比較先スナップショット番号
+        bool flatMode = false;                      // フラット表示として構築したかどうか
+        bool filterUnchangedAgainstCurrent = false; // 現在のシステムと差異が無いエントリを除外したかどうか
 
-        bool operator==(const ComparisonContext &other) const;  // 比較条件が完全に一致するかを返す
+        /** @brief 比較条件が完全に一致するかを返す */
+        bool operator==(const ComparisonContext &other) const;
     };
 
-    // スナップショット識別・比較モード
-    QString m_configName;                   // Snapper設定名
-    int m_snapshotNumber;                   // スナップショット番号 (対カレント比較モード用)
-    int m_compareNumber1;                   // 比較元スナップショット番号 (任意2スナップショット比較モード用)
-    int m_compareNumber2;                   // 比較先スナップショット番号 (同上)
-    bool m_betweenMode;                     // 任意2スナップショット比較モードかどうか
-    bool m_filterUnchangedAgainstCurrent = false;   // 現在のシステムと差異が無いエントリを表示対象から除外するかどうか
-                                                    // (2スナップショット比較モードでのみ意味を持つ)
+    // スナップショット識別と比較モード
+    QString m_configName;                       // Snapper設定名
+    int m_snapshotNumber;                       // スナップショット番号
+    int m_compareNumber1;                       // 比較元スナップショット番号
+    int m_compareNumber2;                       // 比較先スナップショット番号
+    bool m_betweenMode;                         // 任意2スナップショット比較モードかどうか
+    bool m_filterUnchangedAgainstCurrent = false; // 現在のシステムと差異が無いエントリを表示対象から除外するかどうか
 
     // 公開済みエントリの由来と要求世代
-    ComparisonContext m_loadedComparison;   // 現在モデルへ公開済みのエントリの比較条件
-    bool m_loadedComparisonValid = false;   // 公開済みエントリが読み込み成功に由来するか
-    quint64 m_loadRequestGeneration = 0;    // 変更一覧要求の世代 (古い応答の破棄に使用)
-    quint64 m_diffRequestGeneration = 0;    // ファイル差分要求の世代 (同上)
+    ComparisonContext m_loadedComparison;       // 現在モデルへ公開済みのエントリの比較条件
+    bool m_loadedComparisonValid = false;       // 公開済みエントリが読み込み成功に由来するか
+    quint64 m_loadRequestGeneration = 0;        // 変更一覧要求の世代
+    quint64 m_diffRequestGeneration = 0;        // ファイル差分要求の世代
 
-    // 表示・モデル状態
-    bool m_flatMode;                        // フラット表示モード (ツリー構築をバイパスし、
-                                            // 各変更を m_rootItem 直下に1行ずつ追加する)
-                                            // 比較ダイアログ用 (ListView表示)
-    FileChangeItem *m_rootItem;             // ツリーのルートアイテム
-    bool m_hasChanges;                      // ファイル変更があるかどうか
-    bool m_loading;                         // 読み込み中フラグ
-    int m_totalFilesCount;                  // 復元対象の総ファイル数
-    int m_processedFilesCount;              // 処理済みファイル数
+    // 表示とモデル状態
+    bool m_flatMode;                            // フラット表示モード
+    FileChangeItem *m_rootItem;                 // ツリーのルートアイテム
+    bool m_hasChanges;                          // ファイル変更があるかどうか
+    bool m_loading;                             // 読み込み中フラグ
+    int m_totalFilesCount;                      // 復元対象の総ファイル数
+    int m_processedFilesCount;                  // 処理済みファイル数
 
-    // D-Bus / Transport
+    // D-Busとtransport
     QDBusInterface *m_dbusInterface;                     // D-Busインターフェース
-    RestorePlanTransport *m_defaultRestorePlanTransport; // 所有する既定のtransport (system bus実装)
-    RestorePlanTransport *m_restorePlanTransport;        // 現在使用中のtransport (テストから差し替え可能)
+    RestorePlanTransport *m_defaultRestorePlanTransport; // 所有する既定のtransport
+    RestorePlanTransport *m_restorePlanTransport;        // 現在使用中のtransport
 
-    // 復元計画 (staged restore)
+    // 復元計画
     QString m_planManifestId;               // 実行中の復元計画のマニフェストID
-    QStringList m_planPaths;                // 検証済みの復元対象パス (選択順を維持)
-    QStringList m_planChangeTypes;          // 検証済みの変更タイプ (m_planPathsと対応)
+    QStringList m_planPaths;                // 検証済みの復元対象パス
+    QStringList m_planChangeTypes;          // 検証済みの変更タイプ
     int m_planNextStageIndex;               // 次にステージングするチャンクの先頭インデックス
     int m_planTotalFiles;                   // 計画開始時に固定した総エントリ数
     int m_planLastProgress;                 // 最後に通知した計画進捗
@@ -253,249 +112,265 @@ private:
     bool m_planSignalsSubscribed;           // 復元計画シグナルを購読中か
     bool m_planCancelRequested;             // 復元計画のキャンセルを送出済みか
 
-    // 復元制御・エラー状態
+    // 復元制御とエラー状態
     bool m_restoreHasError;                 // 復元エラーフラグ
     bool m_cancelRequested;                 // キャンセル要求フラグ
 
     // 復元設定
-    int m_restoreBatchSize;                 // バッチサイズ (1〜1000)
+    int m_restoreBatchSize;                 // バッチサイズ
     bool m_useDirectRestore;                // Direct Copy方式を使用するか
 
 private:
-    // モデル管理
-    void clearModel();                                                                      // モデルデータをクリアする
+    /** @brief モデルデータをクリアする */
+    void clearModel();
 
-    // 変更一覧の読み込み
-    void requestFilteredChangeList(const ComparisonContext &requestedContext,               // フィルタ付きの変更一覧を2要求で読み込む
+    /** @brief フィルタ付きの変更一覧を2要求で読み込む */
+    void requestFilteredChangeList(const ComparisonContext &requestedContext,
                                    quint64 requestGeneration);
-    void publishFilteredChangeList(const ComparisonContext &requestedContext,               // 絞り込んだ変更一覧をモデルへ公開する
+    /** @brief 絞り込んだ変更一覧をモデルへ公開する */
+    void publishFilteredChangeList(const ComparisonContext &requestedContext,
                                    const QString &betweenOutput,
                                    const QString &currentOutput);
 
-    // アイテム取得・変換
-    FileChangeItem *getItem(const QModelIndex &index) const;                                // インデックスからアイテムを取得する
-    QModelIndex findItemIndex(FileChangeItem *parent, const QString &path) const;           // パスからインデックスを検索する
-    FileChangeItem::ChangeType parseChangeType(const QChar &statusChar);                    // ステータス文字から変更タイプを解析する
-    static QString changeTypeToString(FileChangeItem::ChangeType type);                     // 変更タイプを文字列に変換する
-    static QString normalizeRestorePlanPath(const QString &path);                           // 復元パスを正規化する
-    static bool isValidRestorePlanEntry(const QString &path, const QString &changeType);    // 復元エントリの妥当性を検証する
-    static bool hasOnlyCreatedRecordsBeneath(FileChangeItem *item);                         // 配下の実レコードが全てCreatedかを返す
+    /** @brief インデックスからアイテムを取得する */
+    FileChangeItem *getItem(const QModelIndex &index) const;
+    /** @brief パスからインデックスを検索する */
+    QModelIndex findItemIndex(FileChangeItem *parent, const QString &path) const;
+    /** @brief ステータス文字から変更タイプを解析する */
+    FileChangeItem::ChangeType parseChangeType(const QChar &statusChar);
+    /** @brief 変更タイプを文字列に変換する */
+    static QString changeTypeToString(FileChangeItem::ChangeType type);
+    /** @brief 復元パスを正規化する */
+    static QString normalizeRestorePlanPath(const QString &path);
+    /** @brief 復元エントリの妥当性を検証する */
+    static bool isValidRestorePlanEntry(const QString &path, const QString &changeType);
+    /** @brief 配下の実レコードが全てCreatedかを返す */
+    static bool hasOnlyCreatedRecordsBeneath(FileChangeItem *item);
 
-    // 比較条件の同一性・復元可否
-    ComparisonContext currentComparisonContext() const;                                     // 現在の比較条件を返す
-    void invalidateLoadedComparison();                                                      // 公開済みエントリとその由来を無効化する
-    bool hasRestorableLoadedComparison() const;                                             // 公開済みエントリから復元してよいかを返す
+    /** @brief 現在の比較条件を返す */
+    ComparisonContext currentComparisonContext() const;
+    /** @brief 公開済みエントリとその由来を無効化する */
+    void invalidateLoadedComparison();
+    /** @brief 公開済みエントリから復元してよいかを返す */
+    bool hasRestorableLoadedComparison() const;
 
-    // 復元元の決定・整合性検証
-    int currentRestoreSourceNumber() const;                                                 // 現在の比較条件に対応する復元元番号を返す
-    bool isRestoreSourceConsistent(int sourceSnapshotNumber) const;                         // 復元元と現在の比較条件の整合性を検証する
+    /** @brief 現在の比較条件に対応する復元元番号を返す */
+    int currentRestoreSourceNumber() const;
+    /** @brief 復元元と現在の比較条件の整合性を検証する */
+    bool isRestoreSourceConsistent(int sourceSnapshotNumber) const;
 
-    // チェック状態・収集
-    void collectCheckedItems(FileChangeItem *parent, QStringList &paths) const;                                     // チェック済みパスのみを収集する
-    void collectCheckedItemsWithTypes(FileChangeItem *parent, QStringList &paths, QStringList &changeTypes) const;  // チェック済みパスと変更タイプを収集する
-    void collectAllFilesRecursive(FileChangeItem *parent, QStringList &paths) const;                                // 全ファイルパスを再帰的に収集する
-    void setItemCheckedRecursive(FileChangeItem *item, const QModelIndex &index, bool checked);                     // チェック状態を再帰的に設定する
+    /** @brief チェック済みパスのみを収集する */
+    void collectCheckedItems(FileChangeItem *parent, QStringList &paths) const;
+    /** @brief チェック済みパスと変更タイプを収集する */
+    void collectCheckedItemsWithTypes(FileChangeItem *parent, QStringList &paths, QStringList &changeTypes) const;
+    /** @brief 全ファイルパスを再帰的に収集する */
+    void collectAllFilesRecursive(FileChangeItem *parent, QStringList &paths) const;
+    /** @brief チェック状態を再帰的に設定する */
+    void setItemCheckedRecursive(FileChangeItem *item, const QModelIndex &index, bool checked);
 
-    // 復元計画制御
-    void stageNextPlanChunk();                                  // 次のチャンクをステージングする
-    void commitRestorePlan();                                   // 復元計画をコミットする
-    void resetRestorePlanState();                               // 復元計画の状態をリセットする
-    void finishRestorePlanWithError(const QString &message);    // エラーで復元計画を終了する
+    /** @brief 次のチャンクをステージングする */
+    void stageNextPlanChunk();
+    /** @brief 復元計画をコミットする */
+    void commitRestorePlan();
+    /** @brief 復元計画の状態をリセットする */
+    void resetRestorePlanState();
+    /** @brief エラーで復元計画を終了する */
+    void finishRestorePlanWithError(const QString &message);
 
-    // 復元計画コールバック
-    bool startRestorePlan(int sourceSnapshotNumber,                                     // 復元対象を検証してstaged restore計画を開始する
+    /** @brief 復元対象を検証してstaged restore計画を開始する */
+    bool startRestorePlan(int sourceSnapshotNumber,
                           const QStringList &checkedPaths,
                           const QStringList &checkedChangeTypes);
-    void onPlanBeginFinished(bool ok, const QString &manifestId, const QString &error); // 計画開始完了時の処理
-    void onPlanStageFinished(bool ok, const QString &error);                            // チャンクステージング完了時の処理
-    void onPlanCommitFinished(bool ok, const QString &error);                           // 計画コミット完了時の処理
+    /** @brief 計画開始完了時の処理 */
+    void onPlanBeginFinished(bool ok, const QString &manifestId, const QString &error);
+    /** @brief チャンクステージング完了時の処理 */
+    void onPlanStageFinished(bool ok, const QString &error);
+    /** @brief 計画コミット完了時の処理 */
+    void onPlanCommitFinished(bool ok, const QString &error);
 
-    // D-Bus
-    bool reconnectDbus();                                       // D-Busサービスへの再接続を試みる
+    /** @brief D-Busサービスへの再接続を試みる */
+    bool reconnectDbus();
 
 protected:
     /**
      * @brief 変更レコードからモデルデータを構築する
-     *
-     * レガシーの改行区切りステータス出力を1回だけ解析し、指定した表示モードのモデルツリーを構築する
-     * テストからもD-Busを介さずに検証できるよう保護する
-     *
      * @param changeOutput Snapperの変更出力
      * @param flatMode trueの場合はフラットモデルを構築する
      */
-    void setupModelData(const QString &changeOutput, bool flatMode);  // 変更出力からモデルデータを構築する
+    void setupModelData(const QString &changeOutput, bool flatMode);
 
     /**
      * @brief 2スナップショット比較の条件を設定する
-     *
-     * loadChangesBetween()からD-Bus読み込みを切り離した部分で、比較の向きと表示モードだけを確定させる
-     * テストはD-Busサービスを起動せずに比較モードを再現するためにこれを直接呼び出す
-     *
-     * @param number1 比較元スナップショット番号 (このモードでの復元元)
-     * @param number2 比較先スナップショット番号
-     * @param flat trueの場合はフラットモデルを構築する
-     * @param filterUnchangedAgainstCurrent trueの場合、number1と現在のシステムの間に差異が無いエントリを表示対象から除外する
-     */
-    void setComparisonRange(int number1, int number2, bool flat,      // 2スナップショット比較の条件を設定する
-                            bool filterUnchangedAgainstCurrent = false);
-
-    /**
-     * @brief 変更レコード出力から正規化済みパスの集合を抽出する
-     *
-     * パスの末尾スラッシュを除去してから格納するため、
-     * ディレクトリが一方の比較でのみ末尾スラッシュ付きで報告されても同一パスとして扱える
-     *
-     * @param changeOutput Snapperの変更出力
-     * @return 出力に含まれる正規化済みパスの集合
-     */
-    static QSet<QString> collectChangedPaths(const QString &changeOutput);  // 変更出力から正規化済みパス集合を抽出する
-
-    /**
-     * @brief 変更レコード出力を、許可パス集合に含まれる行だけへ絞り込む
-     *
-     * 行の内容 (ステータスフラグと変更種別) は一切書き換えない
-     * 返す行は必ず入力changeOutputの部分集合であり、エントリが追加されることはない
-     *
-     * @param changeOutput 絞り込み対象のSnapperの変更出力
-     * @param allowedPaths 表示を許可する正規化済みパスの集合
-     * @return 絞り込み後の変更出力
-     */
-    static QString filterChangeOutputByPaths(const QString &changeOutput,   // 変更出力を許可パス集合で絞り込む
-                                             const QSet<QString> &allowedPaths);
-
-    /**
-     * @brief 文字列応答のD-Bus呼び出しを非同期で発行する
-     *
-     * 変更一覧とファイル差分の両方がこの一点を経由する
-     * doneはモデルの生存中にちょうど1回だけ呼び出される
-     * テストはこれをオーバーライドし、実D-Busサービスを起動させずに応答の完了順序を任意に制御する
-     *
-     * @param methodName 呼び出すD-Busメソッド名
-     * @param arguments メソッドへ渡す引数
-     * @param done 結果コールバック
-     */
-    virtual void requestStringReply(const QString &methodName,        // 文字列応答のD-Bus呼び出しを発行する
-                                    const QVariantList &arguments,
-                                    AsyncStringReplyHandler done);
-
-public:
-    // QMLへ公開するモデルデータのロール
-    enum Roles {
-        PathRole = Qt::UserRole + 1,    // 完全パスを返すロール
-        NameRole,                       // 表示名を返すロール
-        ChangeTypeRole,                 // 変更種別を返すロール
-        IsDirectoryRole,                // ディレクトリ判定を返すロール
-        IsCheckedRole,                  // 選択状態を返すロール
-        StatusFlagsRole                 // 詳細ステータスフラグを返すロール
-    };
-
-    // ライフサイクル
-    explicit FileChangeModel(QObject *parent = nullptr);    // ファイル変更モデルを生成する
-    ~FileChangeModel();                                     // モデルと所有リソースを破棄する
-
-    // QAbstractItemModel interface
-    QModelIndex index(int row, int column, const QModelIndex &parent = QModelIndex()) const override;   // 指定位置のモデルインデックスを返す
-    QModelIndex parent(const QModelIndex &child) const override;                                        // 子インデックスの親を返す
-    int rowCount(const QModelIndex &parent = QModelIndex()) const override;                             // 親の子要素数を返す
-    int columnCount(const QModelIndex &parent = QModelIndex()) const override;                          // モデル列数を返す
-    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;                 // 指定ロールのデータを返す
-    QHash<int, QByteArray> roleNames() const override;                                                  // QML向けロール名を返す
-
-    // プロパティ
-    QString configName() const { return m_configName; }             // Snapper設定名を返す
-    void setConfigName(const QString &name);                        // Snapper設定名を更新する
-
-    int snapshotNumber() const { return m_snapshotNumber; }         // 対カレント比較用の番号を返す
-    void setSnapshotNumber(int number);                             // 対カレント比較用の番号を更新する
-
-    bool hasChanges() const { return m_hasChanges; }                // ファイル変更の有無を返す
-    bool isLoading() const { return m_loading; }                    // 読み込み中かどうかを返す
-
-    int restoreBatchSize() const { return m_restoreBatchSize; }     // 復元チャンクの最大件数を返す
-    void setRestoreBatchSize(int size);                             // 復元チャンクの最大件数を更新する
-
-    bool useDirectRestore() const { return m_useDirectRestore; }    // Direct Copy方式の使用設定を返す
-    void setUseDirectRestore(bool use);                             // Direct Copy方式の使用設定を更新する
-
-    // 公開メソッド
-    Q_INVOKABLE void loadChanges();                                 // 対カレントの変更を読み込む
-
-    /**
-     * @brief 2つのスナップショット間の変更を読み込む
-     *
-     * filterUnchangedAgainstCurrentを指定すると、number1と現在のシステムの間に差異が無いエントリ
-     * (既に復元済みなど) を表示対象から除外する。除外はnumber1 --> number2の結果に対する絞り込みで
-     * あり、エントリのchangeTypeは書き換えないため、復元の向きは影響を受けない。
-     *
-     * @param number1 比較元スナップショット番号 (このモードでの復元元)
+     * @param number1 比較元スナップショット番号
      * @param number2 比較先スナップショット番号
      * @param flat trueの場合はフラットモデルを構築する
      * @param filterUnchangedAgainstCurrent trueの場合、現在のシステムと差異が無いエントリを除外する
      */
-    Q_INVOKABLE void loadChangesBetween(int number1, int number2,                       // 2つのスナップショット間の変更を読み込む
+    void setComparisonRange(int number1, int number2, bool flat,
+                            bool filterUnchangedAgainstCurrent = false);
+
+    /**
+     * @brief 変更レコード出力から正規化済みパスの集合を抽出する
+     * @param changeOutput Snapperの変更出力
+     * @return 出力に含まれる正規化済みパスの集合
+     */
+    static QSet<QString> collectChangedPaths(const QString &changeOutput);
+
+    /**
+     * @brief 変更レコード出力を、許可パス集合に含まれる行だけへ絞り込む
+     * @param changeOutput 絞り込み対象のSnapperの変更出力
+     * @param allowedPaths 表示を許可する正規化済みパスの集合
+     * @return 絞り込み後の変更出力
+     */
+    static QString filterChangeOutputByPaths(const QString &changeOutput,
+                                             const QSet<QString> &allowedPaths);
+
+    /**
+     * @brief 文字列応答のD-Bus呼び出しを非同期で発行する
+     * @param methodName 呼び出すD-Busメソッド名
+     * @param arguments メソッドへ渡す引数
+     * @param done 結果コールバック
+     */
+    virtual void requestStringReply(const QString &methodName,
+                                    const QVariantList &arguments,
+                                    AsyncStringReplyHandler done);
+
+public:
+    /**
+     * @brief QMLへ公開するモデルデータのロール
+     *
+     * QML側のdelegateがrole名で参照するため、追加や削除や採番変更はQMLと同時に更新する必要がある
+     */
+    enum Roles {
+        PathRole = Qt::UserRole + 1, // 完全パスを返すロール
+        NameRole,                    // 表示名を返すロール
+        ChangeTypeRole,              // 変更種別を返すロール
+        IsDirectoryRole,             // ディレクトリ判定を返すロール
+        IsCheckedRole,               // 選択状態を返すロール
+        StatusFlagsRole              // 詳細ステータスフラグを返すロール
+    };
+
+    /** @brief ファイル変更モデルを生成する */
+    explicit FileChangeModel(QObject *parent = nullptr);
+    /** @brief モデルと所有リソースを破棄する */
+    ~FileChangeModel();
+
+    /** @brief 指定位置のモデルインデックスを返す */
+    QModelIndex index(int row, int column, const QModelIndex &parent = QModelIndex()) const override;
+    /** @brief 子インデックスの親を返す */
+    QModelIndex parent(const QModelIndex &child) const override;
+    /** @brief 親の子要素数を返す */
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    /** @brief モデル列数を返す */
+    int columnCount(const QModelIndex &parent = QModelIndex()) const override;
+    /** @brief 指定ロールのデータを返す */
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
+    /** @brief QML向けロール名を返す */
+    QHash<int, QByteArray> roleNames() const override;
+
+    /** @brief Snapper設定名を返す */
+    QString configName() const { return m_configName; }
+    /** @brief Snapper設定名を更新する */
+    void setConfigName(const QString &name);
+
+    /** @brief 対カレント比較用の番号を返す */
+    int snapshotNumber() const { return m_snapshotNumber; }
+    /** @brief 対カレント比較用の番号を更新する */
+    void setSnapshotNumber(int number);
+
+    /** @brief ファイル変更の有無を返す */
+    bool hasChanges() const { return m_hasChanges; }
+    /** @brief 読み込み中かどうかを返す */
+    bool isLoading() const { return m_loading; }
+
+    /** @brief 復元チャンクの最大件数を返す */
+    int restoreBatchSize() const { return m_restoreBatchSize; }
+    /** @brief 復元チャンクの最大件数を更新する */
+    void setRestoreBatchSize(int size);
+
+    /** @brief Direct Copy方式の使用設定を返す */
+    bool useDirectRestore() const { return m_useDirectRestore; }
+    /** @brief Direct Copy方式の使用設定を更新する */
+    void setUseDirectRestore(bool use);
+
+    /** @brief 対カレントの変更を読み込む */
+    Q_INVOKABLE void loadChanges();
+
+    /**
+     * @brief 2つのスナップショット間の変更を読み込む
+     * @param number1 比較元スナップショット番号
+     * @param number2 比較先スナップショット番号
+     * @param flat trueの場合はフラットモデルを構築する
+     * @param filterUnchangedAgainstCurrent trueの場合、現在のシステムと差異が無いエントリを除外する
+     */
+    Q_INVOKABLE void loadChangesBetween(int number1, int number2,
                                         bool flat = false,
                                         bool filterUnchangedAgainstCurrent = false);
-    Q_INVOKABLE void getFileDiffAndDetails(const QString &filePath);                    // 指定ファイルの差分と詳細を取得する
-    Q_INVOKABLE void setItemChecked(const QString &filePath, bool checked);             // 指定パスの選択状態を設定する
-    Q_INVOKABLE QStringList getCheckedItems() const;                                    // 選択済みパスの一覧を返す
-    Q_INVOKABLE bool restoreCheckedItems();                                             // 選択済み項目の復元を開始する
-    Q_INVOKABLE void restoreSingleFile(const QString &filePath);                        // 指定ファイルの復元を開始する
-    Q_INVOKABLE void cancelRestore();                                                   // 進行中の復元をキャンセルする
+    /** @brief 指定ファイルの差分と詳細を取得する */
+    Q_INVOKABLE void getFileDiffAndDetails(const QString &filePath);
+    /** @brief 指定パスの選択状態を設定する */
+    Q_INVOKABLE void setItemChecked(const QString &filePath, bool checked);
+    /** @brief 選択済みパスの一覧を返す */
+    Q_INVOKABLE QStringList getCheckedItems() const;
+    /** @brief 選択済み項目の復元を開始する */
+    Q_INVOKABLE bool restoreCheckedItems();
+    /** @brief 指定ファイルの復元を開始する */
+    Q_INVOKABLE void restoreSingleFile(const QString &filePath);
+    /** @brief 進行中の復元をキャンセルする */
+    Q_INVOKABLE void cancelRestore();
 
     /**
      * @brief 復元元スナップショットを明示して選択済み項目の復元を開始する
-     *
-     * 比較モード (m_betweenMode) を保ったまま復元できるようにするためのオーバーロードで、
-     * 2スナップショット比較モードではloadChangesBetween()の第1引数 (比較元) のみを復元元として受け付ける
-     * 現在モデルが保持するエントリのchangeTypeは「比較元 --> 比較先」の向きで解釈されるため、
-     * これ以外のスナップショットを復元元にするとcreatedとdeletedの意味が反転し、
-     * 復元対象外のファイルを削除する危険がある
-     *
      * @param sourceSnapshotNumber 復元元スナップショット番号
-     * @return 復元処理が開始された場合: true、検証に失敗した場合: false
+     * @return 復元処理が開始された場合にtrue、検証に失敗した場合にfalse
      */
-    Q_INVOKABLE bool restoreCheckedItemsFrom(int sourceSnapshotNumber);                 // 復元元を明示して選択済み項目の復元を開始する
+    Q_INVOKABLE bool restoreCheckedItemsFrom(int sourceSnapshotNumber);
 
     /**
      * @brief 復元元スナップショットを明示して指定ファイルの復元を開始する
-     *
-     * restoreCheckedItemsFrom()と同一の整合性検証を単一ファイル復元へ適用する
-     *
      * @param filePath 復元対象のファイルパス
      * @param sourceSnapshotNumber 復元元スナップショット番号
      */
-    Q_INVOKABLE void restoreSingleFileFrom(const QString &filePath,                     // 復元元を明示して指定ファイルの復元を開始する
+    Q_INVOKABLE void restoreSingleFileFrom(const QString &filePath,
                                            int sourceSnapshotNumber);
 
-    /**
-     * @brief テスト専用に復元計画transportを差し替える
-     * @param transport 差し込むtransport (nullptrの場合は既定transportへ戻す)
-     */
-    void setRestorePlanTransportForTesting(RestorePlanTransport *transport);            // テスト用transportを設定する
+    /** @brief テスト専用に復元計画transportを差し替える */
+    void setRestorePlanTransportForTesting(RestorePlanTransport *transport);
 
 signals:
-    // 状態および操作結果の通知
-    void configNameChanged();                                   // Snapper設定名の変更を通知する
-    void snapshotNumberChanged();                               // スナップショット番号の変更を通知する
-    void hasChangesChanged();                                   // ファイル変更の有無の更新を通知する
-    void loadingChanged();                                      // 読み込み状態の更新を通知する
-    void errorOccurred(const QString &message);                 // 操作エラーを通知する
-    void fileDiffAndDetailsReady(const QString &filePath,       // ファイル差分と詳細の取得完了を通知する
+    /** @brief Snapper設定名の変更を通知する */
+    void configNameChanged();
+    /** @brief スナップショット番号の変更を通知する */
+    void snapshotNumberChanged();
+    /** @brief ファイル変更の有無の更新を通知する */
+    void hasChangesChanged();
+    /** @brief 読み込み状態の更新を通知する */
+    void loadingChanged();
+    /** @brief 操作エラーを通知する */
+    void errorOccurred(const QString &message);
+    /** @brief ファイル差分と詳細の取得完了を通知する */
+    void fileDiffAndDetailsReady(const QString &filePath,
                                  const QVariantMap &details,
                                  const QString &diff);
-    void restoreProgress(int current,                           // 復元の進捗を通知する
+    /** @brief 復元の進捗を通知する */
+    void restoreProgress(int current,
                          int total,
                          const QString &filePath);
-    void restoreCompleted(bool success);                        // 復元処理の完了を通知する
-    void restoreBatchSizeChanged();                             // 復元チャンク件数の変更を通知する
-    void useDirectRestoreChanged();                             // Direct Copy方式設定の変更を通知する
+    /** @brief 復元処理の完了を通知する */
+    void restoreCompleted(bool success);
+    /** @brief 復元チャンク件数の変更を通知する */
+    void restoreBatchSizeChanged();
+    /** @brief Direct Copy方式設定の変更を通知する */
+    void useDirectRestoreChanged();
 
 private slots:
-    // D-Bus復元通知の処理
-    void onRestorePlanProgress(const QString &manifestId, int current, int total);                                 // 復元計画の進捗通知を処理する
-    void onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message);   // 復元計画の完了通知を処理する
+    /** @brief 復元計画の進捗通知を処理する */
+    void onRestorePlanProgress(const QString &manifestId, int current, int total);
+    /** @brief 復元計画の完了通知を処理する */
+    void onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message);
 
-    void onRestorePlanServiceVanished(); // 復元サービスの消失を失敗として処理する
+    /** @brief 復元サービスの消失を失敗として処理する */
+    void onRestorePlanServiceVanished();
 };
 
 #endif // FILECHANGEMODEL_H

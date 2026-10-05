@@ -9,6 +9,12 @@
 #include "snapshotlistmodel.h"
 
 /**
+ * @file snapshotgroupmodel.h
+ * @brief Pre/Postペアを1行にまとめるプロキシモデル
+ */
+
+/**
+ * @class SnapshotGroupModel
  * @brief Pre/Postペアをグループ化して表示するためのモデル
  *
  * SnapshotListModelをソースとし、Pre/Postペアを1行にまとめて表示するプロキシモデル
@@ -23,7 +29,10 @@ class SnapshotGroupModel : public QAbstractListModel
     Q_PROPERTY(int count READ count NOTIFY countChanged)                                // グループ件数
 
 public:
-    // グループ種別を表す列挙型
+    /**
+     * @enum GroupType
+     * @brief グループの種別
+     */
     enum GroupType {
         Single      = 0,    // 単発グループ
         PrePost     = 1,    // Pre/Postペアグループ
@@ -32,7 +41,10 @@ public:
     };
     Q_ENUM(GroupType)
 
-    // グループロールを表す列挙型
+    /**
+     * @enum GroupRoles
+     * @brief QMLへ公開するグループのロール
+     */
     enum GroupRoles {
         DisplayIdRole = Qt::UserRole + 1,   // 表示IDロール
         GroupTypeRole,                      // グループ種別ロール
@@ -48,32 +60,86 @@ public:
         IsImportantRole                     // 重要フラグロール
     };
 
-    // コンストラクタ
-    explicit SnapshotGroupModel(QObject *parent = nullptr);                 // コンストラクタ
+    /**
+     * @brief SnapshotGroupModelを構築する
+     * @param parent Qt親オブジェクト
+     */
+    explicit SnapshotGroupModel(QObject *parent = nullptr);
 
-    // モデルインターフェース
-    int rowCount(const QModelIndex &parent = QModelIndex()) const override; // 行数を取得する
-    QVariant data(const QModelIndex &index,                                 // 指定インデックスのデータを取得する
-                  int role = Qt::DisplayRole) const override;
-    QHash<int, QByteArray> roleNames() const override;                      // ロール名マップを取得する
+    /**
+     * @brief 行数を取得する
+     * @param parent 親インデックス (リストモデルでは未使用)
+     * @return グループ件数
+     */
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
 
-    // プロパティゲッター / セッター
-    int count() const;                                                      // グループ件数を取得する
-    SnapshotListModel *snapshotListModel() const;                           // ソースモデルを取得する
-    void setSnapshotListModel(SnapshotListModel *model);                    // ソースモデルを設定する
+    /**
+     * @brief 指定インデックスのデータを取得する
+     * @param index 対象インデックス
+     * @param role 取得するロール
+     * @return ロールに対応する値、範囲外の場合は無効なQVariant
+     */
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
 
-    // QML公開操作
-    Q_INVOKABLE QVariantList snapshotNumbersAt(int row) const;              // 指定行のスナップショット番号一覧を取得する
+    /**
+     * @brief ロール名マップを取得する
+     * @return ロール番号からロール名へのマップ
+     */
+    QHash<int, QByteArray> roleNames() const override;
+
+    /**
+     * @brief グループ件数を取得する
+     * @return グループ件数
+     */
+    int count() const;
+
+    /**
+     * @brief ソースモデルを取得する
+     * @return ソースとなるSnapshotListModel
+     */
+    SnapshotListModel *snapshotListModel() const;
+
+    /**
+     * @brief ソースモデルを設定する
+     *
+     * 設定後はソースの変更を監視し、変化のたびにグループを再構築する
+     *
+     * @param model 新たなソースモデル
+     */
+    void setSnapshotListModel(SnapshotListModel *model);
+
+    /**
+     * @brief 指定行のスナップショット番号一覧を取得する
+     * @param row 対象行
+     * @return 行が表すスナップショット番号の一覧、範囲外の場合は空のリスト
+     */
+    Q_INVOKABLE QVariantList snapshotNumbersAt(int row) const;
 
 signals:
-    void snapshotListModelChanged();    // ソースモデル変更時に発行する
-    void countChanged();                // 件数変更時に発行する
+    /**
+     * @brief ソースモデル変更時に発行する
+     */
+    void snapshotListModelChanged();
+
+    /**
+     * @brief 件数変更時に発行する
+     */
+    void countChanged();
 
 private slots:
-    void rebuild();                     // グループを再構築する
+    /**
+     * @brief グループを再構築する
+     *
+     * ソースモデルの全スナップショットを走査し、Pre/Postの対応付けをやり直す
+     */
+    void rebuild();
 
 private:
     // グループ内部構造体
+    /**
+     * @struct SnapshotGroup
+     * @brief 1行分に集約したグループの内容
+     */
     struct SnapshotGroup {
         GroupType groupType;        // グループ種別
         int preNumber;              // Preスナップショット番号

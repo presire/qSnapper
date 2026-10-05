@@ -1,3 +1,8 @@
+/**
+ * @file fssnapshot.cpp
+ * @brief FsSnapshotのメタデータ変換と判定の実装
+ */
+
 #include "fssnapshot.h"
 
 /**

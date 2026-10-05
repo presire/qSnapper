@@ -1,6 +1,16 @@
-// スナップショット詳細ダイアログ
-// 選択されたスナップショットの詳細情報を表示し、
-// ファイル復元とシステムロールバック機能を提供
+/**
+ * @file SnapshotDetailDialog.qml
+ * @brief スナップショットの詳細を表示するダイアログ
+ *
+ * 選択スナップショットの基本情報・説明・ユーザデータを表示し
+ * ファイル復元 (RestorePreviewDialog) とシステムロールバック機能を提供する
+ *
+ * 入力 : snapshot (表示対象)、postSnapshot (Pre/Postペア時のPost情報)、snapshotListModel (操作先モデル)
+ * 出力 : なし (ロールバック結果はsnapshotListModelのシグナルで受け取る)
+ * 依存 : BorderedDialog (基底)、RestorePreviewDialog (個別復元)、
+ *        SnapshotListModel::rollbackSnapshot / rollbackCompleted / rollbackFailed (ロールバック)、
+ *        SnapperService::currentConfig (ロールバック可否判定)、ThemeManager (警告色とダーク判定)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -8,32 +18,34 @@ import QSnapper 1.0
 
 BorderedDialog {
     id: root
-    modal: true
+    modal: true                                       // 背後への操作をブロックする
+    // ウィンドウ幅の70%を基準に、800から1280の範囲へクランプする
     width: {
         if (!ApplicationWindow.window) return 800
         var calculated = ApplicationWindow.window.width * 0.7
         return Math.min(Math.max(calculated, 800), 1280)
     }
+    // ウィンドウ高さの70%を基準に、640から1024の範囲へクランプする
     height: {
         if (!ApplicationWindow.window) return 640
         var calculated = ApplicationWindow.window.height * 0.7
         return Math.min(Math.max(calculated, 640), 1024)
     }
-    title: qsTr("Snapshot Details")
+    title: qsTr("Snapshot Details")                   // タイトルバーの表示名
 
-    property var snapshot: null                      // 表示するスナップショット情報
-    property var postSnapshot: null                  // Pre/Postペア時のPost情報
-    property var snapshotListModel: null             // スナップショットリストモデルへの参照
+    property var snapshot: null                       // 表示するスナップショット情報
+    property var postSnapshot: null                   // Pre/Postペア時のPost情報
+    property var snapshotListModel: null              // スナップショットリストモデルへの参照
 
     // 復元プレビューダイアログ
     // 個別ファイル/ディレクトリ復元用
     RestorePreviewDialog {
         id: restorePreviewDialog
         configName: SnapperService.currentConfig  // 選択中の設定 (復元元と復元先の両方の基準になる)
-        // Pre/Postペアの場合はPre/Post両方の番号を設定
+        // Pre/Postペアの場合はPre/Post両方の番号を設定する
         preSnapshotNumber: (postSnapshot && postSnapshot.number) ? snapshot.number : 0
         postSnapshotNumber: (postSnapshot && postSnapshot.number) ? postSnapshot.number : 0
-        // デフォルトはPost番号 (Pre/Postペアでない場合はsnapshot番号) 
+        // 既定はPost番号 (Pre/Postペアでない場合はsnapshot番号)
         snapshotNumber: {
             if (postSnapshot && postSnapshot.number)
                 return postSnapshot.number
@@ -41,6 +53,7 @@ BorderedDialog {
         }
     }
 
+    // snapshotが設定されている間のみ本体を表示する
     ColumnLayout {
         anchors.fill: parent
         spacing: 15
@@ -56,7 +69,7 @@ BorderedDialog {
                 spacing: 10
 
                 // 基本情報グループ
-                // スナップショット番号、タイプ、日時、ユーザ等を表示
+                // スナップショット番号、タイプ、日時、ユーザ等を表示する
                 GroupBox {
                     title: qsTr("Basic Information")
                     Layout.fillWidth: true
@@ -71,6 +84,7 @@ BorderedDialog {
                             text: qsTr("Number:")
                             font.bold: true
                         }
+                        // Pre/Postペアの場合は両方の番号を併記する
                         Label {
                             text: {
                                 if (!snapshot) return ""
@@ -84,6 +98,7 @@ BorderedDialog {
                             text: qsTr("Type:")
                             font.bold: true
                         }
+                        // 種別名をローカライズして表示する
                         Label {
                             text: {
                                 if (!snapshot) return ""
@@ -102,6 +117,7 @@ BorderedDialog {
                             }
                         }
 
+                        // Pre/Postペアでは開始日、それ以外は日時として表示する
                         Label {
                             text: postSnapshot ? qsTr("Start Date:") : qsTr("Date/Time:")
                             font.bold: true
@@ -125,10 +141,12 @@ BorderedDialog {
                             text: qsTr("User:")
                             font.bold: true
                         }
+                        // 作成ユーザ名 (空の場合はプレースホルダを表示する)
                         Label {
                             text: snapshot ? (snapshot.user || qsTr("Unknown")) : ""
                         }
 
+                        // クリーンアップ設定が有る場合のみ表示する
                         Label {
                             text: qsTr("Cleanup:")
                             font.bold: true
@@ -139,6 +157,7 @@ BorderedDialog {
                             visible: snapshot && snapshot.cleanupAlgoString !== ""
                         }
 
+                        // 前スナップショットが有る場合のみ表示する
                         Label {
                             text: qsTr("Previous Snapshot:")
                             font.bold: true
@@ -156,6 +175,7 @@ BorderedDialog {
                     title: qsTr("Description")
                     Layout.fillWidth: true
 
+                    // 説明文 (空の場合はプレースホルダを表示する)
                     Label {
                         anchors.fill: parent
                         text: snapshot ? (snapshot.description || qsTr("(No description)")) : ""
@@ -164,7 +184,7 @@ BorderedDialog {
                 }
 
                 // ユーザデータグループ
-                // Snapperに保存されたカスタムメタデータを表示
+                // Snapperに保存されたカスタムメタデータを表示する
                 GroupBox {
                     title: qsTr("User Data")
                     Layout.fillWidth: true
@@ -176,6 +196,7 @@ BorderedDialog {
                         columnSpacing: 15
                         rowSpacing: 10
 
+                        // キー列
                         Repeater {
                             model: (snapshot && snapshot.userdata) ? Object.keys(snapshot.userdata) : []
 
@@ -187,6 +208,7 @@ BorderedDialog {
                             }
                         }
 
+                        // 値列
                         Repeater {
                             model: (snapshot && snapshot.userdata) ? Object.keys(snapshot.userdata) : []
 
@@ -207,6 +229,7 @@ BorderedDialog {
             spacing: 10
 
             // 変更点の表示ボタン
+            // RestorePreviewDialogを開いて変更ファイル一覧と個別復元UIを表示する
             Button {
                 text: qsTr("Show Changes")
                 icon.name: "document-revert"
@@ -221,7 +244,7 @@ BorderedDialog {
                 text: qsTr("System Rollback")
                 icon.name: "view-refresh"
                 icon.color: ThemeManager.isDark ? "#FFFFFF" : palette.buttonText
-                enabled: SnapperService.currentConfig === "root"
+                enabled: SnapperService.currentConfig === "root"   // root設定以外では無効化する
                 onClicked: confirmDialog.open()
             }
 
@@ -238,17 +261,20 @@ BorderedDialog {
     }
 
     // システムロールバック確認ダイアログ
+    // 破壊的操作のため、実行前に管理者権限が必要な旨を提示して確認する
     BorderedDialog {
         id: confirmDialog
         title: qsTr("Confirmation")
         anchors.centerIn: Overlay.overlay
         modal: true
         standardButtons: Dialog.Yes | Dialog.No
+        // ウィンドウ幅の40%を基準に、500から800の範囲へクランプする
         width: {
             if (!ApplicationWindow.window) return 500
             var calculated = ApplicationWindow.window.width * 0.4
             return Math.min(Math.max(calculated, 500), 800)
         }
+        // ウィンドウ高さの30%を基準に、250から600の範囲へクランプする
         height: {
             if (!ApplicationWindow.window) return 250
             var calculated = ApplicationWindow.window.height * 0.3
@@ -270,6 +296,7 @@ BorderedDialog {
                 color: palette.text
             }
 
+            // 管理者権限が必要である点を警告色で明示する
             Label {
                 text: qsTr("Note: This operation requires administrator privileges.")
                 wrapMode: Text.WordWrap
@@ -279,7 +306,7 @@ BorderedDialog {
             }
         }
 
-        // ロールバック実行
+        // [Yes]押下時にSnapshotListModel::rollbackSnapshotを呼び出してロールバックを実行する
         onAccepted: {
             if (snapshot && snapshotListModel) {
                 snapshotListModel.rollbackSnapshot(snapshot.number)
@@ -288,18 +315,18 @@ BorderedDialog {
         }
     }
 
-    // ロールバック結果通知接続
+    // SnapshotListModelのロールバック結果シグナルを受けて通知ダイアログを開く
     Connections {
         target: snapshotListModel ?? null
 
-        // ロールバック成功時
+        // SnapshotListModel::rollbackCompleted受信時に成功ダイアログを開く
         function onRollbackCompleted() {
             if (snapshotListModel) {
                 successDialog.open()
             }
         }
 
-        // ロールバック失敗時
+        // SnapshotListModel::rollbackFailed受信時にエラー内容を表示する
         function onRollbackFailed(error) {
             if (snapshotListModel) {
                 errorDialog.errorText = error
@@ -315,11 +342,13 @@ BorderedDialog {
         anchors.centerIn: Overlay.overlay
         modal: true
         standardButtons: Dialog.Ok
+        // ウィンドウ幅の35%を基準に、450から700の範囲へクランプする
         width: {
             if (!ApplicationWindow.window) return 450
             var calculated = ApplicationWindow.window.width * 0.35
             return Math.min(Math.max(calculated, 450), 700)
         }
+        // ウィンドウ高さの25%を基準に、200から500の範囲へクランプする
         height: {
             if (!ApplicationWindow.window) return 200
             var calculated = ApplicationWindow.window.height * 0.25
@@ -339,18 +368,20 @@ BorderedDialog {
         anchors.centerIn: Overlay.overlay
         modal: true
         standardButtons: Dialog.Ok
+        // ウィンドウ幅の35%を基準に、450から700の範囲へクランプする
         width: {
             if (!ApplicationWindow.window) return 450
             var calculated = ApplicationWindow.window.width * 0.35
             return Math.min(Math.max(calculated, 450), 700)
         }
+        // ウィンドウ高さの25%を基準に、200から500の範囲へクランプする
         height: {
             if (!ApplicationWindow.window) return 200
             var calculated = ApplicationWindow.window.height * 0.25
             return Math.min(Math.max(calculated, 200), 500)
         }
 
-        property string errorText: ""
+        property string errorText: ""              // 表示するエラーメッセージ
 
         Label {
             text: qsTr("Rollback failed: %1").arg(errorDialog.errorText)

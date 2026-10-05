@@ -1,13 +1,15 @@
-// tst_csvrecord.cpp
-//
-// qsnapper::csv::quoteField() / splitRecord() の単体テスト
-// 契約の詳細は、include/csvrecord.hを参照
-//
-// 対象の脆弱性: スナップショット一覧CSVをクライアントが split(',') で分割していたため、
-// カンマを含む正当なdescription等で後続の列がずれ、表示が壊れていた
-// producer (quoteField) とconsumer (splitRecord) は同じヘッダを使い対称性を構成によって保証する
-// また、quoteは表示正しさのための層であり、制御文字の拒否 (isRecordSafeText, fail-closed) の
-// 代替ではないことをregressionテストで固定する
+/**
+ * @file tst_csvrecord.cpp
+ * @brief qsnapper::csv::quoteField() / splitRecord() の単体テスト
+ *
+ * 契約の詳細は、include/csvrecord.hを参照
+ *
+ * 対象の脆弱性: スナップショット一覧CSVをクライアントが split(',') で分割していたため、
+ * カンマを含む正当なdescription等で後続の列がずれ、表示が壊れていた
+ * producer (quoteField) とconsumer (splitRecord) は同じヘッダを使い対称性を構成によって保証する
+ * また、quoteは表示正しさのための層であり、制御文字の拒否 (isRecordSafeText, fail-closed) の
+ * 代替ではないことをregressionテストで固定する
+ */
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -19,6 +21,10 @@ using qsnapper::csv::quoteField;
 using qsnapper::csv::splitRecord;
 using qsnapper::security::isRecordSafeText;
 
+/**
+ * @class TestCsvRecord
+ * @brief CSVのquote / splitとCreateSnapshot応答解析の単体テスト
+ */
 class TestCsvRecord : public QObject
 {
     Q_OBJECT
@@ -39,6 +45,9 @@ private slots:
     void malformedCreateReplyIsRejected();
 };
 
+/**
+ * @brief カンマを含む説明文がquoteを経て1フィールドへ戻ることを確認する
+ */
 void TestCsvRecord::commaInDescriptionRoundTrips()
 {
     const QString description = QStringLiteral("install vim, git");
@@ -53,6 +62,9 @@ void TestCsvRecord::commaInDescriptionRoundTrips()
     QCOMPARE(fields.at(0), description);
 }
 
+/**
+ * @brief 二重引用符を含む値がエスケープを経て往復することを確認する
+ */
 void TestCsvRecord::doubleQuotesRoundTrip()
 {
     // 二重引用符を含む値
@@ -71,6 +83,9 @@ void TestCsvRecord::doubleQuotesRoundTrip()
     QCOMPARE(quoteField(withQuotes), QStringLiteral("\"he said \"\"hi\"\"\""));
 }
 
+/**
+ * @brief 前後の空白がquote対象外で、パース後も文字通り保持されることを確認する
+ */
 void TestCsvRecord::whitespacePreservedVerbatim()
 {
     // 前後の空白はquote対象外であり、パース後も文字通り保持される
@@ -87,6 +102,9 @@ void TestCsvRecord::whitespacePreservedVerbatim()
     QCOMPARE(legacy.at(1), QStringLiteral(" b "));
 }
 
+/**
+ * @brief 空フィールド、末尾の空フィールド、引用符のみの空フィールドおよび空レコードが保持されることを確認する
+ */
 void TestCsvRecord::emptyAndQuotedEmptyFields()
 {
     // 空フィールド
@@ -111,6 +129,9 @@ void TestCsvRecord::emptyAndQuotedEmptyFields()
     QCOMPARE(fields.at(0), QString());
 }
 
+/**
+ * @brief keyにカンマを含むuserdataペアが1フィールドとして往復し、最初の=で分割されることを確認する
+ */
 void TestCsvRecord::userdataCommaInKeySurvivesAsOneField()
 {
     // keyにカンマを含むuserdataペアは1フィールドとしてquoteされ、
@@ -128,6 +149,9 @@ void TestCsvRecord::userdataCommaInKeySurvivesAsOneField()
     QCOMPARE(fields.at(0).mid(eqIdx + 1), QStringLiteral("value"));
 }
 
+/**
+ * @brief valueにカンマを含むuserdataペアが1フィールドとして往復し、最初の=で分割されることを確認する
+ */
 void TestCsvRecord::userdataCommaInValueSurvivesAsOneField()
 {
     // valueにカンマを含むuserdataペアも同様
@@ -144,6 +168,9 @@ void TestCsvRecord::userdataCommaInValueSurvivesAsOneField()
     QCOMPARE(fields.at(0).mid(eqIdx + 1), QStringLiteral("va,lue"));
 }
 
+/**
+ * @brief 特殊文字を含まない入力がquoteされず、旧split(',')と同一に分割されることを確認する
+ */
 void TestCsvRecord::legacyUnquotedMatchesNaiveSplit()
 {
     // 特殊文字を含まない入力はquoteされず、旧 split(',') と同一に分割される
@@ -187,6 +214,9 @@ void TestCsvRecord::unclosedQuoteIsRejected()
     QVERIFY(splitRecord(record).isEmpty());
 }
 
+/**
+ * @brief 制御文字がquoteの有無にかかわらずfail-closedで拒否されることを確認する
+ */
 void TestCsvRecord::controlCharactersStillRejected()
 {
     // quoteは表示正しさのための層であり、制御文字のfail-closed拒否の代替ではない
@@ -206,6 +236,9 @@ void TestCsvRecord::controlCharactersStillRejected()
     }
 }
 
+/**
+ * @brief 実際のレコード列と同じカラム順でquote / splitの往復が成立することを確認する
+ */
 void TestCsvRecord::fullRecordRoundTrip()
 {
     // 実際のレコード列と同じカラム順でquote / splitの往復を検証する

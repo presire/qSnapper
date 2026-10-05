@@ -1,3 +1,8 @@
+/**
+ * @file snapshotlistmodel.cpp
+ * @brief スナップショット一覧モデルの実装
+ */
+
 #include "snapshotlistmodel.h"
 #include "snapperservice.h"
 #include <QDebug>
@@ -148,6 +153,7 @@ void SnapshotListModel::refresh()
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
+ * @param userdata ユーザデータマップ
  */
 void SnapshotListModel::createSingleSnapshot(const QString &description, const QVariantMap &userdata)
 {
@@ -165,6 +171,7 @@ void SnapshotListModel::createSingleSnapshot(const QString &description, const Q
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
+ * @param userdata ユーザデータマップ
  */
 void SnapshotListModel::createPreSnapshot(const QString &description, const QVariantMap &userdata)
 {
@@ -183,6 +190,7 @@ void SnapshotListModel::createPreSnapshot(const QString &description, const QVar
  *
  * @param description スナップショットの説明文
  * @param previousNumber ペアにするPreスナップショットの番号
+ * @param userdata ユーザデータマップ
  */
 void SnapshotListModel::createPostSnapshot(const QString &description, int previousNumber, const QVariantMap &userdata)
 {
@@ -190,7 +198,15 @@ void SnapshotListModel::createPostSnapshot(const QString &description, int previ
 }
 
 /**
- * @brief 既存スナップショットを編集
+ * @brief 既存スナップショットを編集する
+ *
+ * 成功時はモデルを更新してsnapshotModified()を、
+ * 失敗時はsnapshotModificationFailed()を発行する
+ *
+ * @param number 編集対象のスナップショット番号
+ * @param description 新しい説明文
+ * @param cleanup 新しいクリーンアップアルゴリズム文字列
+ * @param userdata 新しいユーザデータマップ
  */
 void SnapshotListModel::modifySnapshot(int number,
                                        const QString &description,

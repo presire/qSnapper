@@ -12,7 +12,7 @@
  *   - CommitRestorePlanのPolkit認証 (checkAuthorization) は、authorizeForTest()へ置き換える
  *   - RestorePlanExecutorのEntryApplierはlibsnapperでmountした実ファイルをコピーする代わりにapplyRestoreEntryForTest()へ置き換える
  *
- * libsnapper / PolkitQt1 / btrfsutil にはリンクしない。
+ * libsnapper / PolkitQt1 / btrfsutil にはリンクしない
  */
 
 #include <QCoreApplication>
@@ -80,6 +80,7 @@ void appendLogLine(const QString &path, const QString &line)
 } // namespace
 
 /**
+ * @class SigTermBridge
  * @brief SIGTERMをQtイベントループの終了要求へ橋渡しするヘルパー
  *
  * self-pipe trickを使い、シグナルハンドラ本体からはpipeへ1byte書き込むだけに留め、
@@ -121,10 +122,11 @@ private slots:
     }
 
 private:
-    QSocketNotifier *m_notifier = nullptr;
+    QSocketNotifier *m_notifier = nullptr;  // self-pipe読み取り端を監視するnotifier
 };
 
 /**
+ * @class RestorePlanTestService
  * @brief staged restore 6メソッドのみを実security coreへ橋渡しするテスト専用D-Busサービス
  */
 class RestorePlanTestService : public QObject, protected QDBusContext
@@ -171,7 +173,7 @@ public slots:
      * @brief ownerに束縛された空のstaged restore計画を開始する
      *
      * snapshotoperations.cpp BeginRestorePlanと同じ順序:
-     * owner確認 -> resolveConfigOrFail -> restoreMode検証 -> snapshotNumber検証　-> counterpartSnapshotNumber検証 -> purgeExpired -> createStaging
+     * owner確認 -> resolveConfigOrFail -> restoreMode検証 -> snapshotNumber検証 -> counterpartSnapshotNumber検証 -> purgeExpired -> createStaging
      *
      * counterpartSnapshotNumberは比較相手のsnapshot番号であり、0は「現在のシステム」のsentinel、正の値は復元元と異なる番号でなければならない
      *
@@ -253,7 +255,7 @@ public slots:
     /**
      * @brief staging計画へ検証済みentry chunkを原子的に追加する
      *
-     * snapshotoperations.cpp StageRestoreEntries (行1874-1933) とエントリ検証ループをVERBATIMに再現する。
+     * snapshotoperations.cpp StageRestoreEntries (行1874-1933) とエントリ検証ループをVERBATIMに再現する
      *
      * @param manifestId owner束縛されたmanifest id
      * @param filePaths 復元対象絶対path列
@@ -739,13 +741,13 @@ private:
         }
     }
 
-    qsnapper::restore::RestoreManifestRegistry m_restoreRegistry;
-    qsnapper::restore::RestorePlanExecutor m_restoreExecutor;
-    QMap<QString, QString> m_restorePlanOwners;
-    qsnapper::restore::FinishedRestorePlanStore m_finishedRestorePlans;
-    const QString m_authLogPath;
-    const QString m_applyLogPath;
-    int m_authorizationCount = 0;
+    qsnapper::restore::RestoreManifestRegistry m_restoreRegistry;          // 計画とstaging entryを所有するregistry
+    qsnapper::restore::RestorePlanExecutor m_restoreExecutor;              // 計画をchunk単位で実行するexecutor
+    QMap<QString, QString> m_restorePlanOwners;                            // manifest idからowner unique nameへの対応
+    qsnapper::restore::FinishedRestorePlanStore m_finishedRestorePlans;    // 終端済み計画のstatusを保持するstore
+    const QString m_authLogPath;                                           // 認可回数を追記するログpath
+    const QString m_applyLogPath;                                          // 適用entry pathを追記するログpath
+    int m_authorizationCount = 0;                                          // authorizeForTestの呼び出し回数
 };
 
 /**

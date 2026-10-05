@@ -323,7 +323,7 @@ namespace {
     /**
      * @brief ディレクトリをO_DIRECTORYで開く
      * @param path 対象
-     * @return fd。失敗時は-1
+     * @return 開いたfd、失敗時は-1
      */
     int openDirectory(const QString &path)
     {

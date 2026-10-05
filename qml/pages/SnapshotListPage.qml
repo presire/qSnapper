@@ -1,5 +1,15 @@
-// スナップショット一覧ページ
-// スナップショットの表示、作成、削除、復元機能を提供
+/**
+ * @file SnapshotListPage.qml
+ * @brief スナップショットの一覧表示と作成・削除・編集・比較を提供するページ
+ *
+ * Main.qmlから生成され、SnapshotListModelの一覧をSnapshotGroupModelでPre/Postペア単位にまとめて表示する
+ * ツールバーで設定 (config) の切り替えとテーマ切り替えを行い、各操作は確認ダイアログを挟んで実行する
+ *
+ * 入力 : なし (SnapperServiceとThemeManagerのシングルトンを直接参照)
+ * 出力 : なし
+ * 依存 : SnapshotListModel (一覧・作成・削除)、SnapshotGroupModel (Pre/Postのグループ化)、
+ *        SnapperService (設定一覧・現在設定・スナップショット検索)、ThemeManager (テーマ色とLight/Dark切替)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -14,7 +24,13 @@ Page {
     property int selectedCount: selectedSnapshots.length       // 選択された項目数
     property alias snapshotDetailDialog: detailDialog          // 詳細ダイアログへのエイリアス
 
-    // ヘルパー関数: グループの選択状態を切り替え (Pre/Postペアは両方選択)
+    /**
+     * @brief グループの選択状態を切り替える
+     * @param preNumber 対象グループのPreスナップショット番号
+     * @param postNumber 対象グループのPostスナップショット番号 (ペアでない場合は0以下)
+     * @note Pre/Postペアは両方まとめて選択・解除する
+     *       selectedSnapshotsを差し替えてバインド更新を促す
+     */
     function toggleGroupSelection(preNumber, postNumber) {
         var preIdx = selectedSnapshots.indexOf(preNumber)
         if (preIdx >= 0) {
@@ -32,18 +48,25 @@ Page {
         selectedSnapshots = selectedSnapshots  // バインディング更新をトリガー
     }
 
-    // 選択状態をクリア
+    /**
+     * @brief 選択状態をクリアする
+     * @note selectedSnapshotsを空配列へ差し替える
+     */
     function clearSelection() {
         selectedSnapshots = []
     }
 
-    // 指定されたpreNumberのグループが選択されているかチェック
+    /**
+     * @brief 指定されたPre番号のグループが選択されているかを返す
+     * @param preNumber 判定するPreスナップショット番号
+     * @return 選択済みの場合はtrue
+     */
     function isGroupSelected(preNumber) {
         return selectedSnapshots.indexOf(preNumber) >= 0
     }
 
     // スナップショット一覧のデータモデル
-    // D-Busサービス経由でSnapperからデータを取得
+    // SnapshotListModel (C++) がD-Busサービス経由でSnapperから一覧を取得する
     SnapshotListModel {
         id: snapshotListModel
 
@@ -80,10 +103,12 @@ Page {
             }
         }
 
+        // 起動直後に一覧を取得して表示する
         Component.onCompleted: refresh()
     }
 
     // グループ化モデル (Pre/Postペアを1行にまとめる)
+    // SnapshotGroupModel (C++) がソースの変更を監視し、変化のたびにグループを再構築する
     SnapshotGroupModel {
         id: snapshotGroupModel
         snapshotListModel: snapshotListModel
@@ -92,10 +117,10 @@ Page {
     // テーブルカラム幅の一元管理
     QtObject {
         id: columnWidths
-        property int idWidth: 80
-        property int typeWidth: 140
-        property int dateWidth: 170
-        property int userdataWidth: 150
+        property int idWidth: 80        // ID列の幅
+        property int typeWidth: 140     // 種別列の幅
+        property int dateWidth: 170     // 日時列の幅
+        property int userdataWidth: 150 // ユーザデータ列の幅
     }
 
     // ツールバーヘッダ
@@ -123,10 +148,12 @@ Page {
                 model: SnapperService.configs
                 Layout.preferredWidth: 140
 
-                // model / currentConfig の変化に応じて currentIndex を更新する。
-                // 宣言的バインドにすると QML が model→currentIndex→model の
-                // 循環とみなして binding loop を検出するため、Connections 経由で
-                // 命令的に設定する。
+                /**
+                 * @brief currentConfigに対応するcurrentIndexを更新する
+                 * @note model / currentConfigの変化に応じて呼ばれる
+                 *       宣言的バインドにするとQMLが model -> currentIndex -> model の循環とみなして
+                 *       binding loopを検出するため、Connections経由で命令的に設定する
+                 */
                 function syncCurrentIndex() {
                     var idx = SnapperService.configs.indexOf(SnapperService.currentConfig)
                     currentIndex = idx >= 0 ? idx : 0
@@ -138,6 +165,7 @@ Page {
                     function onCurrentConfigChanged() { configCombo.syncCurrentIndex() }
                 }
 
+                // 設定切替時: SnapperService.currentConfig (C++) を更新し、選択をクリアして一覧を再取得する
                 onActivated: {
                     var name = model[currentIndex]
                     if (name && name !== SnapperService.currentConfig) {
@@ -146,6 +174,7 @@ Page {
                         snapshotListModel.refresh()
                     }
                 }
+                // 初回に設定一覧を取得し、現在設定に合わせて選択位置を同期する
                 Component.onCompleted: {
                     SnapperService.refreshConfigs()
                     syncCurrentIndex()
@@ -309,9 +338,14 @@ Page {
         height: 30
         color: palette.window
 
-        property alias text: statusLabel.text
+        property alias text: statusLabel.text              // ステータス文言のエイリアス
 
-        // 一時的なステータスメッセージを表示
+        /**
+         * @brief ステータスメッセージを一定時間だけ表示する
+         * @param message 表示する文言
+         * @param timeout 表示を消すまでの時間 (ミリ秒)
+         * @note タイマを再起動し、経過後にstatusLabelの文言を空にする
+         */
         function showMessage(message, timeout) {
             statusLabel.text = message
             statusTimer.interval = timeout
@@ -440,7 +474,12 @@ Page {
             }
         }
 
-        // userdata テキストを { k: v } に変換するヘルパー
+        /**
+         * @brief ユーザデータの文字列をキーと値のペアへ分解する
+         * @param text key=value形式を改行またはカンマで区切った文字列
+         * @return キーと値を持つオブジェクト、空文字列では空オブジェクト
+         * @note 空行と = を含まない行は無視する
+         */
         function parseUserdata(text) {
             var result = ({})
             var lines = text.split(/[\n,]/)
@@ -456,7 +495,7 @@ Page {
             return result
         }
 
-        // OKボタン押下時の処理
+        // [OK]押下時: 説明文を検証し、種別に応じて SnapshotListModel::createSingleSnapshot / createPreSnapshot を呼び出す
         onAccepted: {
             if (descriptionField.text.trim() === "") {
                 errorDialog.text = qsTr("Please enter a description")
@@ -475,7 +514,7 @@ Page {
             userdataField.text = ""
         }
 
-        // キャンセルボタン押下時の処理
+        // [Cancel]押下時: 入力内容を破棄して次回に残さない
         onRejected: {
             descriptionField.text = ""
             userdataField.text = ""
@@ -546,9 +585,9 @@ Page {
         }
 
         // 削除実行
-        // Polkit 認証は D-Bus サービス側 DeleteSnapshot 呼び出し時に
-        // 都度実行される (P0-2 で事前認証 API を撤廃)。
-        // 連続削除のプロンプト抑止は polkit の auth_admin_keep に委ねる。
+        // Polkit認証はD-Busサービス側 DeleteSnapshot 呼び出し時に
+        // 都度実行される (P0-2 で事前認証APIを撤廃)
+        // 連続削除のプロンプト抑止はpolkitのauth_admin_keepに委ねる
         onAccepted: {
             deletingBusyDialog.open()
         }
@@ -568,7 +607,8 @@ Page {
             return Math.min(Math.max(calculated, 400), 600)
         }
 
-        // ダイアログが完全に表示された後にタイマを起動
+        // ダイアログが完全に表示されてからタイマを起動する
+        // 削除処理でGUIスレッドが占有される前に、待機表示を確実に描画させるため
         onOpened: {
             deletionDelayTimer.start()
         }
@@ -597,6 +637,7 @@ Page {
         id: deletionDelayTimer
         interval: 200
         repeat: false
+        // SnapshotListModel::deleteSnapshotsを呼び出し、完了はsnapshotsDeletionCompletedシグナルで受け取る
         onTriggered: {
             snapshotListModel.deleteSnapshots(root.selectedSnapshots)
         }
@@ -620,7 +661,7 @@ Page {
             return Math.min(Math.max(calculated, 200), 500)
         }
 
-        property alias text: errorLabel.text
+        property alias text: errorLabel.text               // エラー文言のエイリアス
 
         Label {
             id: errorLabel

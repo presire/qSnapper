@@ -1,3 +1,8 @@
+/**
+ * @file windowstatemanager.cpp
+ * @brief ウィンドウのジオメトリと最大化状態の永続化実装
+ */
+
 #include <QSettings>
 #include <QGuiApplication>
 #include <QScreen>

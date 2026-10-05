@@ -1,7 +1,9 @@
-// tst_externalurlopener.cpp
-//
-// externalurlopenerの単体テスト
-// 外部ブラウザで開くURLを、httpとhttpsだけに限定できることを確認する
+/**
+ * @file tst_externalurlopener.cpp
+ * @brief externalurlopenerの単体テスト
+ *
+ * 外部ブラウザで開くURLを、httpとhttpsだけに限定できることを確認する
+ */
 
 #include <QtTest/QtTest>
 #include <QDBusError>
@@ -11,6 +13,7 @@
 #include "externalurlopener.h"
 
 /**
+ * @class TestExternalUrlOpener
  * @brief externalurlopenerの単体テスト
  */
 class TestExternalUrlOpener : public QObject

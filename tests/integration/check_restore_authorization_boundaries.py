@@ -1,60 +1,56 @@
 #!/usr/bin/env python3
 """
 @file check_restore_authorization_boundaries.py
-@brief Structural proof that the staged restore authorization boundary in
-       src/dbusservice/snapshotoperations.cpp is unchanged and that the
-       removed legacy restore path has not been reintroduced.
+@brief src/dbusservice/snapshotoperations*.cppの段階的復元認可境界が崩れておらず、
+       削除済みの旧復元経路が再導入されていないことを構造的に検査する
 
-Why this exists
-----------------
-qSnapper restores files only through the staged path. The former LEGACY
-per-call path (RestoreFiles / RestoreFilesDirect over restoreFilesImpl /
-restoreFilesAuthorized) overwrote live inodes in place, trusted the
-client-declared change type and had no exclusion against staged execution,
-so it was removed. It must not come back:
+存在理由 :
+    qSnapperは段階的経路を通してのみファイルを復元する
+    旧来 (LEGACY) のper-call経路 (RestoreFiles / RestoreFilesDirectをrestoreFilesImpl /
+    restoreFilesAuthorized経由で呼ぶ) は、稼働中のinodeをその場で上書きし、クライアント申告の
+    変更種別を信頼し、段階的実行に対する除外も持たなかったため削除された
+    復活させてはならない
 
-  - The STAGED single-authorization path (BeginRestorePlan /
-    StageRestoreEntries / CommitRestorePlan / ContinueRestorePlan /
-    GetRestorePlanStatus / CancelRestorePlan) authorizes EXACTLY ONCE, inside
-    CommitRestorePlan, strictly AFTER the plan is frozen. No pre-freeze method
-    and no post-commit control method (Continue/Status/Cancel) may ever
-    authorize -- doing so would either prompt for authorization before the
-    plan is immutable, or re-prompt during execution, both of which defeat
-    the "authorize exactly once" security property.
+    STAGEDの単一認可経路 (BeginRestorePlan / StageRestoreEntries / CommitRestorePlan /
+    ContinueRestorePlan / GetRestorePlanStatus / CancelRestorePlan) は、
+    CommitRestorePlanの内部でちょうど1回だけ、計画の凍結より厳密に後に認可する
+    凍結前のメソッドとコミット後の制御メソッド (Continue/Status/Cancel) は決して認可してはならない
+    認可すると、計画が不変になる前に認可を求めたり、実行中に再プロンプトしたりすることになり、
+    いずれも「ちょうど1回だけ認可する」というセキュリティ特性を損なう
 
-Authorization primitives
-------------------------
-Authorization is asynchronous. A blocking polkit call with
-AllowUserInteraction has no timeout and freezes the whole single-threaded
-Qt event loop of this root service, so any local user could stall the daemon
-indefinitely with one unanswered prompt. The service therefore runs a
-non-interactive fast path first and only defers (setDelayedReply + polkit's
-per-request async API) when polkit reports "challenge". The two entry points
-into that gate are:
+認可のプリミティブ :
+    認可は非同期である
+    AllowUserInteraction付きのブロッキングなpolkit呼び出しはタイムアウトを持たず、
+    このrootサービスの単一スレッドQtイベントループ全体を凍結させるため、
+    ローカルユーザは未応答のプロンプト1つでデーモンを無期限に停止させられる
+    そこで本サービスはまず非対話の高速経路を実行し、polkitがchallengeを報告した場合にのみ
+    遅延 (setDelayedReplyとpolkitのリクエスト単位の非同期API) する
+    このゲートへの入口は2つある
 
-  - authorizeThen<T>(actionId, body)   -- generic slots
-  - beginAuthorization(actionId, cont) -- CommitRestorePlan, which must
-                                          re-validate plan state after the
-                                          prompt before it mounts anything
+    authorizeThen<T>(actionId, body)   -- 汎用スロット
+    beginAuthorization(actionId, cont) -- CommitRestorePlan
+                                          プロンプト後に計画状態を再検証してからマウントする必要がある
 
-Both count as "authorizing" for every boundary assertion below.
+    以下の全ての境界検査では、この2つを認可とみなす
 
-Two invariants exist only because of the asynchronous design:
+    非同期設計のためだけに成り立つ不変条件が2つある
 
-  - A *Authorized body must never be reachable without passing the gate, and
-    must never authorize a second time (that would re-prompt mid-operation).
-  - QDBusContext::sendErrorReply() is meaningless once a slot has returned,
-    so every error path must go through replyError(); sendErrorReply( may
-    appear exactly once in the file, inside replyError() itself.
+    認可済み本体は、ゲートを通らずに到達できてはならず、二度目の認可もしてはならない
+    (二度目は操作の途中で再プロンプトすることになる)
+    QDBusContext::sendErrorReply()はスロットが戻った後では無意味であり、
+    全エラー経路はreplyError()を通らなければならない
+    sendErrorReply(はファイル内でreplyError()の内部にちょうど1回だけ現れてよい
 
-This script parses the REAL snapshotoperations.cpp (extracting function
-bodies by brace matching, not fixed line numbers, since the file carries an
-evolving uncommitted diff) and asserts these boundaries mechanically, so a
-future edit that adds/removes/moves an authorization call goes red here
-instead of silently changing security behaviour.
+    本スクリプトは実在のsnapshotoperations*.cppを
+    (未コミットdiffが変動するため固定行番号ではなく括弧の対応で関数本体を切り出す) 解析し、
+    これらの境界を機械的に検査する
+    将来の編集が認可呼び出しを追加、削除、移動すると、
+    セキュリティ挙動を静かに変えるのではなくここで失敗する
 
-Uses only the Python 3 standard library. Exits 0 on success, 1 on any
-violation or parse error.
+    本スクリプトはPython 3標準ライブラリのみを使う
+
+使い方 : check_restore_authorization_boundaries.py [--source FILE ...]
+終了コード : 0 = 検査成功、1 = 違反ありまたはソースが見つからない
 """
 
 from __future__ import annotations
@@ -64,33 +60,31 @@ import os
 import re
 import sys
 
-# Function names of the removed legacy per-call restore path. None of them
-# may be defined again.
-REMOVED_LEGACY_FUNCTIONS = (
-    "RestoreFiles",
-    "RestoreFilesDirect",
-    "restoreFilesImpl",
-    "restoreFilesAuthorized",
-    "copyRegularFile",
-    "copySymlink",
+# 削除済みの旧per-call復元経路の関数名
+# いずれも再定義されてはならない
+REMOVED_LEGACY_FUNCTIONS = (          # 復活してはならない旧経路の関数名
+    "RestoreFiles",                   # 旧per-call復元の入口
+    "RestoreFilesDirect",             # 旧per-call直接復元
+    "restoreFilesImpl",               # 旧復元の実装本体
+    "restoreFilesAuthorized",         # 旧復元の認可後本体
+    "copyRegularFile",                # 通常ファイルのコピー
+    "copySymlink",                    # シンボリックリンクのコピー
 )
 
-# Function names on the staged single-authorization path.
-STAGE_PRE_FREEZE = ("BeginRestorePlan", "StageRestoreEntries")
-STAGE_COMMIT = "CommitRestorePlan"
-STAGE_POST_COMMIT_CONTROL = (
-    "ContinueRestorePlan",
-    "GetRestorePlanStatus",
-    "CancelRestorePlan",
+# 段階的単一認可経路の関数名
+STAGE_PRE_FREEZE = ("BeginRestorePlan", "StageRestoreEntries")  # 凍結前のメソッド
+STAGE_COMMIT = "CommitRestorePlan"                              # 凍結と認可を行うメソッド
+STAGE_POST_COMMIT_CONTROL = (                                   # コミット後の制御メソッド
+    "ContinueRestorePlan",                                      # 実行を継続する
+    "GetRestorePlanStatus",                                     # 状態を取得する
+    "CancelRestorePlan",                                        # 実行をキャンセルする
 )
-STAGED_CONTROL_METHODS = STAGE_PRE_FREEZE + STAGE_POST_COMMIT_CONTROL
+STAGED_CONTROL_METHODS = STAGE_PRE_FREEZE + STAGE_POST_COMMIT_CONTROL  # 段階的経路の制御メソッド全体
 
-# Baseline set of SnapshotOperations methods that legitimately authorize
-# today. A NEW name appearing here that is not in this set is treated as an
-# unreviewed authorization-boundary change and fails the check (rather than
-# silently passing); a name disappearing from this set (a currently-listed
-# method that stops authorizing) also fails.
-EXPECTED_AUTHORIZING_METHODS = frozenset({
+# 現在正当に認可するSnapshotOperationsメソッドの基準集合
+# この集合に無い新しい名前が現れた場合は未レビューの認可境界変更とみなし、静かに通過させず検査を失敗させる
+# 逆にこの集合の名前が消えた場合 (現在リストにあるメソッドが認可しなくなった場合) も失敗させる
+EXPECTED_AUTHORIZING_METHODS = frozenset({   # 認可ゲートの呼び出しを許可するメソッド
     "WriteSnapperConfig",
     "SetupQuota",
     "ListConfigs",
@@ -106,36 +100,67 @@ EXPECTED_AUTHORIZING_METHODS = frozenset({
     STAGE_COMMIT,
 })
 
-FUNCTION_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+)\s*\(")
-# A real authorization call site. Matches both gate entry points and tolerates
-# the explicit template argument on authorizeThen<T>(...). The (?<!::) guard
-# keeps the "SnapshotOperations::beginAuthorization(" definition from counting
-# as a call site.
+FUNCTION_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+)\s*\(")  # SnapshotOperations::name(の定義
+
+# 実際の認可呼び出し位置
+# 両方のゲート入口に一致し、authorizeThen<T>(...)の明示的なテンプレート引数も許容する
+# (?<!::)のガードにより
+# "SnapshotOperations::beginAuthorization("の定義が呼び出し位置として数えられるのを防ぐ
 CALL_SITE_RE = re.compile(
     r"(?<!::)\b(?:authorizeThen\s*(?:<[^<>]*>)?|beginAuthorization)\s*\("
 )
-# Human-readable name for the thing CALL_SITE_RE counts, used in messages.
+# CALL_SITE_REが数えるものの人が読める名前 (メッセージに使う)
 AUTH_CALL_LABEL = "authorizeThen(/beginAuthorization("
-# Bodies that run only after the authorization gate has passed.
-AUTHORIZED_BODY_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+Authorized)\s*\(")
-# QDBusContext::sendErrorReply() is only valid while the original slot call is
-# still on the stack. Every other error path must use replyError().
-RAW_ERROR_REPLY_RE = re.compile(r"(?<!::)\bsendErrorReply\s*\(")
-RAW_ERROR_REPLY_OWNER = "replyError"
+# 認可ゲートを通過した後にのみ動作する本体
+AUTHORIZED_BODY_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+Authorized)\s*\(")  # 認可後本体の定義
+# QDBusContext::sendErrorReply()は元のスロット呼び出しがまだスタック上にある間だけ有効である
+# それ以外の全エラー経路はreplyError()を使わなければならない
+RAW_ERROR_REPLY_RE = re.compile(r"(?<!::)\bsendErrorReply\s*\(")  # replyError()以外の生のエラー応答
+RAW_ERROR_REPLY_OWNER = "replyError"                             # sendErrorReply(を許す唯一の関数
 
 
 def repo_root() -> str:
-    """Return the repository root derived from this script's location."""
+    """
+    @brief 本スクリプトの位置からリポジトリルートを求める
+
+    Returns:
+        リポジトリの絶対パス
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.normpath(os.path.join(here, "..", ".."))
 
 
-def default_source_path() -> str:
-    return os.path.join(repo_root(), "src", "dbusservice", "snapshotoperations.cpp")
+def default_source_paths() -> list[str]:
+    """
+    @brief src/dbusservice/snapshotoperations*.cppを全てソートして返す
+
+    実装は責務ごとに複数ファイルへ分割されているため、以下の全検査は
+    それらを連結したテキストに対して実行する
+    ファイルが1つも見つからない場合は静かに通過させず、明確な失敗とする
+
+    Returns:
+        見つかったsnapshotoperations*.cppのソート済み絶対パスリスト
+    """
+    import glob
+
+    pattern = os.path.join(repo_root(), "src", "dbusservice", "snapshotoperations*.cpp")
+    return sorted(glob.glob(pattern))
 
 
 def find_matching_paren(text: str, open_paren_index: int) -> int:
-    """Return the index of the ')' matching the '(' at open_paren_index."""
+    """
+    @brief open_paren_indexの'('に対応する')'の位置を返す
+
+    Args:
+        text: 走査対象のテキスト
+        open_paren_index: '('の位置
+
+    Returns:
+        対応する')'の位置
+
+    Raises:
+        ValueError: 括弧の対応が取れない場合
+    """
     depth = 0
     i = open_paren_index
     n = len(text)
@@ -152,12 +177,23 @@ def find_matching_paren(text: str, open_paren_index: int) -> int:
 
 
 def find_function_body_span(text: str, name_match_end: int) -> tuple[int, int]:
-    """Return (brace_open, brace_close) offsets of the function body that
-    starts with the parameter list immediately following name_match_end.
+    """
+    @brief name_match_endの直後から始まる引数リストを伴う関数本体の位置を返す
 
-    Brace matching skips over string/char literals and // and /* */
-    comments so that a stray '{' or '}' inside a log message or comment
-    cannot desynchronize the scan.
+    Args:
+        text: 走査対象のC++ソース全体
+        name_match_end: 関数名の一致が終わる位置
+
+    Returns:
+        (brace_open, brace_close) の組
+        本体を囲む波括弧の開始位置と終了位置
+
+    Raises:
+        ValueError: 関数本体の終端が見つからない場合
+
+    Note:
+        波括弧の対応を取る際は文字列、文字リテラル、//と/* */のコメントを読み飛ばすため、
+        ログメッセージやコメント中に紛れ込んだ波括弧が走査を狂わせることはない
     """
     open_paren = text.index("(", name_match_end)
     close_paren = find_matching_paren(text, open_paren)
@@ -212,11 +248,18 @@ def find_function_body_span(text: str, name_match_end: int) -> tuple[int, int]:
 
 
 def depth_at_offset(text: str, body_start: int, target_offset: int) -> int:
-    """Return the brace depth (relative to body_start, which must be the
-    function's opening '{') exactly at target_offset, skipping over
-    string/char literals and comments the same way find_function_body_span
-    does. depth == 1 means "directly inside the function's outer block, not
-    nested in any if/for/while/try block".
+    """
+    @brief target_offset時点の波括弧の深さを返す
+
+    Args:
+        text: 走査対象のC++ソース全体
+        body_start: 関数の開始'{'の位置
+        target_offset: 深さを測る位置
+
+    Returns:
+        body_startを基準とした波括弧の深さ
+        find_function_body_spanと同じく文字列、文字リテラル、コメントを読み飛ばす
+        depth == 1は「関数の外側ブロックの直下であり、if/for/while/tryのいずれにもネストしていない」ことを意味する
     """
     depth = 0
     i = body_start
@@ -264,14 +307,20 @@ def depth_at_offset(text: str, body_start: int, target_offset: int) -> int:
 
 
 def collect_functions(text: str) -> dict[str, tuple[int, int, int]]:
-    """Return {name: (def_start, brace_open, brace_close)} for every
-    SnapshotOperations::<name>( ... ) { ... } definition in text.
+    """
+    @brief text中の全SnapshotOperations::<name>( ... ) { ... }定義を収集する
+
+    Args:
+        text: 走査対象のC++ソース全体
+
+    Returns:
+        名前をキー、(def_start, brace_open, brace_close) を値とする辞書
     """
     functions: dict[str, tuple[int, int, int]] = {}
     for match in FUNCTION_DEF_RE.finditer(text):
         name = match.group(1)
         if name in functions:
-            continue  # keep the first (definitions are unique per name here)
+            continue  # 最初の出現を採用する (このコードでは名前ごとに定義は一意)
         try:
             brace_open, brace_close = find_function_body_span(text, match.end(1))
         except ValueError:
@@ -281,17 +330,33 @@ def collect_functions(text: str) -> dict[str, tuple[int, int, int]]:
 
 
 def line_of(text: str, offset: int) -> int:
-    """Return the 1-based line number containing offset."""
+    """
+    @brief offsetを含む1始まりの行番号を返す
+
+    Args:
+        text: 走査対象のテキスト
+        offset: 位置
+
+    Returns:
+        1始まりの行番号
+    """
     return text.count("\n", 0, offset) + 1
 
 
 def find_non_code_ranges(text: str) -> list[tuple[int, int]]:
-    """Return a list of [start, end) offset ranges that are inside a //
-    line comment, a /* */ block comment, a "string", or a 'char' literal.
+    """
+    @brief コメントまたは文字列リテラル内側の位置範囲を返す
 
-    Used to filter out authorization-call occurrences that only appear in
-    prose (e.g. a Doxygen comment mentioning the function by name) so they
-    are never mistaken for a real call site.
+    Args:
+        text: 走査対象のC++ソース全体
+
+    Returns:
+        //行コメント、/* */ブロックコメント、"文字列"、'文字'リテラルの内側にある
+        [start, end) 形式の位置範囲リスト
+
+    Note:
+        文章中にのみ現れる認可呼び出し (例 : 関数名に言及したDoxygenコメント) を除外し、
+        実際の呼び出し位置と誤認しないために使う
     """
     ranges: list[tuple[int, int]] = []
     i = 0
@@ -331,38 +396,87 @@ def find_non_code_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def is_in_non_code_range(offset: int, ranges: list[tuple[int, int]]) -> bool:
+    """
+    @brief 指定位置が非コード範囲のいずれかに含まれるかを返す
+
+    Args:
+        offset: 判定する位置
+        ranges: find_non_code_ranges()が返す位置範囲リスト
+
+    Returns:
+        offsetが範囲内ならTrue
+    """
     return any(start <= offset < end for start, end in ranges)
 
 
 def real_call_offsets(text: str, ranges: list[tuple[int, int]]) -> list[int]:
-    """Return the offsets of every authorization call (CALL_SITE_RE) in
-    text that is real code (not inside a comment/string/char literal) and
-    not the "SnapshotOperations::beginAuthorization(" definition itself.
+    """
+    @brief 実コード中の認可呼び出しの位置を全て返す
+
+    Args:
+        text: 走査対象のC++ソース全体
+        ranges: 非コード範囲のリスト
+
+    Returns:
+        CALL_SITE_REに一致し、コメント、文字列、文字リテラルの内側ではなく、
+        "SnapshotOperations::beginAuthorization("の定義自体でもない位置のリスト
     """
     return [m.start() for m in CALL_SITE_RE.finditer(text)
             if not is_in_non_code_range(m.start(), ranges)]
 
 
 def call_offsets_in_span(offsets: list[int], span_start: int, span_end: int) -> list[int]:
+    """
+    @brief 指定範囲内にある呼び出し位置だけを返す
+
+    Args:
+        offsets: 呼び出し位置のリスト
+        span_start: 範囲の開始位置
+        span_end: 範囲の終了位置
+
+    Returns:
+        span_start以上span_end以下にある位置のリスト
+    """
     return [off for off in offsets if span_start <= off <= span_end]
 
 
 def main() -> int:
+    """
+    @brief 旧経路と段階的経路の認可境界を解析して検査する
+
+    Returns:
+        0 = 検査成功、1 = 違反ありまたはソースが見つからない
+    """
     parser = argparse.ArgumentParser(
-        description="Prove the legacy and staged restore authorization "
-                     "boundaries in snapshotoperations.cpp are unchanged."
+                 description="Prove the legacy and staged restore authorization "
+                             "boundaries in snapshotoperations*.cpp are unchanged."
     )
-    parser.add_argument("--source", default=default_source_path(),
-                        help="Path to src/dbusservice/snapshotoperations.cpp")
+    parser.add_argument("--source", nargs="*", default=None,
+                        help="Paths to src/dbusservice/snapshotoperations*.cpp "
+                             "(default: all of them)")
     args = parser.parse_args()
 
-    print(f"SOURCE: {args.source}")
-    try:
-        with open(args.source, "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError as exc:
-        print(f"FAIL: cannot read source: {exc}")
+    sources: list[str] = list(args.source) if args.source else default_source_paths()
+    if not sources:
+        print("FAIL: no src/dbusservice/snapshotoperations*.cpp files found")
         return 1
+
+    parts: list[str] = []
+    line_base = 1
+    for source in sources:
+        print(f"SOURCE: {source}")
+        try:
+            with open(source, "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError as exc:
+            print(f"FAIL: cannot read source: {exc}")
+            return 1
+        print(f"  lines 1-{content.count(chr(10)) + 1} "
+              f"mapped to combined lines {line_base}-"
+              f"{line_base + content.count(chr(10))}")
+        line_base += content.count("\n") + 2
+        parts.append(f"// ===== boundary-check source: {source} =====\n{content}")
+    text = "\n".join(parts)
 
     functions = collect_functions(text)
     print(f"Parsed {len(functions)} SnapshotOperations:: function definitions "
@@ -376,6 +490,15 @@ def main() -> int:
     failures: list[str] = []
 
     def require_function(name: str) -> str | None:
+        """
+        @brief 名前に対応する関数本体を取得し、無ければ失敗を記録する
+
+        Args:
+            name: 取得する関数名
+
+        Returns:
+            関数本体のテキスト、見つからない場合はNone
+        """
         if name not in functions:
             failures.append(f"function not found by brace matching: {name}")
             return None
@@ -383,13 +506,21 @@ def main() -> int:
         return text[brace_open:brace_close + 1]
 
     def calls_in_function(name: str) -> list[int]:
-        """Return absolute-offset real call sites within name's body span."""
+        """
+        @brief 名前の本体範囲内にある実呼び出し位置 (絶対オフセット) を返す
+
+        Args:
+            name: 対象の関数名
+
+        Returns:
+            本体範囲内の呼び出し位置のリスト、関数が無い場合は空リスト
+        """
         if name not in functions:
             return []
         _, brace_open, brace_close = functions[name]
         return call_offsets_in_span(call_offsets, brace_open, brace_close)
 
-    # --- 1: the removed legacy restore path is not defined again ---
+    # --- 1: 削除済みの旧復元経路が再定義されていないこと ---
     reintroduced = [name for name in REMOVED_LEGACY_FUNCTIONS if name in functions]
     print(f"[1] removed legacy restore functions defined = "
           f"{reintroduced if reintroduced else 'none'}")
@@ -399,7 +530,7 @@ def main() -> int:
             f" -- restore must go through the staged single-authorization path"
         )
 
-    # --- 3: BeginRestorePlan / StageRestoreEntries authorize zero times ---
+    # --- 3: BeginRestorePlan / StageRestoreEntriesの認可は0回であること ---
     for name in STAGE_PRE_FREEZE:
         body = require_function(name)
         if body is None:
@@ -413,7 +544,7 @@ def main() -> int:
                 f"{AUTH_CALL_LABEL} zero times, found {call_count}"
             )
 
-    # --- 4: CommitRestorePlan authorizes exactly once, AFTER freeze( ---
+    # --- 4: CommitRestorePlanの認可はfreeze(の後にちょうど1回であること ---
     commit_body = require_function(STAGE_COMMIT)
     if commit_body is not None:
         _, commit_brace_open, _ = functions[STAGE_COMMIT]
@@ -444,7 +575,7 @@ def main() -> int:
                 f"strictly AFTER the plan is frozen"
             )
 
-    # --- 5: post-commit control methods authorize zero times ---
+    # --- 5: コミット後の制御メソッドの認可は0回であること ---
     for name in STAGE_POST_COMMIT_CONTROL:
         body = require_function(name)
         if body is None:
@@ -458,8 +589,8 @@ def main() -> int:
                 f"call {AUTH_CALL_LABEL} zero times, found {call_count}"
             )
 
-    # --- 6: StageRestoreEntries rejects an over-capacity chunk with
-    # InvalidArgs and returns BEFORE ever calling m_restoreRegistry.stageEntries( ---
+    # --- 6: StageRestoreEntriesは容量超過のチャンクをInvalidArgsで拒否し、
+    # m_restoreRegistry.stageEntries(を呼ぶ前に戻ること ---
     stage_body = require_function("StageRestoreEntries")
     if stage_body is not None:
         idx_cap = stage_body.find("kMaxEntriesPerStageChunk")
@@ -506,10 +637,9 @@ def main() -> int:
                 "-- an over-capacity chunk could reach the registry"
             )
 
-    # --- 7: enumerate every real authorization call site in the whole
-    # file, print its enclosing function, and fail if a staged-restore
-    # control method appears, or if the enclosing-function set drifts from
-    # the reviewed baseline. ---
+    # --- 7: ファイル全体の実認可呼び出し位置を列挙し、その所属関数を出力する
+    # 段階的復元の制御メソッドが現れた場合、または所属関数の集合が
+    # レビュー済み基準からずれた場合は失敗させる ---
     print()
     print(f"{AUTH_CALL_LABEL} call site enumeration (whole file):")
     sites: list[tuple[int, str]] = []
@@ -558,11 +688,10 @@ def main() -> int:
             "review and, if intentional, add to EXPECTED_AUTHORIZING_METHODS"
         )
 
-    # --- 8: every *Authorized body sits strictly behind the gate ---
-    # An authorized body must be unreachable except from a function that
-    # authorizes, and must never authorize again itself (a second prompt
-    # mid-operation would break the "authorize exactly once" property just as
-    # badly as authorizing in a post-commit control method).
+    # --- 8: 全ての*Authorized本体がゲートの厳密に後ろにあること ---
+    # 認可済み本体は認可する関数から以外は到達できてはならず、自身も二度目の認可をしてはならない
+    # 操作の途中での二度目のプロンプトは、「ちょうど1回だけ認可する」特性を
+    # コミット後の制御メソッドでの認可と同じくらい損なう
     print()
     authorized_bodies = sorted({m.group(1)
                                 for m in AUTHORIZED_BODY_DEF_RE.finditer(text)})
@@ -605,11 +734,11 @@ def main() -> int:
                 f"passing the authorization gate"
             )
 
-    # --- 9: sendErrorReply( is confined to replyError() ---
-    # Once a slot has returned (which it does while a polkit prompt is open),
-    # QDBusContext::sendErrorReply() has no call context left and silently
-    # drops the error. replyError() is the only place allowed to touch it; it
-    # routes deferred replies through the captured QDBusMessage instead.
+    # --- 9: sendErrorReply(はreplyError()に限定されること ---
+    # スロットが戻った後 (polkitプロンプトが開いている間はそうなる) では、
+    # QDBusContext::sendErrorReply()には呼び出しコンテキストが残っておらず、エラーを静かに捨てる
+    # これに触れてよい唯一の場所はreplyError()であり、そこでは捕捉済みのQDBusMessageを通して
+    # 遅延応答を処理する
     print()
     raw_sites: list[tuple[int, str]] = []
     for match in RAW_ERROR_REPLY_RE.finditer(text):

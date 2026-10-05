@@ -12,6 +12,11 @@
 #include <QUrl>
 #include <QVariantMap>
 
+/**
+ * @file externalurlopener.h
+ * @brief 外部ブラウザでURLを開くための検証とポータル連携
+ */
+
 namespace qsnapper::desktop {
 
 /**
@@ -69,7 +74,7 @@ inline bool shouldFallBackToDirectLaunch(const QDBusError &error)
  * @brief URLを外部ブラウザで開く
  *
  * まずsession busのデスクトップポータル (org.freedesktop.portal.OpenURI) に依頼する
- * ブラウザはポータルを動かしているユーザーセッション側のプロセスとして起動されるため、SELinuxで制限されたqsnapper_tの権限に縛られない
+ * ブラウザはポータルを動かしているユーザセッション側のプロセスとして起動されるため、SELinuxで制限されたqsnapper_tの権限に縛られない
  *
  * ポータルが存在しない場合だけ、従来どおりQDesktopServicesで開く (shouldFallBackToDirectLaunch()を参照)
  * この場合、ブラウザはqsnapper_tから直接起動される
@@ -78,7 +83,8 @@ inline bool shouldFallBackToDirectLaunch(const QDBusError &error)
  * URLはログへ出力しない
  *
  * @param url 開くURL (isAllowedExternalUrl()を満たすもの)
- * @param context 応答を受け取るオブジェクト。このオブジェクトが先に破棄された場合、フォールバックは行われない
+ * @param context 応答を受け取るオブジェクト
+ *                このオブジェクトが先に破棄された場合、フォールバックは行われない
  * @return 開く処理を開始できた場合はtrue
  *         URLが許可されない場合はfalse
  */

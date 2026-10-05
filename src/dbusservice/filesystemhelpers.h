@@ -301,7 +301,8 @@ namespace qsnapper::security {
      *
      * componentwiseなO_NOFOLLOW走査で親まで辿り、leaf配下をfstatat(AT_SYMLINK_NOFOLLOW) / unlinkat()で削除する
      * 既に存在しない場合は成功扱いとする (safeRemoveAllと同じ契約)
-     * mount境界 (別mountのroot、または親と異なるst_dev。btrfsのネストしたsubvolumeを含む) を検出した時点で降下を止め、errno=EXDEVで失敗する
+     * mount境界 (別mountのroot、または親と異なるst_dev、btrfsのネストしたsubvolumeを含む) を検出した時点で降下を止め
+     * errno=EXDEVで失敗する
      * 境界の内側は削除しない
      *
      * @param rootPath 基点ルートディレクトリ

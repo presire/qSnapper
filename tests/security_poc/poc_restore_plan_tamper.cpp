@@ -51,11 +51,11 @@
 
 namespace {
 
-constexpr int kExitExpected = 0;
-constexpr int kExitRegression = 1;
-constexpr int kExitEnvironment = 2;
+constexpr int kExitExpected = 0;      // 期待どおり (阻止成功と両方向の正当計画通過)
+constexpr int kExitRegression = 1;    // 想定外のregression
+constexpr int kExitEnvironment = 2;   // 環境エラー
 
-QString g_scratchRoot;
+QString g_scratchRoot;                // 全ファイル操作を閉じ込めるscratch root
 
 /**
  * @brief 失敗を報告して即終了する

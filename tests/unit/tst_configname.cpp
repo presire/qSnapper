@@ -1,6 +1,11 @@
-// tst_configname.cpp
-// validateConfigName() と validateSnapperConfigSettings() の単体テスト。
-// 契約の詳細は src/dbusservice/inputvalidator.h を参照。
+/**
+ * @file tst_configname.cpp
+ * @brief validateConfigName() と validateSnapperConfigSettings() の単体テスト
+ *
+ * 契約の詳細は src/dbusservice/inputvalidator.h を参照する
+ * snapper 設定名と WriteSnapperConfig の設定マップが、危険な入力を
+ * 正しく受け入れ・拒否することを確認する
+ */
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -10,33 +15,52 @@
 using qsnapper::security::validateConfigName;
 using qsnapper::security::validateSnapperConfigSettings;
 
+/** @brief WriteSnapperConfig で送受信する設定キーと値のマップ */
 using SettingsMap = QMap<QString, QString>;
 
+/**
+ * @class TestConfigName
+ * @brief 設定名と設定マップの検証関数の境界条件を確認するテストスイート
+ */
 class TestConfigName : public QObject
 {
     Q_OBJECT
 
 private slots:
     // 受理されるべき
+    /** @brief 設定名として受け入れるべき入力のデータ行を定義する */
     void accept_data();
+    /** @brief 設定名が受け入れられることを確認する */
     void accept();
 
     // 拒否されるべき
+    /** @brief 設定名として拒否すべき入力のデータ行を定義する */
     void reject_data();
+    /** @brief 設定名が拒否されることを確認する */
     void reject();
 
     // 長さ境界値
+    /** @brief 設定名の長さ上限 NAME_MAX の境界を確認する */
     void lengthBoundary();
 
     // WriteSnapperConfigの設定 (受理されるべき)
+    /** @brief 設定マップとして受け入れるべき入力のデータ行を定義する */
     void settingsAccept_data();
+    /** @brief 設定マップが受け入れられることを確認する */
     void settingsAccept();
 
     // WriteSnapperConfigの設定 (拒否されるべき)
+    /** @brief 設定マップとして拒否すべき入力のデータ行を定義する */
     void settingsReject_data();
+    /** @brief 設定マップが拒否されることを確認する */
     void settingsReject();
 };
 
+/**
+ * @brief validateConfigName() が受け入れるべき設定名を定義する
+ *
+ * 既定設定名、一般的な名前、英数字と記号の混在、最小長、数字のみを確認する
+ */
 void TestConfigName::accept_data()
 {
     QTest::addColumn<QString>("name");
@@ -49,6 +73,9 @@ void TestConfigName::accept_data()
     QTest::newRow("digits only")        << QStringLiteral("42")                << QStringLiteral("snapper allows numeric");
 }
 
+/**
+ * @brief validateConfigName() が正当な設定名を受け入れることを確認する
+ */
 void TestConfigName::accept()
 {
     QFETCH(QString, name);
@@ -57,6 +84,12 @@ void TestConfigName::accept()
              qPrintable(QStringLiteral("expected accept (%1): %2").arg(why, name)));
 }
 
+/**
+ * @brief validateConfigName() が拒否すべき設定名を定義する
+ *
+ * 空文字列、ドットドット、パストラバーサル、絶対パス、空白、NUL バイト
+ * 非 ASCII、先頭ダッシュ、改行、シェルメタ文字、制御文字全範囲を含む
+ */
 void TestConfigName::reject_data()
 {
     QTest::addColumn<QString>("name");
@@ -90,6 +123,9 @@ void TestConfigName::reject_data()
     QTest::newRow("C1 APC (0x9F)")      << (QStringLiteral("ro") + QChar(0x9F) + QStringLiteral("ot"))  << QStringLiteral("C1 boundary high");
 }
 
+/**
+ * @brief validateConfigName() が不正な設定名を拒否することを確認する
+ */
 void TestConfigName::reject()
 {
     QFETCH(QString, name);
@@ -98,6 +134,11 @@ void TestConfigName::reject()
              qPrintable(QStringLiteral("expected reject (%1): %2").arg(why, name)));
 }
 
+/**
+ * @brief 設定名の長さ上限 NAME_MAX の境界を確認する
+ *
+ * A-1-12 として 255 文字は受理し、256 文字は拒否することを検証する
+ */
 void TestConfigName::lengthBoundary()
 {
     // A-1-12 長さ上限 (NAME_MAX = 255 を仮定)
@@ -107,6 +148,12 @@ void TestConfigName::lengthBoundary()
     QVERIFY2(!validateConfigName(bad256), "256 chars should be rejected");
 }
 
+/**
+ * @brief validateSnapperConfigSettings() が受け入れるべき設定マップを定義する
+ *
+ * クライアントが実際に送る組み合わせ、単一カウント、同値レンジ、上限カウンタ
+ * 秒数ゼロ、小数の範囲と真偽値を確認する
+ */
 void TestConfigName::settingsAccept_data()
 {
     QTest::addColumn<SettingsMap>("settings");
@@ -127,12 +174,21 @@ void TestConfigName::settingsAccept_data()
     QTest::newRow("bool background") << SettingsMap{ { QStringLiteral("BACKGROUND_COMPARISON"), QStringLiteral("yes") } };
 }
 
+/**
+ * @brief validateSnapperConfigSettings() が正当な設定マップを受け入れることを確認する
+ */
 void TestConfigName::settingsAccept()
 {
     QFETCH(SettingsMap, settings);
     QVERIFY(validateSnapperConfigSettings(settings));
 }
 
+/**
+ * @brief validateSnapperConfigSettings() が拒否すべき設定マップを定義する
+ *
+ * 空マップ、権限や対象を変えるキー、未知キー、大文字小文字違い、改行注入
+ * 不正な真偽値、不正なカウント、不正なレンジ、不正な小数を含む
+ */
 void TestConfigName::settingsReject_data()
 {
     QTest::addColumn<SettingsMap>("settings");
@@ -172,6 +228,9 @@ void TestConfigName::settingsReject_data()
     QTest::newRow("fraction ctrl")      << SettingsMap{ { QStringLiteral("FREE_LIMIT"), QStringLiteral("0.2") + QChar(0x1B) } };
 }
 
+/**
+ * @brief validateSnapperConfigSettings() が不正な設定マップを拒否することを確認する
+ */
 void TestConfigName::settingsReject()
 {
     QFETCH(SettingsMap, settings);

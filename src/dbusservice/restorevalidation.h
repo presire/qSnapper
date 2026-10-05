@@ -1,6 +1,14 @@
 #ifndef QSNAPPER_RESTOREVALIDATION_H
 #define QSNAPPER_RESTOREVALIDATION_H
 
+/**
+ * @file restorevalidation.h
+ * @brief 復元宛先の組み立てと凍結済みentryの権威照合を行う純粋関数群
+ *
+ * libsnapperへの依存を呼び出し側へ隔離し、本ヘッダの関数は文字列検証に徹する
+ * 実行段の防護線の詳細は各関数の @note を参照すること
+ */
+
 #include <QHash>
 #include <QString>
 #include <QtGlobal>
@@ -18,15 +26,15 @@ namespace qsnapper::restore {
  * snapper側の値が変わった場合はここを同期させる
  */
 enum RestoreStatusFlag {
-    RestoreStatusCreated = 1,
-    RestoreStatusDeleted = 2,
-    RestoreStatusType = 4,
-    RestoreStatusContent = 8,
-    RestoreStatusPermissions = 16,
-    RestoreStatusOwner = 32,
-    RestoreStatusGroup = 64,
-    RestoreStatusXattrs = 128,
-    RestoreStatusAcl = 256
+    RestoreStatusCreated = 1,     // 生成された
+    RestoreStatusDeleted = 2,     // 削除された
+    RestoreStatusType = 4,        // 種別が変わった
+    RestoreStatusContent = 8,     // 内容が変わった
+    RestoreStatusPermissions = 16, // 権限が変わった
+    RestoreStatusOwner = 32,      // 所有者が変わった
+    RestoreStatusGroup = 64,      // グループが変わった
+    RestoreStatusXattrs = 128,    // 拡張属性が変わった
+    RestoreStatusAcl = 256        // ACLが変わった
 };
 
 /**

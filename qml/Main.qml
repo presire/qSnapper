@@ -1,5 +1,14 @@
-// qSnapper - メインアプリケーションウィンドウ
-// Btrfs/Snapperファイルシステムのスナップショット管理ツール
+/**
+ * @file Main.qml
+ * @brief qSnapperのメインアプリケーションウィンドウ
+ *
+ * Btrfs/Snapperスナップショット管理GUIのルートウィンドウ
+ * SnapshotListPageを唯一の子として全画面に配置する
+ *
+ * 入力 : なし
+ * 出力 : なし
+ * 依存 : ThemeManager (Light/Darkの判定とパレット切り替え)、SnapshotListPage (メイン画面)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -7,18 +16,18 @@ import QSnapper 1.0
 
 ApplicationWindow {
     id: root
-    width: 1280                    // デフォルトウィンドウ幅
-    height: 900                    // デフォルトウィンドウ高さ
-    minimumWidth: 1024             // 最小幅
-    minimumHeight: 768             // 最小高さ
-    visible: true
-    title: qsTr("qSnapper - Snapshot Manager")
 
-    // テーマに基づいてパレットを切り替え
-    // ThemeManagerの設定に応じてライトモードまたはダークモードを適用
+    width: 1280                    // 既定のウィンドウ幅
+    height: 900                    // 既定のウィンドウ高さ
+    minimumWidth: 1024             // 最小ウィンドウ幅
+    minimumHeight: 768             // 最小ウィンドウ高さ
+    visible: true                  // 起動時にウィンドウを表示
+    title: qsTr("qSnapper - Snapshot Manager") // タイトルバーに表示するアプリ名
+
+    // ThemeManager::isDarkに応じてLight/Darkいずれかのパレットを選択する
     palette: ThemeManager.isDark ? darkPalette : lightPalette
 
-    // ライトモードカラーパレット定義
+    // ライトモード用のカラーパレット定義 (ThemeManagerがLightのときに適用)
     Palette {
         id: lightPalette
         window: "#FFFFFF"
@@ -51,7 +60,7 @@ ApplicationWindow {
         }
     }
 
-    // ダークモードカラーパレット定義
+    // ダークモード用のカラーパレット定義 (ThemeManagerがDarkのときに適用)
     Palette {
         id: darkPalette
         window: "#212121"
@@ -84,7 +93,7 @@ ApplicationWindow {
         }
     }
 
-    // メインコンテンツ: スナップショット一覧ページ
+    // メインコンテンツ: スナップショット一覧ページをウィンドウ全面に配置する
     SnapshotListPage {
         anchors.fill: parent
     }

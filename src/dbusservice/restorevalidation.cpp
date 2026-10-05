@@ -1,3 +1,11 @@
+/**
+ * @file restorevalidation.cpp
+ * @brief restorevalidation.h宣言の実装
+ *
+ * 本ファイルの関数はFSへ触らない純粋な文字列検証に徹する
+ * 認可時の実在確認は呼び出し側の責務である
+ */
+
 #include "restorevalidation.h"
 
 #include <QByteArray>

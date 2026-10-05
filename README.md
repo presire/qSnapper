@@ -431,7 +431,6 @@ qSnapper/
 │       ├── RestorePreviewDialog.qml                # Restore preview, options and progress
 │       ├── SnapshotDetailDialog.qml                # Snapshot details, file restore and rollback
 │       ├── SnapshotEditDialog.qml                  # Edit snapshot metadata
-│       ├── SnapshotItem.qml                        # Snapshot list item delegate
 │       ├── SnapshotTableHeader.qml                 # Snapshot table header row
 │       └── SnapshotTableRow.qml                    # Snapshot table row delegate
 ├── dbus/                                           # D-Bus configuration

@@ -1,3 +1,8 @@
+/**
+ * @file snapperservice.cpp
+ * @brief Snapper操作サービスのD-Bus連携実装
+ */
+
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
@@ -11,6 +16,11 @@
 #include "externalurlopener.h"
 
 // QVariantMap --> QMap<QString,QString> 変換ヘルパー
+/**
+ * @brief QVariantMapをD-Bus送信用のQMap<QString,QString>へ変換する
+ * @param src 変換元のマップ
+ * @return 各値を文字列化したマップ
+ */
 static QMap<QString, QString> toStringMap(const QVariantMap &src)
 {
     QMap<QString, QString> out;
@@ -153,6 +163,7 @@ bool SnapperService::isConfigured()
 
 /**
  * @brief D-Bus経由で利用可能なSnapper config一覧を取得
+ * @return キャッシュされた設定名の一覧
  */
 QStringList SnapperService::configs()
 {
@@ -162,6 +173,12 @@ QStringList SnapperService::configs()
     return m_configs;
 }
 
+/**
+ * @brief 設定一覧をD-Busから再取得する
+ *
+ * 取得した一覧をキャッシュし、現在の設定が一覧に無ければ先頭を採用する
+ * 取得結果にかかわらずconfigsChanged()を発行する
+ */
 void SnapperService::refreshConfigs()
 {
     if (!m_dbusInterface || !m_dbusInterface->isValid()) {
@@ -210,6 +227,10 @@ bool SnapperService::openExternalUrl(const QString &url)
     return qsnapper::desktop::openExternalUrl(QUrl(url, QUrl::StrictMode), this);
 }
 
+/**
+ * @brief 現在の設定を変更する
+ * @param name 新たな設定名
+ */
 void SnapperService::setCurrentConfig(const QString &name)
 {
     if (name == m_currentConfig) return;
@@ -270,6 +291,7 @@ bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
+ * @param userdata ユーザデータマップ
  * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
 int SnapperService::createSingle(const QString &description,
@@ -293,6 +315,7 @@ int SnapperService::createSingle(const QString &description,
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
+ * @param userdata ユーザデータマップ
  * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
 int SnapperService::createPre(const QString &description,
@@ -317,6 +340,7 @@ int SnapperService::createPre(const QString &description,
  * @param previousNumber 対応するPreスナップショットの番号
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
+ * @param userdata ユーザデータマップ
  * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
 int SnapperService::createPost(const QString &description,
@@ -489,6 +513,7 @@ bool SnapperService::deleteSnapshot(int number)
  * @param previousNumber 対応するPreスナップショットの番号 (Postタイプ以外は-1)
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
+ * @param userdata ユーザデータマップ
  * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
 int SnapperService::create(FsSnapshot::SnapshotType snapshotType,
@@ -544,10 +569,16 @@ int SnapperService::create(FsSnapshot::SnapshotType snapshotType,
 }
 
 /**
- * @brief 既存スナップショットのメタデータを編集
+ * @brief 既存スナップショットのメタデータを編集する
  *
  * description / cleanup / userdata を更新する
  * 成功時にsnapshotModifiedシグナル、失敗時にsnapshotModificationFailedシグナルを送信する
+ *
+ * @param number 編集対象のスナップショット番号
+ * @param description 新しい説明文
+ * @param cleanup 新しいクリーンアップアルゴリズム文字列
+ * @param userdata 新しいユーザデータマップ
+ * @return 成功時: true、それ以外: false
  */
 bool SnapperService::modifySnapshot(int number,
                                     const QString &description,
@@ -718,7 +749,7 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 
         QString description = fields[6];
 
-        // Parse userdata (key1=value1,key2=value2 format)
+        // userdataをパースする (key1=value1,key2=value2形式)
         // 注意: 行はカンマで区切られているため、各userdataのペアは個別のフィールドとなっている
         QVariantMap userdata;
         for (int j = 7; j < fields.size(); ++j) {

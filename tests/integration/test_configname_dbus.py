@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-test_configname_dbus.py - B-2: configName validation を全 12 メソッドに対して網羅。
+@file test_configname_dbus.py
+@brief configNameの検証が全12メソッドで機能することを網羅的に検査する
 
-対象メソッド (configName を引数に取るもの):
-    ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
-    RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
-    GetFileDiffAndDetails, GetFileDiffBetween, BeginRestorePlan,
-    WriteSnapperConfig, SetupQuota
+configNameを引数に取る以下の12メソッドに対し6種の悪性configNameを投入し、
+全てがorg.freedesktop.DBus.Error.InvalidArgsで拒否されることを検証する
+対象 : ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
+       RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
+       GetFileDiffAndDetails, GetFileDiffBetween, BeginRestorePlan,
+       WriteSnapperConfig, SetupQuota
+読み取り系 (ListSnapshots等) で試すため副作用はない
 
-各メソッドに対し 6 種の悪性 configName を投入し、全て InvalidArgs で拒否されることを
-検証する。読み取り系 (ListSnapshots 等) で試すので副作用はない。
+修正前 (v1.3.2) : 多くのメソッドで検証を通過してsnapper層まで到達し、
+                  snapper例外や予期せぬエラーを返して漏洩の兆候を観測した
+修正後 (P0-3) : 全メソッドが先頭のvalidateConfigName()により
+                org.freedesktop.DBus.Error.InvalidArgsを返す
 
-修正前 (v1.3.2): 多くのメソッドで validation なく snapper 層まで到達し、
-                  snapper 例外や予期せぬエラーを返すことで漏洩の兆候を観測。
-修正後 (P0-3):   全メソッドで先頭の validateConfigName() により
-                  org.freedesktop.DBus.Error.InvalidArgs が返る。
-
-使い方:
-    sudo python3 test_configname_dbus.py
+使い方 : sudo python3 test_configname_dbus.py
+終了コード : 0 = 期待どおり、1 = 期待はずれ、2 = VM外またはpython3-dbus未導入
 """
 
 from __future__ import annotations
@@ -34,32 +34,44 @@ except ImportError:
     print("ERROR: python3-dbus required", file=sys.stderr)
     sys.exit(2)
 
-DBUS_SERVICE = "com.presire.qsnapper.Operations"
-DBUS_PATH = "/com/presire/qsnapper/Operations"
-DBUS_IFACE = "com.presire.qsnapper.Operations"
+DBUS_SERVICE = "com.presire.qsnapper.Operations"   # 検査対象のD-Busサービス名
+DBUS_PATH = "/com/presire/qsnapper/Operations"     # オブジェクトパス
+DBUS_IFACE = "com.presire.qsnapper.Operations"     # インタフェース名
 
-MALICIOUS_NAMES = [
-    "../etc/snapper",
-    "/etc/snapper/configs/root",
-    "",
-    "root/../etc",
-    "root\x00evil",
-    "root; rm -rf /",
+MALICIOUS_NAMES = [                # 検証に用いる悪性configName
+    "../etc/snapper",              # 親ディレクトリ参照の混入
+    "/etc/snapper/configs/root",   # 絶対パスの指定
+    "",                            # 空文字
+    "root/../etc",                 # 正規名に親ディレクトリ参照を混入
+    "root\x00evil",                # NULバイトの混入
+    "root; rm -rf /",              # シェルメタ文字の混入
 ]
 
 
 @dataclass
 class MethodSpec:
-    name: str
-    # argsは configName を含む完全な引数リストを返すcallable (configName受け取り)
-    make_args: object  # Callable[[str], list]
+    """
+    @class MethodSpec
+    @brief 検査対象1メソッド分の呼び出し仕様
+
+    name : D-Busメソッド名
+    make_args : configNameを受け取り、そのメソッドの完全な引数リストを返すcallable
+    """
+    name: str           # D-Busメソッド名
+    make_args: object   # configNameを受け取り完全な引数リストを返すcallable
 
 
 def empty_userdata():
+    """
+    @brief 空のユーザデータ辞書を返す
+
+    Returns:
+        "ss"シグネチャを持つ空のqdbus辞書
+    """
     return Dictionary({}, signature="ss")
 
 
-SPECS: list[MethodSpec] = [
+SPECS: list[MethodSpec] = [                # 検査対象メソッドとその引数生成関数
     MethodSpec("ListSnapshots", lambda c: [c]),
     MethodSpec("CreateSnapshot",
                lambda c: [c, "single", "test", 0, "", empty_userdata(), False]),
@@ -78,6 +90,12 @@ SPECS: list[MethodSpec] = [
 
 
 def main() -> int:
+    """
+    @brief 全対象メソッドへ悪性configNameを投入する網羅検査を実行する
+
+    Returns:
+        0 = 期待どおり、1 = 期待はずれ、2 = VM外で実行された場合
+    """
     if subprocess.run(["systemd-detect-virt"], capture_output=True,
                       text=True).stdout.strip() == "none":
         print("ERROR: run inside a VM", file=sys.stderr)
@@ -104,8 +122,8 @@ def main() -> int:
                 if "InvalidArgs" in name:
                     blocked += 1
                 else:
-                    # TODO: 修正前は snapper 由来の例外が多数混じる。
-                    #       baseline/fixed で判定を分けるかどうか検討。
+                    # TODO: 修正前はsnapper由来の例外が多数混じる
+                    # baselineとfixedで判定を分けるかどうか検討する
                     print(f"[OTHER] {spec.name}({payload!r}) → {name}: {e}")
 
     print(f"\ntotal={total} blocked={blocked} leaked={leaked}")

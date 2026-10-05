@@ -15,6 +15,21 @@
 #include "snapshotoperations.h"
 #include "filesystemhelpers.h"
 
+/**
+ * @file main.cpp
+ * @brief rootで動作するスナップショット操作D-Busサービスの入口
+ *
+ * システムバスへ接続し、SnapshotOperationsオブジェクトを登録して公開する
+ * ログはroot所有の0600ファイルへ追記し、行偽造が起きないよう制御文字を逃がす
+ */
+
+/**
+ * @brief ログディレクトリのパスを返す
+ *
+ * 初回呼び出し時にQSNAPPER_LOG_DIRから組み立て、以降は同じ値を返す
+ *
+ * @return ログディレクトリの絶対パス
+ */
 static const QString &logDir()
 {
     static const QString dir = QStringLiteral(QSNAPPER_LOG_DIR);
@@ -110,6 +125,16 @@ QString escapeControlCharacters(const QString &msg)
 
 }
 
+/**
+ * @brief Qtのログ出力をログファイルへ1行ずつ追記する
+ *
+ * 保持しているディスクリプタへ直接書き込み、パス解決を繰り返さない
+ * 書き込み失敗時は落とすだけで、呼び出し元へは影響させない
+ *
+ * @param type メッセージ種別
+ * @param context 送出元の文脈 (未使用)
+ * @param msg ログメッセージ
+ */
 static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
 {
     Q_UNUSED(context)
@@ -157,6 +182,16 @@ static void fileMessageHandler(QtMsgType type, const QMessageLogContext &context
     }
 }
 
+/**
+ * @brief サービスを起動し、D-Busオブジェクト登録後にイベントループへ入る
+ *
+ * オブジェクト登録を先に行い、サービス名取得は最後にする
+ * 取得時点で活性化待ちの呼び出しが配送されるため、この順序で取りこぼしを防ぐ
+ *
+ * @param argc 引数の数
+ * @param argv 引数列
+ * @return 正常終了時は0、バス接続や登録に失敗した場合は1
+ */
 int main(int argc, char *argv[])
 {
     qInstallMessageHandler(fileMessageHandler);

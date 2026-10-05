@@ -6,9 +6,15 @@
 #include <QPalette>
 
 /**
+ * @file thememanager.h
+ * @brief アプリケーションのテーマ管理を担うクラス
+ */
+
+/**
+ * @class ThemeManager
  * @brief アプリケーションのテーマ管理を担うクラス
  *
- * ライト/ダーク/システム連動のテーマモードを管理し、スナップショット種別、ファイル変更種別、状態色、ダイアログ枠色などのテーマ依存色をQMLへ提供するシングルトン
+ * ライト / ダーク / システム連動のテーマモードを管理し、スナップショット種別、ファイル変更種別、状態色、ダイアログ枠色などのテーマ依存色をQMLへ提供するシングルトン
  * 設定の保存・復元およびシステムテーマ検出も担う
  */
 class ThemeManager : public QObject
@@ -39,7 +45,10 @@ class ThemeManager : public QObject
     Q_PROPERTY(QColor dialogBorderColor READ dialogBorderColor NOTIFY themeChanged)             // ダイアログ枠の色
 
 public:
-    // テーマモードを表す列挙型
+    /**
+     * @enum ThemeMode
+     * @brief テーマモードを表す列挙型
+     */
     enum ThemeMode {
         Light,  // ライトモード
         Dark,   // ダークモード
@@ -48,56 +57,180 @@ public:
     Q_ENUM(ThemeMode)
 
     // コンストラクタ/デストラクタ/シングルトン
-    explicit ThemeManager(QObject *parent = nullptr);   // コンストラクタ
-    ~ThemeManager();                                    // デストラクタ
-    static ThemeManager* instance();                    // シングルトンインスタンスを取得する
+    /**
+     * @brief ThemeManagerを構築する
+     * @param parent Qt親オブジェクト
+     */
+    explicit ThemeManager(QObject *parent = nullptr);
+
+    /**
+     * @brief ThemeManagerを破棄する
+     */
+    ~ThemeManager();
+
+    /**
+     * @brief シングルトンインスタンスを取得する
+     * @return ThemeManagerの唯一のインスタンス
+     */
+    static ThemeManager* instance();
 
     // テーマモード
-    ThemeMode themeMode() const { return m_themeMode; } // テーマモードを取得する
-    void setThemeMode(ThemeMode mode);                  // テーマモードを設定する
-    bool isDark() const { return m_isDark; }            // ダークテーマ適用中か判定する
+    /**
+     * @brief テーマモードを取得する
+     * @return 現在のテーマモード
+     */
+    ThemeMode themeMode() const { return m_themeMode; }
+
+    /**
+     * @brief テーマモードを設定する
+     * @param mode 設定するテーマモード
+     */
+    void setThemeMode(ThemeMode mode);
+
+    /**
+     * @brief ダークテーマ適用中か判定する
+     * @return ダークテーマ適用中の場合はtrue
+     */
+    bool isDark() const { return m_isDark; }
 
     // スナップショットタイプの色
-    QColor snapshotTypeSingle() const;                  // 単発スナップショットの色を取得する
-    QColor snapshotTypePre() const;                     // Preスナップショットの色を取得する
-    QColor snapshotTypePost() const;                    // Postスナップショットの色を取得する
-    QColor snapshotTypeDefault() const;                 // 既定スナップショットの色を取得する
+    /**
+     * @brief 単発スナップショットの色を取得する
+     * @return 単発スナップショットの色
+     */
+    QColor snapshotTypeSingle() const;
+
+    /**
+     * @brief Preスナップショットの色を取得する
+     * @return Preスナップショットの色
+     */
+    QColor snapshotTypePre() const;
+
+    /**
+     * @brief Postスナップショットの色を取得する
+     * @return Postスナップショットの色
+     */
+    QColor snapshotTypePost() const;
+
+    /**
+     * @brief 既定スナップショットの色を取得する
+     * @return 既定スナップショットの色
+     */
+    QColor snapshotTypeDefault() const;
 
     // ファイル変更タイプの色
-    QColor fileChangeCreated() const;                   // 新規作成ファイルの色を取得する
-    QColor fileChangeModified() const;                  // 変更ファイルの色を取得する
-    QColor fileChangeDeleted() const;                   // 削除ファイルの色を取得する
-    QColor fileChangeTypeChanged() const;               // タイプ変更ファイルの色を取得する
+    /**
+     * @brief 新規作成ファイルの色を取得する
+     * @return 新規作成ファイルの色
+     */
+    QColor fileChangeCreated() const;
+
+    /**
+     * @brief 変更ファイルの色を取得する
+     * @return 変更ファイルの色
+     */
+    QColor fileChangeModified() const;
+
+    /**
+     * @brief 削除ファイルの色を取得する
+     * @return 削除ファイルの色
+     */
+    QColor fileChangeDeleted() const;
+
+    /**
+     * @brief タイプ変更ファイルの色を取得する
+     * @return タイプ変更ファイルの色
+     */
+    QColor fileChangeTypeChanged() const;
 
     // 状態色
-    QColor warningColor() const;                        // 警告色を取得する
-    QColor errorColor() const;                          // エラー色を取得する
-    QColor importantColor() const;                      // 重要色を取得する
-    QColor successColor() const;                        // 成功色を取得する
+    /**
+     * @brief 警告色を取得する
+     * @return 警告色
+     */
+    QColor warningColor() const;
+
+    /**
+     * @brief エラー色を取得する
+     * @return エラー色
+     */
+    QColor errorColor() const;
+
+    /**
+     * @brief 重要色を取得する
+     * @return 重要色
+     */
+    QColor importantColor() const;
+
+    /**
+     * @brief 成功色を取得する
+     * @return 成功色
+     */
+    QColor successColor() const;
 
     // ダイアログ枠色
-    QColor dialogBorderColor() const;                   // ダイアログ枠の色を取得する
+    /**
+     * @brief ダイアログ枠の色を取得する
+     * @return ダイアログ枠の色
+     */
+    QColor dialogBorderColor() const;
 
 signals:
-    void themeModeChanged();                            // テーマモード変更時に発行する
-    void isDarkChanged();                               // ダーク状態変更時に発行する
-    void themeChanged();                                // テーマ色変更時に発行する
+    /**
+     * @brief テーマモード変更時に発行する
+     */
+    void themeModeChanged();
+
+    /**
+     * @brief ダーク状態変更時に発行する
+     */
+    void isDarkChanged();
+
+    /**
+     * @brief テーマ色変更時に発行する
+     */
+    void themeChanged();
 
 private:
     // 設定・テーマ更新
-    void loadSettings();                                // 設定を読み込む
-    void saveSettings();                                // 設定を保存する
-    void updateTheme();                                 // テーマを更新する
-    void detectSystemTheme();                           // システムテーマを検出する
-    QColor getColor(const QString &lightColor,          // テーマに応じた色を取得する
+    /**
+     * @brief 設定を読み込む
+     */
+    void loadSettings();
+
+    /**
+     * @brief 設定を保存する
+     */
+    void saveSettings();
+
+    /**
+     * @brief テーマを更新する
+     */
+    void updateTheme();
+
+    /**
+     * @brief システムテーマを検出する
+     */
+    void detectSystemTheme();
+
+    /**
+     * @brief テーマに応じた色を取得する
+     * @param lightColor ライトモード時の色 (16進表現)
+     * @param darkColor ダークモード時の色 (16進表現)
+     * @return 現在のテーマに対応する色
+     */
+    QColor getColor(const QString &lightColor,
                     const QString &darkColor) const;
 
     // シングルトン・状態
-    static ThemeManager *s_instance;                    // シングルトンインスタンス
-    ThemeMode m_themeMode;                              // 現在のテーマモード
-    bool m_isDark;                                      // ダークテーマ適用中フラグ
+    static ThemeManager *s_instance;    // シングルトンインスタンス
+    ThemeMode m_themeMode;              // 現在のテーマモード
+    bool m_isDark;                      // ダークテーマ適用中フラグ
 
-    // ライトモードのカラーパレット
+    /**
+     * @struct LightColors
+     * @brief ライトモードのカラーパレット
+     */
     struct LightColors {
         static constexpr const char* snapshotSingle = "#4CAF50";    // 単発スナップショット色
         static constexpr const char* snapshotPre = "#2196F3";       // Preスナップショット色
@@ -117,7 +250,10 @@ private:
         static constexpr const char* dialogBorder = "#9E9E9E";      // ダイアログ枠色
     };
 
-    // ダークモードのカラーパレット
+    /**
+     * @struct DarkColors
+     * @brief ダークモードのカラーパレット
+     */
     struct DarkColors {
         static constexpr const char* snapshotSingle = "#66BB6A";    // 単発スナップショット色
         static constexpr const char* snapshotPre = "#42A5F5";       // Preスナップショット色

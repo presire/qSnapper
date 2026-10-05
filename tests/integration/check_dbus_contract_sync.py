@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Lockstep checker for the qSnapper D-Bus contract and bus-policy allowlist.
+"""
+@file check_dbus_contract_sync.py
+@brief qSnapperのD-Bus契約とバスポリシー許可リストの同期を検査する
 
-Why this exists
----------------
-dbus/com.presire.qsnapper.Operations.xml declares the public D-Bus methods of
-the root qSnapper service. dbus/com.presire.qsnapper.Operations.conf is a
-DENY-BY-DEFAULT bus policy: it denies every method_call to the service and then
-re-allows exactly the public API members with <allow send_member="..."/>. If a
-method is added to the XML but forgotten in the conf, legitimate clients get
-org.freedesktop.DBus.Error.AccessDenied from the bus daemon itself. If a method
-is removed from the XML but left in the conf, a dead allowlist entry widens the
-attack surface for no benefit. Both files MUST stay in lockstep.
+背景 :
+    dbus/com.presire.qsnapper.Operations.xmlはrootサービスが公開するD-Busメソッドを宣言する
+    dbus/com.presire.qsnapper.Operations.confは既定拒否のバスポリシーであり、サービスへの全method_callを拒否したうえで
+    公開APIのメンバだけを<allow send_member="..."/>で再許可する
+    XMLにメソッドを追加してconfへ反映し忘れると、正規のクライアントがバスデーモンから
+    org.freedesktop.DBus.Error.AccessDeniedを受け取る
+    XMLからメソッドを削除してconfに残すと、死んだ許可エントリが利益なく攻撃面を広げる
+    両ファイルは常に同期していなければならない
 
-Additionally, the staged-restore contract establishes a security property:
-after CommitRestorePlan freezes and authorizes a plan, no post-freeze method may
-accept a path, change type, config name, snapshot number, or restore mode —
-only a manifest identifier. This checker asserts that property mechanically so
-a future edit that adds a mutable parameter to a post-freeze method goes red
-here instead of silently weakening the boundary.
+さらに段階的復元の契約は次のセキュリティ特性を定める
+    CommitRestorePlanが計画を凍結して認可した後は、凍結後のメソッドはパス、変更種別、設定名、スナップショット番号、復元モードを受け付けてはならない
+    受け付けてよいのはマニフェスト識別子のみである
+    本チェッカーはこの特性を機械的に検査し、凍結後のメソッドへ可変パラメータを追加する将来の変更が
+    境界を静かに弱めるのではなくここで失敗するようにする
 
-The script uses only the Python 3 standard library (xml.etree.ElementTree) so
-it can run anywhere without the dbus module. It exits 0 on success and 1 on any
-contract violation or parse error.
+本スクリプトはPython 3標準ライブラリ (xml.etree.ElementTree) のみを使うためdbusモジュールなしでどこでも実行できる
+
+使い方 : check_dbus_contract_sync.py [--xml FILE] [--conf FILE]
+終了コード : 0 = 契約違反なし、1 = 契約違反または解析エラー
 """
 
 from __future__ import annotations
@@ -31,41 +31,66 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
-INTERFACE = "com.presire.qsnapper.Operations"
+INTERFACE = "com.presire.qsnapper.Operations"   # 検査対象のD-Busインタフェース名
 
-# Post-freeze methods: after CommitRestorePlan authorizes a frozen plan, these
-# must accept ONLY a manifest identifier (one "in" arg named manifestId, type s).
-# If any of these grows a path/type/config/snapshot/mode argument, the frozen
-# plan could be mutated after authorization — the core security boundary breaks.
-POST_FREEZE_METHODS = (
-    "CommitRestorePlan",
-    "ContinueRestorePlan",
-    "GetRestorePlanStatus",
-    "CancelRestorePlan",
+# 凍結後のメソッド : CommitRestorePlanが凍結済み計画を認可した後、これらは
+# マニフェスト識別子のみ (direction="in"の引数1個、名前manifestId、型s) を受け付けてよい
+# これらにパス、種別、設定、スナップショット、モードの引数が増えると、認可後に凍結済み計画を
+# 変更できてしまい、中核のセキュリティ境界が崩れる
+POST_FREEZE_METHODS = (           # 凍結後に可変引数を受け付けてはならないメソッド
+    "CommitRestorePlan",          # 計画を凍結して認可する
+    "ContinueRestorePlan",        # 実行を継続する
+    "GetRestorePlanStatus",       # 状態を取得する
+    "CancelRestorePlan",          # 実行をキャンセルする
 )
 
 
 def repo_root() -> str:
-    """Return the repository root derived from this script's location."""
+    """
+    @brief 本スクリプトの位置からリポジトリルートを求める
+
+    Returns:
+        リポジトリの絶対パス
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.normpath(os.path.join(here, "..", ".."))
 
 
 def default_xml_path() -> str:
+    """
+    @brief 既定のD-BusイントロスペクションXMLのパスを返す
+
+    Returns:
+        dbus/com.presire.qsnapper.Operations.xmlの絶対パス
+    """
     return os.path.join(repo_root(), "dbus", "com.presire.qsnapper.Operations.xml")
 
 
 def default_conf_path() -> str:
+    """
+    @brief 既定のバスポリシーconfのパスを返す
+
+    Returns:
+        dbus/com.presire.qsnapper.Operations.confの絶対パス
+    """
     return os.path.join(repo_root(), "dbus", "com.presire.qsnapper.Operations.conf")
 
 
 def parse_xml_methods(xml_path: str) -> dict[str, list[ET.Element]]:
-    """Parse the introspection XML and return {method_name: [arg elements]}.
-
-    Raises ET.ParseError on malformed XML. Only methods under the
-    com.presire.qsnapper.Operations interface are returned.
     """
-    tree = ET.parse(xml_path)  # may raise ET.ParseError
+    @brief イントロスペクションXMLを解析し、メソッド名と引数要素の対応を返す
+
+    Args:
+        xml_path: 解析するイントロスペクションXMLのパス
+
+    Returns:
+        メソッド名をキー、そのarg要素のリストを値とする辞書
+        com.presire.qsnapper.Operationsインタフェース配下のメソッドのみを対象とする
+
+    Raises:
+        ET.ParseError: XMLが不正な場合
+    """
+    tree = ET.parse(xml_path)  # ET.ParseErrorを送出する可能性がある
     root = tree.getroot()
     methods: dict[str, list[ET.Element]] = {}
     for iface in root.iter("interface"):
@@ -80,13 +105,20 @@ def parse_xml_methods(xml_path: str) -> dict[str, list[ET.Element]]:
 
 
 def parse_conf_members(conf_path: str) -> set[str]:
-    """Parse the bus policy conf and return the set of send_member values
-    whose send_interface is com.presire.qsnapper.Operations.
-
-    Raises ET.ParseError on malformed XML. Standard-helper allows
-    (Introspectable / Peer) are filtered out by the interface check.
     """
-    tree = ET.parse(conf_path)  # may raise ET.ParseError
+    @brief バスポリシーconfを解析し、対象インタフェースのsend_member集合を返す
+
+    Args:
+        conf_path: 解析するバスポリシーconfのパス
+
+    Returns:
+        send_interfaceがcom.presire.qsnapper.Operationsであるsend_memberの集合
+        標準ヘルパー向けの許可 (Introspectable/Peer) はインタフェース検査で除外される
+
+    Raises:
+        ET.ParseError: XMLが不正な場合
+    """
+    tree = ET.parse(conf_path)  # ET.ParseErrorを送出する可能性がある
     root = tree.getroot()
     members: set[str] = set()
     for allow in root.iter("allow"):
@@ -101,11 +133,15 @@ def parse_conf_members(conf_path: str) -> set[str]:
 def check_post_freeze_args(
     methods: dict[str, list[ET.Element]],
 ) -> list[str]:
-    """Assert each post-freeze method has EXACTLY ONE direction="in" arg,
-    that it is named manifestId, and that its type is "s".
+    """
+    @brief 各凍結後メソッドがmanifestId (型s) のin引数を1個だけ持つことを検査する
 
-    Returns a list of human-readable failure messages (empty if all pass).
-    Prints each assertion result line (OK or FAIL) for every method.
+    Args:
+        methods: メソッド名をキー、そのarg要素のリストを値とする辞書
+
+    Returns:
+        人が読める失敗メッセージのリスト (全て成功なら空)
+        各メソッドについて検査結果の行 (OKまたはFAIL) を出力する
     """
     failures: list[str] = []
     for method_name in POST_FREEZE_METHODS:
@@ -141,6 +177,15 @@ def check_post_freeze_args(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """
+    @brief XMLとconfの同期および凍結後メソッドの引数を検査する
+
+    Args:
+        argv: コマンドライン引数 (Noneの場合はsys.argvを使用)
+
+    Returns:
+        0 = 契約違反なし、1 = 契約違反または解析エラー
+    """
     parser = argparse.ArgumentParser(
         description="Check qSnapper D-Bus XML/conf contract lockstep."
     )
@@ -158,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
 
     failures: list[str] = []
 
-    # Parse both files fresh on every run (no caching).
+    # 毎回両ファイルを新規に解析する (キャッシュしない)
     try:
         print(f"XML:  {args.xml}")
         xml_methods = parse_xml_methods(args.xml)

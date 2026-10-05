@@ -1,3 +1,8 @@
+/**
+ * @file fssnapshotstore.cpp
+ * @brief 用途別Preスナップショット番号の永続化実装
+ */
+
 #include <QFile>
 #include <QSaveFile>
 #include <QTextStream>
@@ -14,6 +19,14 @@ const QString FsSnapshotStore::SNAPSHOT_FILE_PREFIX = QStringLiteral("pre_snapsh
 const QString FsSnapshotStore::SNAPSHOT_FILE_SUFFIX = QStringLiteral(".id");
 
 namespace {
+    /**
+     * @brief 用途識別子の形式を検証する
+     *
+     * ファイル名へ埋め込むため、英数字・ハイフン・アンダースコアのみを許可する
+     *
+     * @param purpose 検証する用途識別子
+     * @return 形式が正しい場合はtrue
+     */
     bool validateSnapshotPurpose(const QString &purpose)
     {
         static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9_-]+$"));
@@ -166,7 +179,8 @@ bool FsSnapshotStore::clean(const QString &purpose)
  *
  * ユーザー単位のデータディレクトリ (例: ~/.local/share/Presire/qSnapper) を返す
  *
- * @return 保存先ディレクトリ。取得できない場合は空文字列
+ * @return 保存先ディレクトリ
+ *         取得できない場合は空文字列
  */
 QString FsSnapshotStore::snapshotDirectory()
 {

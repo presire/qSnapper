@@ -1,3 +1,11 @@
+/**
+ * @file restoreplanexecutor.cpp
+ * @brief restoreplanexecutor.h宣言の実装
+ *
+ * chunk単位の適用と境界状態の処理だけを担い
+ * 認可やfilesystem操作の詳細は注入されたcallbackへ委ねる
+ */
+
 #include "restoreplanexecutor.h"
 
 #include <utility>
@@ -43,7 +51,8 @@ void RestorePlanExecutor::setFinishedSink(FinishedSink sink)
 
 /**
  * @brief 次のchunkを実行するschedulerを設定する
- * @param scheduler chunkを受け取るcallback。空なら同期実行へ戻す
+ * @param scheduler chunkを受け取るcallback
+ *                  空なら同期実行へ戻す
  */
 void RestorePlanExecutor::setChunkScheduler(ChunkScheduler scheduler)
 {
@@ -224,7 +233,7 @@ void RestorePlanExecutor::scheduleChunk(const QString &id)
         active->chunkScheduled = false;
         ManifestError error = ManifestError::None;
         const QString message = QStringLiteral("Failed to schedule restore work");
-        // markFailedはmanifestへ失敗理由を残すために呼ぶ。
+        // markFailedはmanifestへ失敗理由を残すために呼ぶ
         // 記録できなかった場合 (manifest消失など) も終端通知は必ず出す
         m_registry.markFailed(id, active->owner, message, &error);
         finishPlan(id, ManifestState::Failed, message);
@@ -264,7 +273,7 @@ void RestorePlanExecutor::processChunk(const QString &id)
     }
     if (before->state != ManifestState::Running) {
         const QString message = QStringLiteral("Restore plan is not running");
-        // markFailedはmanifestへ失敗理由を残すために呼ぶ。
+        // markFailedはmanifestへ失敗理由を残すために呼ぶ
         // 記録できなかった場合 (manifest消失など) も終端通知は必ず出す
         m_registry.markFailed(id, owner, message, &error);
         finishPlan(id, ManifestState::Failed, message);
@@ -281,7 +290,7 @@ void RestorePlanExecutor::processChunk(const QString &id)
         id, owner, before->cursor, kEntriesPerExecutionChunk, &error);
     if (!entries || entries->isEmpty()) {
         const QString message = QStringLiteral("Restore plan has no executable entries");
-        // markFailedはmanifestへ失敗理由を残すために呼ぶ。
+        // markFailedはmanifestへ失敗理由を残すために呼ぶ
         // 記録できなかった場合 (manifest消失など) も終端通知は必ず出す
         m_registry.markFailed(id, owner, message, &error);
         finishPlan(id, ManifestState::Failed, message);
@@ -386,7 +395,7 @@ void RestorePlanExecutor::processChunk(const QString &id)
     if (applyFailed) {
         const QString message = QStringLiteral("Failed to restore path: %1")
                                     .arg(failedPath);
-        // Cancelledは直前で処理済みのため、ここに到達するのは非Cancelledのみ。
+        // Cancelledは直前で処理済みのため、ここに到達するのは非Cancelledのみ
         // markFailedはmanifestへ失敗理由を残すために呼ぶが、記録できなかった
         // 場合 (manifest消失など) も終端通知は必ず出す
         m_registry.markFailed(id, owner, message, &error);

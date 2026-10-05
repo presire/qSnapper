@@ -1,227 +1,256 @@
 module qsnapper 1.3.10;
 
 ########################################
-# qSnapper SELinux Policy Module
+# qSnapper SELinuxポリシーモジュール
 #
-# This module provides Mandatory Access Control (MAC) for qSnapper,
-# a Qt6/QML GUI application for managing Btrfs/Snapper filesystem snapshots.
+# Btrfs/Snapperのスナップショットを管理するQt6/QMLのGUIアプリケーション
+# qSnapperに強制アクセス制御(MAC)を適用する
 #
-# Architecture:
-#   - qsnapper_t: GUI application domain (unprivileged user)
-#   - qsnapper_dbus_t: D-Bus service domain (root privileges)
+# ドメイン :
+#   qsnapper_t       : GUIアプリケーションのドメイン (一般ユーザ権限)
+#   qsnapper_dbus_t  : D-Busサービスのドメイン (root権限)
 #
-# Security Model:
-#   - GUI can only READ snapshot data and configuration
-#   - D-Bus service performs privileged operations with PolicyKit auth
-#   - ファイル復元はqsnapper_dbus_tだけが、PolicyKit認可の後に、対象Snapper
-#     設定のsubvolume内で行う
-#   - GUIは/var/libへ書き込まない (読み取りのみ)
-#   - Snapshot browsing uses system's existing file labels
+# 各ドメインの権限の範囲 :
+#   qsnapper_t       : UIの描画に必要なライブラリ・フォント・デバイス・X11/Waylandの利用
+#                      ホームディレクトリ配下の設定とキャッシュの読み書き
+#                      スナップショットとSnapperのメタデータの読み取り
+#                      root_t、default_t、mnt_t、var_tに対する読み書きルール
+#                      D-Busサービスへのメッセージ送信とWebブラウザの起動
+#   qsnapper_dbus_t  : スナップショットの作成・削除・比較・復元・ロールバック
+#                      file_type / exec_type属性に属する型への復元用の読み書きとラベルの付け替え
+#                      ログ(/var/log/qsnapper)への書き込み
+#
+# セキュリティモデル :
+#   アプリケーションの通常の経路では、GUIが閲覧と設定の保存を担当し、特権操作をD-Busサービスへ依頼する
+#   PolicyKitによる認可と、対象Snapper設定のsubvolume内への復元の制限は、D-Busサービスの実装で検査する
+#   SELinuxの許可はファイルの型とドメインを対象とし、認可の状態やsubvolumeのパスは直接検査しない
+#   GUIにも一部のファイルの型への書き込み権があり、スナップショットや/var/lib全体の読み取り専用性は保証しない
+#   スナップショットの閲覧には、システムに既存のファイルラベルをそのまま使う
 ########################################
 
 ########################################
-# Required types and classes from base policy
+# 基本ポリシーから参照する型とクラス
+#
+# 本モジュールのルールで使用する型・属性・ロール・クラスを宣言する
+# ここに無い型を使う場合は、存在しない環境でもビルドできるようにoptionalブロック内でrequireする
 ########################################
 
 require {
-    # Base system types
-    type unconfined_t;
-    type init_t;
-    type kernel_t;
-    type system_dbusd_t;
+    # 基本的なシステムの型
+    type unconfined_t;   # 非制限ユーザのドメイン (GUIの起動元、ブラウザの遷移先)
+    type init_t;         # systemdのドメイン (D-Busサービスの起動元)
+    type kernel_t;       # カーネルのドメイン (syslogの送信先)
+    type system_dbusd_t; # システムバスのD-Busデーモン
 
-    # Executable and library types
-    type bin_t;
-    type shell_exec_t;
-    type mozilla_exec_t;
-    type lib_t;
-    type ld_so_t;
-    type ld_so_cache_t;
-    type usr_t;
-    type textrel_shlib_t;
+    # 実行ファイルとライブラリの型
+    type bin_t;           # /usr/bin等の一般的な実行ファイル
+    type shell_exec_t;    # シェルの実行ファイル (xdg-open等のヘルパーの呼び出し)
+    type mozilla_exec_t;  # Firefox等のブラウザの実行ファイル
+    type lib_t;           # 共有ライブラリ
+    type ld_so_t;         # 動的リンカ
+    type ld_so_cache_t;   # 動的リンカのキャッシュ (/etc/ld.so.cache)
+    type usr_t;           # /usr配下のデータ (Qtのプラグイン、QMLモジュールなど)
+    type textrel_shlib_t; # テキスト再配置を含む共有ライブラリ
 
-    # Configuration types
-    type etc_t;
-    type etc_runtime_t;
-    type locale_t;
-    type fonts_t;
-    type fonts_cache_t;
+    # 設定ファイルの型
+    type etc_t;         # /etc配下の設定ファイル (/etc/snapperを含む)
+    type etc_runtime_t; # 実行時に生成される/etc配下のファイル
+    type locale_t;      # ロケールとタイムゾーンのデータ
+    type fonts_t;       # システムのフォント
+    type fonts_cache_t; # システムのフォントキャッシュ
 
-    # Filesystem types
-    type fs_t;
-    type tmpfs_t;
-    type tmp_t;
-    type var_t;
-    type var_run_t;
-    type var_log_t;
-    type var_lib_t;
-    type sysfs_t;
-    type proc_t;
-    type sysctl_t;
-    type sysctl_kernel_t;
-    type sysctl_dev_t;
-    type unlabeled_t;
-    type root_t;
-    type default_t;
-    type mnt_t;
-    type autofs_t;
+    # ファイルシステムの型
+    type fs_t;            # ファイルシステム自体 (Btrfsのsubvolumeを含む)
+    type tmpfs_t;         # tmpfs (共有メモリ)
+    type tmp_t;           # /tmp
+    type var_t;           # /var
+    type var_run_t;       # /run
+    type var_log_t;       # /var/log
+    type var_lib_t;       # /var/lib (Snapperのメタデータ、RPMのDBなど)
+    type sysfs_t;         # /sys
+    type proc_t;          # /proc
+    type sysctl_t;        # /proc/sys
+    type sysctl_kernel_t; # /proc/sys/kernel
+    type sysctl_dev_t;    # /proc/sys/dev
+    type unlabeled_t;     # ラベルの無いファイル (/.snapshots配下など)
+    type root_t;          # ルートディレクトリ(/)
+    type default_t;       # どの規則にも該当しないファイルの既定ラベル
+    type mnt_t;           # /mnt等のマウントポイント
+    type autofs_t;        # autofsのマウントポイント
 
-    # Device types
-    type device_t;
-    type devpts_t;
-    type null_device_t;
-    type zero_device_t;
-    type random_device_t;
-    type urandom_device_t;
-    type fixed_disk_device_t;
-    type dri_device_t;
-    type sound_device_t;
-    type v4l_device_t;
-    type usb_device_t;
-    type event_device_t;
+    # デバイスの型
+    type device_t;            # /dev
+    type devpts_t;            # /dev/pts
+    type null_device_t;       # /dev/null
+    type zero_device_t;       # /dev/zero
+    type random_device_t;     # /dev/random
+    type urandom_device_t;    # /dev/urandom
+    type fixed_disk_device_t; # ディスクのブロックデバイス
+    type dri_device_t;        # GPUのデバイス (/dev/dri)
+    type sound_device_t;      # サウンドデバイス
+    type v4l_device_t;        # Video4Linuxのデバイス
+    type usb_device_t;        # USBデバイス
+    type event_device_t;      # 入力デバイス (/dev/input)
 
-    # User types
-    type user_home_t;
-    type user_home_dir_t;
-    type home_root_t;
-    type home_bin_t;
-    type user_devpts_t;
-    type user_tty_device_t;
-    type cache_home_t;
-    type config_home_t;
-    type pulseaudio_home_t;
-    type user_tmp_t;
-    type user_fonts_t;
-    type user_fonts_config_t;
-    type user_fonts_cache_t;
+    # ユーザの型
+    type user_home_t;         # ホームディレクトリ配下のファイル
+    type user_home_dir_t;     # ホームディレクトリ自体
+    type home_root_t;         # /home
+    type home_bin_t;          # ~/bin等のユーザの実行ファイル
+    type user_devpts_t;       # ユーザの疑似端末
+    type user_tty_device_t;   # ユーザの端末
+    type cache_home_t;        # ~/.cache
+    type config_home_t;       # ~/.config
+    type pulseaudio_home_t;   # ~/.config/pulse
+    type user_tmp_t;          # ユーザの一時ファイル (/run/user/<UID>を含む)
+    type user_fonts_t;        # ユーザのフォント
+    type user_fonts_config_t; # ユーザのフォント設定
+    type user_fonts_cache_t;  # ユーザのフォントキャッシュ
 
-    # X11/Display types
-    type xserver_t;
-    type xauth_home_t;
-    type xdm_t;
-    type xdm_var_run_t;
-    type xkb_var_lib_t;
-    type xserver_tmpfs_t;
-    type xconsole_device_t;
-    type xevent_t;
+    # X11とディスプレイの型
+    type xserver_t;         # Xサーバのドメイン
+    type xauth_home_t;      # X認証のファイル (~/.Xauthority)
+    type xdm_t;             # ディスプレイマネージャのドメイン
+    type xdm_var_run_t;     # ディスプレイマネージャの実行時データ
+    type xkb_var_lib_t;     # キーボード配列のデータ (XKB)
+    type xserver_tmpfs_t;   # Xサーバの共有メモリ
+    type xconsole_device_t; # Xコンソールのデバイス
+    type xevent_t;          # Xのイベント
 
-    # D-Bus session types
-    type session_dbusd_tmp_t;
-    type unconfined_dbusd_t;
-    type system_dbusd_var_lib_t;
-    type system_dbusd_var_run_t;
+    # D-Busの型
+    type session_dbusd_tmp_t;    # セッションバスのソケットを置く一時ディレクトリ
+    type unconfined_dbusd_t;     # 非制限ユーザのセッションバスのデーモン
+    type system_dbusd_var_lib_t; # /var/lib/dbus (マシンID)
+    type system_dbusd_var_run_t; # /run/dbus (システムバスのソケット)
 
-    # Hardware and system data types
-    type hwdata_t;
-    type gconf_home_t;
-    type data_home_t;
+    # ハードウェアとユーザデータの型
+    type hwdata_t;     # PCI ID等のハードウェアのデータ
+    type gconf_home_t; # ~/.local
+    type data_home_t;  # ~/.local/share
 
-    # Boot types
-    type boot_t;
+    # ブートの型
+    type boot_t; # /boot
 
-    # Logging types
-    type devlog_t;
+    # ログの型
+    type devlog_t; # syslogのソケット (/dev/log)
 
-    # Network types
-    type net_conf_t;
-    type node_t;
-    type netif_t;
-    type port_t;
+    # ネットワークの型
+    type net_conf_t; # ネットワークの設定 (/etc/resolv.conf等)
+    type node_t;     # ネットワークのノード
+    type netif_t;    # ネットワークインターフェース
+    type port_t;     # ネットワークのポート
 
-    # Attribute definitions
-    attribute file_type;
-    attribute exec_type;
-    attribute domain;
-    attribute can_change_object_identity;
+    # 属性
+    attribute file_type;                  # 基本ポリシーがファイルの型をまとめる属性
+    attribute exec_type;                  # 基本ポリシーが実行ファイルの型をまとめる属性
+    attribute domain;                     # 全てのプロセスのドメイン
+    attribute can_change_object_identity; # SELinuxユーザの異なるコンテキストへのラベル変更を許す属性
 
-    role unconfined_r;
-    role system_r;
+    role unconfined_r; # 非制限ユーザのロール
+    role system_r;     # システムサービスのロール
 
-    # Object classes
-    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack setfscreate siginh };
-    class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint execmod watch watch_reads relabelfrom relabelto };
-    class dir { getattr setattr open read write search add_name remove_name create rmdir rename ioctl mounton watch watch_reads relabelfrom relabelto };
-    class lnk_file { getattr setattr read create unlink rename relabelfrom relabelto };
-    class fifo_file { getattr open read write create unlink rename ioctl relabelfrom relabelto };
-    class sock_file { getattr setattr open read write create unlink rename relabelfrom relabelto };
-    class chr_file { getattr open read write ioctl map };
-    class blk_file { getattr open read write ioctl };
-    class unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
-    class unix_dgram_socket { create bind connect read write sendto getattr setattr };
-    class shm { create destroy getattr setattr read write associate unix_read unix_write };
-    class sem { create destroy getattr setattr read write associate unix_read unix_write };
-    class dbus { send_msg acquire_svc };
-    class fd { use };
-    class capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource setfcap };
-    class filesystem { getattr mount unmount };
-    class netlink_route_socket { create bind getattr setattr read write nlmsg_read };
-    class tcp_socket { create bind connect listen accept read write getattr setattr shutdown name_connect node_bind };
-    class udp_socket { create bind connect read write getattr setattr };
+    # オブジェクトのクラス
+    class process { fork signal signull sigkill sigstop sigchld transition setpgid getpgid getsched setsched setrlimit execmem execstack setfscreate siginh }; # プロセスの操作
+    class file { getattr setattr open read write append execute execute_no_trans create unlink link rename lock ioctl map entrypoint execmod watch watch_reads relabelfrom relabelto }; # 通常のファイル
+    class dir { getattr setattr open read write search add_name remove_name create rmdir rename ioctl mounton watch watch_reads relabelfrom relabelto }; # ディレクトリ
+    class lnk_file { getattr setattr read create unlink rename relabelfrom relabelto }; # シンボリックリンク
+    class fifo_file { getattr open read write create unlink rename ioctl relabelfrom relabelto }; # 名前付きパイプ
+    class sock_file { getattr setattr open read write create unlink rename relabelfrom relabelto }; # UNIXドメインソケットのファイル
+    class chr_file { getattr open read write ioctl map }; # キャラクタデバイス
+    class blk_file { getattr open read write ioctl };     # ブロックデバイス
+    class unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto }; # UNIXドメインのストリームソケット
+    class unix_dgram_socket { create bind connect read write sendto getattr setattr }; # UNIXドメインのデータグラムソケット
+    class shm { create destroy getattr setattr read write associate unix_read unix_write }; # System Vの共有メモリ
+    class sem { create destroy getattr setattr read write associate unix_read unix_write }; # System Vのセマフォ
+    class dbus { send_msg acquire_svc };                  # D-Busメッセージの送受信とサービス名の登録
+    class fd { use };                                     # 他のプロセスのファイルディスクリプタの使用
+    class capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource setfcap }; # rootの特権 (Linuxケーパビリティ)
+    class filesystem { getattr mount unmount };           # ファイルシステムのマウントと属性の取得
+    class netlink_route_socket { create bind getattr setattr read write nlmsg_read }; # ルーティング情報を取得するnetlinkソケット
+    class tcp_socket { create bind connect listen accept read write getattr setattr shutdown name_connect node_bind }; # TCPソケット
+    class udp_socket { create bind connect read write getattr setattr }; # UDPソケット
 }
 
 ########################################
-# Type declarations and role associations
+# 型の宣言とロールへの関連付け
+#
+# GUIとD-Busサービスでドメインを分け、特権が必要な処理をD-Busサービスに閉じ込める
+# 一時ファイルにも専用の型を付け、他のプログラムの一時ファイルと区別する
 ########################################
 
-type qsnapper_t;
-type qsnapper_exec_t;
-type qsnapper_dbus_t;
-type qsnapper_dbus_exec_t;
-type qsnapper_tmp_t;
-type qsnapper_tmpfs_t;
+type qsnapper_t;           # GUIアプリケーションのドメイン
+type qsnapper_exec_t;      # GUIアプリケーションの実行ファイル
+type qsnapper_dbus_t;      # D-Busサービスのドメイン
+type qsnapper_dbus_exec_t; # D-Busサービスの実行ファイル
+type qsnapper_tmp_t;       # /tmpに作成する一時ファイル
+type qsnapper_tmpfs_t;     # tmpfsに作成する共有メモリのファイル
 
 typeattribute qsnapper_t domain;
 typeattribute qsnapper_dbus_t domain;
 
-# 復元エンジンはsnapshot側のSELinux contextをそのままlive側へ書き戻す。
-# base policyには
+# 復元エンジンは、スナップショット側のSELinuxコンテキストをそのままlive側へ書き戻す
+# 基本ポリシーには次の制約がある
 #   constrain file { create relabelfrom relabelto } (u1 == u2 or (t1 == can_change_object_identity));
-# という制約があり、qsnapper_dbus_t (system_u) から unconfined_u 等の異なるSELinux userを持つ
-# contextへrelabelするにはこの属性が必要になる (setfiles_t / rpm_t / bootloader_t と同じ扱い)。
-# qsnapper_dbus_tは元々全file_typeへの書き込み権を持つため、実効的な権限拡大にはならない
+# このため、qsnapper_dbus_t (system_u) からunconfined_u等の異なるSELinuxユーザを持つ
+# コンテキストへラベルを付け替えるには、この属性が必要になる (setfiles_t / rpm_t / bootloader_tと同じ扱い)
+# 通常の書き込みの許可だけではこの制約を満たさないため、復元に必要なSELinuxユーザの変更の例外を与える
 typeattribute qsnapper_dbus_t can_change_object_identity;
 typeattribute qsnapper_exec_t exec_type, file_type;
 typeattribute qsnapper_dbus_exec_t exec_type, file_type;
 typeattribute qsnapper_tmp_t file_type;
 typeattribute qsnapper_tmpfs_t file_type;
 
+# GUIは非制限ユーザのロール、D-Busサービスはシステムサービスのロールで動作する
 role unconfined_r types qsnapper_t;
 role system_r types qsnapper_dbus_t;
 
 ########################################
-# qsnapper_t (GUI application) policy
+# qsnapper_t (GUIアプリケーション) のポリシー
+#
+# 一般ユーザの権限で動作し、UIの表示・設定の保存・スナップショットの読み取りを行う
+# 特権が必要な操作は、全てD-Bus経由でqsnapper_dbus_tへ依頼する
 ########################################
 
-# Self process / sockets / IPC (execmem/execstack required for Qt QML JIT)
+# 自プロセスの操作、ソケット、プロセス間通信
+# execmemは、QMLのJIT等が匿名メモリ上のコードを実行する場合に対応する
+# execstackは実行可能なスタックを許可する別の権限であり、QMLのJITに必須とは断定しない
 allow qsnapper_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched execmem execstack };
 allow qsnapper_t self:fifo_file { getattr open read write ioctl };
 allow qsnapper_t self:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown };
-# 二重起動防止: 2番目のインスタンスは起動中のインスタンスへ接続し、UIDを確認する (SO_PEERCRED)
+# 二重起動の防止
+# 2番目のインスタンスは起動中のインスタンスへ接続し、SO_PEERCREDで相手のUIDを確認する
 allow qsnapper_t self:unix_stream_socket connectto;
 
-# SO_PEERCREDはgetsockopt()を使うため、unix_stream_socket getoptが無い基本ポリシー向けにoptionalで明示する
+# SO_PEERCREDの取得にはgetsockopt()を使う
+# unix_stream_socketにgetoptが無い基本ポリシーでもビルドできるように、optionalで明示する
 optional {
-    require { class unix_stream_socket { getopt }; }
+    require { class unix_stream_socket { getopt }; } # ソケットオプションの取得
     allow qsnapper_t self:unix_stream_socket getopt;
 }
+# データグラムソケット、共有メモリ、セマフォ、TCP/UDPソケット
+# QtとX11のライブラリが、プロセス間通信と描画のために内部で使用する
 allow qsnapper_t self:unix_dgram_socket { create bind connect read write sendto getattr setattr };
 allow qsnapper_t self:shm { create destroy getattr setattr read write associate unix_read unix_write };
 allow qsnapper_t self:sem { create destroy getattr setattr read write associate unix_read unix_write };
 allow qsnapper_t self:tcp_socket { create bind connect listen accept read write getattr setattr shutdown };
 allow qsnapper_t self:udp_socket { create bind connect read write getattr setattr };
+# 自身の実行ファイルを、qsnapper_tのエントリポイントとして実行する
 allow qsnapper_t qsnapper_exec_t:file { getattr open read execute entrypoint map };
 
-# Socket extensions (Leap 16.0+; older base policies lack these classes/perms)
+# ソケットの拡張パーミッション
+# Leap 16.0以降の基本ポリシーにだけ存在するクラスとパーミッションのため、optionalで囲む
 optional {
-    require { class unix_dgram_socket { getopt setopt }; }
+    require { class unix_dgram_socket { getopt setopt }; } # ソケットオプションの取得と設定
     allow qsnapper_t self:unix_dgram_socket { getopt setopt };
 }
 optional {
-    require { class unix_stream_socket { ioctl }; }
+    require { class unix_stream_socket { ioctl }; } # ソケットへのioctl
+    # 起動元(非制限ユーザのプロセス)から継承したソケットの状態を取得する
     allow qsnapper_t unconfined_t:unix_stream_socket { getattr ioctl };
 }
 
-# Shared libraries and system binaries
+# 共有ライブラリとシステムの実行ファイル
+# Qtのライブラリとプラグインの読み込み、/etcの設定の参照、外部コマンドの実行に必要
 allow qsnapper_t lib_t:dir { getattr open read search };
 allow qsnapper_t lib_t:file { getattr open read execute execute_no_trans map };
 allow qsnapper_t lib_t:lnk_file { getattr read };
@@ -239,59 +268,70 @@ allow qsnapper_t bin_t:dir { getattr open read search };
 allow qsnapper_t bin_t:file { getattr open read execute execute_no_trans map };
 allow qsnapper_t bin_t:lnk_file { getattr read };
 
-# xdg-open / kde-open helper (runs in qsnapper_t before browser transition)
+# リンクを開くヘルパー (xdg-open / kde-open)
+# ブラウザのドメインへ遷移する前は、qsnapper_tのままシェルスクリプトとして動作する
 allow qsnapper_t shell_exec_t:file { getattr open read execute execute_no_trans map };
 allow qsnapper_t home_bin_t:dir { getattr open read search };
 allow qsnapper_t home_bin_t:file { getattr open read execute execute_no_trans map };
-# kde-open's helper threads probe ~/.config/pulse before exec'ing the browser
+# kde-openのヘルパースレッドは、ブラウザを実行する前に~/.config/pulseを調べる
 allow qsnapper_t pulseaudio_home_t:dir { getattr open read search rmdir };
 
 ########################################
-# Web browser launch (xdg-open)
-########################################
-# Strategy: transition browser binaries to unconfined_t so the browser runs
-# with the user's normal permissions instead of qsnapper_t's restricted domain.
-# Without this, every browser update would require dozens of new allow rules
-# (mozilla_home_t, user_namespace, cgroup_t, pulseaudio_home_t, net_conf_t,
-# netlink_route_socket, ...).
+# Webブラウザの起動 (xdg-open)
 #
-# Browsers using bin_t (Brave, Vivaldi, Falkon, ...) need manual relabeling:
-#   sudo semanage fcontext -a -t mozilla_exec_t '/path/to/browser'
+# 方針 :
+#   ブラウザの実行ファイルはunconfined_tへ遷移させ、qsnapper_tの制限されたドメインではなく
+#   ユーザ本来の権限で動作させる
+#   遷移させない場合、ブラウザを更新するたびに多数のallowルールの追加が必要になる
+#   (mozilla_home_t、user_namespace、cgroup_t、pulseaudio_home_t、net_conf_t、
+#   netlink_route_socketなど)
+#
+# bin_tのラベルを持つブラウザ(Brave、Vivaldi、Falkonなど)は、手動でラベルを付け替える必要がある
+#   sudo semanage fcontext -a -t mozilla_exec_t "/path/to/browser"
 #   sudo restorecon -v /path/to/browser
 #
-# ホームディレクトリに展開したブラウザ (user_home_t) も同じ扱いになる
-# GUIはリンクをデスクトップポータル経由で開き、ポータルが使えないときだけ
-# ブラウザを直接起動するため、この再ラベルが必要になるのは後者の場合だけである
+# ホームディレクトリに展開したブラウザ(user_home_t)も同じ扱いになる
+# GUIはリンクをデスクトップポータル経由で開き、ポータルが使えない場合だけブラウザを直接起動する
+# このため、ラベルの付け替えが必要になるのは後者の場合だけである
 # 手順はADMIN.md / ADMIN_JP.mdの「Opening Links in a Web Browser」を参照
-# user_home_tの実行ファイル全体をunconfined_tへ遷移させるルールは、GUIが侵害されたときに
-# 封じ込めが効かなくなるため追加しない
+#
+# user_home_tの実行ファイル全体をunconfined_tへ遷移させるルールは追加しない
+# GUIが侵害された場合に、封じ込めが効かなくなるため
+########################################
 
+# qsnapper_tからunconfined_tへの遷移と、遷移後のブラウザとのやり取り
+# ブラウザは起動元のファイルディスクリプタを継承し、終了時に起動元へSIGCHLDを送る
 allow qsnapper_t unconfined_t:process transition;
 allow unconfined_t qsnapper_t:fd use;
 allow unconfined_t qsnapper_t:process { sigchld signull };
 
+# Firefox等 (mozilla_exec_t) をunconfined_tへ遷移させる
 allow qsnapper_t mozilla_exec_t:file { getattr open read execute };
 type_transition qsnapper_t mozilla_exec_t:process unconfined_t;
 
+# Chromium / Microsoft Edge / Operaをunconfined_tへ遷移させる
+# 対応する型が無い基本ポリシーでもビルドできるように、optionalで囲む
 optional {
-    require { type chromium_exec_t; }
+    require { type chromium_exec_t; } # Chromiumの実行ファイル
     allow qsnapper_t chromium_exec_t:file { getattr open read execute };
     type_transition qsnapper_t chromium_exec_t:process unconfined_t;
 }
 
 optional {
-    require { type msedge_exec_t; }
+    require { type msedge_exec_t; } # Microsoft Edgeの実行ファイル
     allow qsnapper_t msedge_exec_t:file { getattr open read execute };
     type_transition qsnapper_t msedge_exec_t:process unconfined_t;
 }
 
 optional {
-    require { type opera_exec_t; }
+    require { type opera_exec_t; } # Operaの実行ファイル
     allow qsnapper_t opera_exec_t:file { getattr open read execute };
     type_transition qsnapper_t opera_exec_t:process unconfined_t;
 }
 
-# Fonts and localization
+# フォントとロケール
+# UIの描画と翻訳の表示に必要
+# ユーザのフォントキャッシュは、fontconfigがキャッシュを更新するため書き込みも許可する
 allow qsnapper_t fonts_t:dir { getattr open read search };
 allow qsnapper_t fonts_t:file { getattr open read map };
 allow qsnapper_t fonts_cache_t:dir { getattr open read search };
@@ -306,7 +346,8 @@ allow qsnapper_t locale_t:dir { getattr open read search };
 allow qsnapper_t locale_t:file { getattr open read map };
 allow qsnapper_t locale_t:lnk_file { getattr read };
 
-# Kernel pseudo-filesystems (/proc, /sys, sysctl)
+# カーネルの疑似ファイルシステム (/proc、/sys、sysctl)
+# Qtとグラフィックスドライバが、CPU・メモリ・GPUの情報を取得するために読み取る
 allow qsnapper_t proc_t:dir { getattr open read search };
 allow qsnapper_t proc_t:file { getattr open read };
 allow qsnapper_t proc_t:lnk_file { getattr read };
@@ -320,7 +361,8 @@ allow qsnapper_t sysctl_kernel_t:file { getattr open read };
 allow qsnapper_t sysctl_dev_t:dir { getattr open read search };
 allow qsnapper_t sysctl_dev_t:file { getattr open read };
 
-# Devices (Qt Quick GPU acceleration)
+# デバイス
+# /dev/driは、Qt QuickのGPUアクセラレーションで使う
 allow qsnapper_t device_t:dir { getattr open read search };
 allow qsnapper_t null_device_t:chr_file { getattr open read write };
 allow qsnapper_t zero_device_t:chr_file { getattr open read write };
@@ -328,12 +370,17 @@ allow qsnapper_t random_device_t:chr_file { getattr open read };
 allow qsnapper_t urandom_device_t:chr_file { getattr open read };
 allow qsnapper_t dri_device_t:chr_file { getattr open read write ioctl map };
 
-# tmpfs (execmod required for Qt QML JIT code)
+# tmpfs
+# 共有メモリをファイルとして作成する
+# execmodは、変更されたファイルマッピングを実行可能にする場合の許可である
+# Qtがこの方式でコードを実行する場合に対応するが、JIT全般に必須の権限ではない
 allow qsnapper_t tmpfs_t:dir { getattr open read search write add_name remove_name };
 allow qsnapper_t tmpfs_t:file { getattr open read write create unlink map execute execmod };
 allow qsnapper_t qsnapper_tmpfs_t:file { getattr open read write create unlink map execute execmod };
 
-# User home directories (~/, ~/.cache, ~/.config)
+# ユーザのホームディレクトリ (~/、~/.cache、~/.config)
+# アプリケーションの設定(~/.config/Presire/qSnapper.conf)とQtのキャッシュの読み書きに使う
+# watch / watch_readsは、設定ディレクトリの変更を監視するために使う
 allow qsnapper_t user_home_dir_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_t user_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_t user_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
@@ -351,7 +398,9 @@ allow qsnapper_t config_home_t:lnk_file { getattr read create unlink };
 allow qsnapper_t config_home_t:fifo_file { getattr open read write create unlink ioctl };
 allow qsnapper_t config_home_t:sock_file { getattr open read write create unlink };
 
-# X11 display server - full access
+# X11のディスプレイサーバ
+# Xサーバとディスプレイマネージャへの接続、共有メモリ(MIT-SHM)を使った描画に必要
+# 既存のルールには、接続と描画に加えてXサーバへのシグナルの送信と共有メモリの破棄も含まれる
 allow qsnapper_t xserver_t:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto };
 allow qsnapper_t xserver_t:unix_dgram_socket { create bind connect read write sendto getattr setattr };
 allow qsnapper_t xserver_t:process { signal signull sigkill sigstop sigchld };
@@ -362,7 +411,9 @@ allow qsnapper_t xdm_t:unix_dgram_socket { create bind connect read write sendto
 allow qsnapper_t xdm_t:fd use;
 allow qsnapper_t xdm_t:shm { create destroy getattr setattr read write associate unix_read unix_write };
 
-# X11 / Wayland / XDG runtime
+# X11 / Wayland / XDGランタイムディレクトリ
+# Waylandのコンポジタがunconfined_tで動作する環境で、そのソケットへの接続を許可する
+# キーボード配列(XKB)、X認証のファイル、ディスプレイマネージャの実行時データも参照する
 allow qsnapper_t unconfined_t:unix_stream_socket connectto;
 allow qsnapper_t xkb_var_lib_t:dir { getattr open read search };
 allow qsnapper_t xkb_var_lib_t:file { getattr open read map };
@@ -380,28 +431,30 @@ allow qsnapper_t user_tmp_t:dir { getattr setattr open read search write add_nam
 allow qsnapper_t user_tmp_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 # 二重起動防止のソケット ($XDG_RUNTIME_DIR/qsnapper.socket)
 # openSUSEでは/run/user/<UID>がuser_tmp_tのため、このルールが実際に使われる
-# QLocalServer::UserAccessOptionは、親ディレクトリ配下に一時ディレクトリ(.XXXXXX)を作り、
-# その中のソケット("s")に対して次の順で操作する
-# - setattr: chmod()でアクセス権を設定する
-# - rename : 最終名(qsnapper.socket)へ改名する
+# QLocalServer::UserAccessOptionは、親ディレクトリ配下に一時ディレクトリ(.XXXXXX)を作成し、
+# その中のソケット(s)に対して次の順で操作する
+#   setattr : chmod()でアクセス権を設定する
+#   rename  : 最終名(qsnapper.socket)へ改名する
 allow qsnapper_t user_tmp_t:sock_file { getattr setattr open read write create unlink rename };
 allow qsnapper_t user_tmp_t:lnk_file { getattr read create unlink };
 allow qsnapper_t user_tmp_t:fifo_file { getattr open read write create unlink ioctl };
 
-# xdg_runtime_t may not exist on older base policies (openSUSE compatibility)
+# xdg_runtime_tは、古い基本ポリシーには存在しない場合がある (openSUSEとの互換性)
 optional {
-    require { type xdg_runtime_t; }
+    require { type xdg_runtime_t; } # XDGランタイムディレクトリ (/run/user/<UID>)
     allow qsnapper_t xdg_runtime_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl watch watch_reads };
     allow qsnapper_t xdg_runtime_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
     # 二重起動防止のソケット ($XDG_RUNTIME_DIR/qsnapper.socket)
-    # - setattr: QLocalServer::UserAccessOptionがchmod()を呼ぶ
-    # - rename : QLocalServerは一時名でソケットを作成し、最終名へ改名する
+    #   setattr : QLocalServer::UserAccessOptionがchmod()を呼ぶ
+    #   rename  : QLocalServerは一時名でソケットを作成し、最終名へ改名する
     allow qsnapper_t xdg_runtime_t:sock_file { getattr setattr open read write create unlink rename };
     allow qsnapper_t xdg_runtime_t:lnk_file { getattr read create unlink };
     allow qsnapper_t xdg_runtime_t:fifo_file { getattr open read write create unlink ioctl };
 }
 
-# D-Bus (system + session)
+# D-Bus (システムバスとセッションバス)
+# システムバス経由でqsnapper_dbus_tのメソッドを呼び出し、応答とシグナルを受け取る
+# セッションバスは、デスクトップ環境との連携(デスクトップポータルによるリンクの表示など)に使う
 allow qsnapper_t session_dbusd_tmp_t:dir { getattr open read search };
 allow qsnapper_t session_dbusd_tmp_t:sock_file { getattr open read write };
 allow qsnapper_t unconfined_dbusd_t:unix_stream_socket connectto;
@@ -418,19 +471,21 @@ allow qsnapper_t system_dbusd_var_run_t:sock_file { getattr open read write };
 allow qsnapper_t qsnapper_dbus_t:dbus send_msg;
 allow qsnapper_dbus_t qsnapper_t:dbus send_msg;
 
-# session_dbusd_t may not exist on older base policies (openSUSE compatibility)
+# session_dbusd_tは、古い基本ポリシーには存在しない場合がある (openSUSEとの互換性)
 optional {
-    require { type session_dbusd_t; }
+    require { type session_dbusd_t; } # セッションバスのD-Busデーモン
     allow qsnapper_t session_dbusd_t:unix_stream_socket connectto;
     allow qsnapper_t session_dbusd_t:dbus send_msg;
     allow session_dbusd_t qsnapper_t:dbus send_msg;
 }
 
-# Hardware / GPU detection
+# ハードウェアの情報とGPUの判別
+# GPUドライバが、PCI IDのデータベースを読み取る
 allow qsnapper_t hwdata_t:dir { getattr open read search };
 allow qsnapper_t hwdata_t:file { getattr open read map };
 
-# User local data (~/.local, ~/.local/share)
+# ユーザのローカルデータ (~/.local、~/.local/share)
+# Qtがアプリケーションのデータを保存する場所として使う
 allow qsnapper_t gconf_home_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_t gconf_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl execute execute_no_trans };
 allow qsnapper_t gconf_home_t:lnk_file { getattr read create unlink };
@@ -442,7 +497,8 @@ allow qsnapper_t data_home_t:lnk_file { getattr read create unlink };
 allow qsnapper_t data_home_t:fifo_file { getattr open read write create unlink ioctl };
 allow qsnapper_t data_home_t:sock_file { getattr open read write create unlink };
 
-# Parent process / unconfined_t interaction
+# 起動元のプロセス(unconfined_t)とのやり取り
+# 起動元の/proc/<PID>の参照、継承したファイルディスクリプタの使用、D-Busメッセージの送受信に必要
 allow qsnapper_t unconfined_t:dir { getattr open read search };
 allow qsnapper_t unconfined_t:file { getattr open read };
 allow qsnapper_t unconfined_t:lnk_file { getattr read };
@@ -451,59 +507,65 @@ allow unconfined_t qsnapper_t:dbus send_msg;
 allow qsnapper_t init_t:fd use;
 allow qsnapper_t unconfined_t:fd use;
 
-# SingleInstanceGuard (QLockFile) stale-lock detection.
-# QLockFile::isApparentlyStale() -> isProcessRunning() probes the PID recorded
-# in qsnapper-<UID>.lock with kill(pid, 0) (qlockfile_unix.cpp). That PID can
-# belong to a process in the user's unconfined_t domain (e.g. a PID reused
-# after a crash, or a build-tree binary that was never transitioned to
-# qsnapper_t). The probe then requires the process:signull permission.
-# Without it kill() fails with EACCES instead of ESRCH, so QLockFile treats
-# the stale lock as live and startup may be wrongly refused.
+# 二重起動防止(SingleInstanceGuard)で使うQLockFileのプロセスの生存確認
+# QLockFile::isApparentlyStale()からisProcessRunning()が呼ばれ、runtimeディレクトリ配下の
+# qsnapper.lockに記録されたPIDをkill(pid, 0)で調べる (qlockfile_unix.cpp)
+# このPIDは、非制限ユーザのドメイン(unconfined_t)のプロセスに属する場合がある
+# (例 : クラッシュ後に再利用されたPID、qsnapper_tへ遷移しないビルドツリーの実行ファイル)
+# このとき、process:signullのパーミッションが必要になる
+# signullはシグナルを送らない生存確認の許可であり、通常のシグナルの送信は許可しない
+# QLockFileはプロセス名も使って古いロックを判定するため、kill()の結果だけで判定は決まらない
 allow qsnapper_t unconfined_t:process signull;
 
-# User-domain access to qsnapper-dbus-service
-# 任意ユーザドメインからqsnapper-dbus-serviceへのD-Bus呼び出しを許可する
-# 「誰が何を実行できるか」の細粒度認可は、qsnapper-dbus-service内のPolkit (auth_admin / auth_admin_keep) が判定するため、
-# SELinux側ではバスチャネルの確立のみを許可してよい
-# CLI経路 (dbus-send / busctl / Pythonテストスクリプト等) や GUIを介さずに管理スクリプトから直接サービスを呼び出すユースケースで必要
+# ユーザのドメインからqsnapper-dbus-serviceへのアクセス
+# unconfined_tと、利用可能なstaff_t / user_t / sysadm_tからのD-Bus呼び出しを許可する
+# 誰が何を実行できるかの細かな認可は、qsnapper-dbus-service内のPolkit
+# (auth_admin / auth_admin_keep) が判定するため、SELinuxではバスの通信路の確立だけを許可する
+# GUIを介さずに、CLI (dbus-send、busctl、Pythonのテストスクリプトなど) や管理スクリプトから
+# サービスを直接呼び出す場合に必要
 allow unconfined_t qsnapper_dbus_t:dbus send_msg;
 allow qsnapper_dbus_t unconfined_t:dbus send_msg;
 
-# 制限ユーザドメイン (refpolicy 環境向け)
-# openSUSEの標準targeted policyではstaff_t/user_t/sysadm_tが存在しない場合があるため、
-# optionalブロックで囲み、対象ドメインが宣言されている場合のみallowする
-# (optional_policy(`...') は refpolicy m4 マクロで checkmodule では使えないため使用しない)
+# 制限されたユーザのドメイン (refpolicy環境向け)
+# openSUSEの標準のtargetedポリシーには、staff_t / user_t / sysadm_tが存在しない場合がある
+# このため、optionalブロックで囲み、対象のドメインが宣言されている場合だけ許可する
+# refpolicyのoptional_policyマクロはm4のマクロであり、checkmoduleでは使えないため使用しない
 optional {
-    require { type staff_t; }
+    require { type staff_t; } # スタッフユーザのドメイン
     allow staff_t qsnapper_dbus_t:dbus send_msg;
     allow qsnapper_dbus_t staff_t:dbus send_msg;
 }
 
 optional {
-    require { type user_t; }
+    require { type user_t; } # 一般ユーザのドメイン
     allow user_t qsnapper_dbus_t:dbus send_msg;
     allow qsnapper_dbus_t user_t:dbus send_msg;
 }
 
 optional {
-    require { type sysadm_t; }
+    require { type sysadm_t; } # システム管理者のドメイン
     allow sysadm_t qsnapper_dbus_t:dbus send_msg;
     allow qsnapper_dbus_t sysadm_t:dbus send_msg;
 }
 
-# Terminals
+# 端末
+# 端末から起動した場合に、ログを標準出力と標準エラー出力へ書き込む
 allow qsnapper_t user_devpts_t:chr_file { getattr open read write ioctl };
 allow qsnapper_t user_tty_device_t:chr_file { getattr open read write ioctl };
 allow qsnapper_t devpts_t:dir { getattr open read search };
 
-# /run runtime data
+# /runの実行時データ
+# ライブラリが/run配下のランタイムファイルとソケットを読み書きする
 allow qsnapper_t var_run_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_t var_run_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 allow qsnapper_t var_run_t:sock_file { getattr open read write create unlink };
 allow qsnapper_t var_run_t:lnk_file { getattr read create unlink };
 allow qsnapper_t var_run_t:fifo_file { getattr open read write create unlink ioctl };
 
-# Snapshot browsing (read-only) and snapper metadata
+# スナップショットの閲覧とSnapperのメタデータの参照
+# unlabeled_tまたはfs_tで扱われるスナップショットの閲覧と、var_lib_tのメタデータの読み取りに対応する
+# 実際のラベルは、拡張属性・マウントの設定・基本ポリシーによって異なる
+# これらの型への読み取りのルールは、スナップショットや/var/lib全体を書き込み禁止にするものではない
 allow qsnapper_t unlabeled_t:dir { getattr open read search };
 allow qsnapper_t unlabeled_t:file { getattr open read };
 allow qsnapper_t unlabeled_t:lnk_file { getattr read };
@@ -515,45 +577,60 @@ allow qsnapper_t var_lib_t:dir { getattr open read search };
 allow qsnapper_t var_lib_t:file { getattr open read };
 allow qsnapper_t var_lib_t:lnk_file { getattr read };
 
-# Temporary files
+# 一時ファイル
+# /tmpに作成するファイルは、末尾の型遷移でqsnapper_tmp_tになる
 allow qsnapper_t tmp_t:dir { getattr open read search write add_name remove_name };
 allow qsnapper_t qsnapper_tmp_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_t qsnapper_tmp_t:file { getattr open read write create unlink rename lock };
 
-# XDG_RUNTIME_DIR未設定でQtが/tmp/runtime-<user>へフォールバックした場合の二重起動防止ソケット
-# (フォールバックディレクトリはqsnapper_tが作成し、qsnapper_tmp_tが付与される)
-# - setattr: QLocalServer::UserAccessOptionがchmod()を呼ぶ
-# - rename : QLocalServerは一時名でソケットを作成し、permissionを設定してから
-#            最終名へ原子的に改名する
+# XDG_RUNTIME_DIRが未設定で、Qtが/tmp/runtime-<user>へフォールバックした場合の二重起動防止のソケット
+# (フォールバック先のディレクトリはqsnapper_tが作成するため、qsnapper_tmp_tが付与される)
+#   setattr : QLocalServer::UserAccessOptionがchmod()を呼ぶ
+#   rename  : QLocalServerは一時名でソケットを作成し、アクセス権を設定してから
+#             最終名へ原子的に改名する
 allow qsnapper_t qsnapper_tmp_t:sock_file { getattr setattr open read write create unlink rename };
 
-# Syslog / systemd journal
+# syslog / systemd-journald
+# 利用するログのバックエンドが、syslogのソケット(/dev/log)へ送信する場合に対応する
 allow qsnapper_t devlog_t:sock_file { getattr write };
 allow qsnapper_t kernel_t:unix_dgram_socket sendto;
 
-# systemd-journald socket (/run/systemd/journal/) for qInfo/qWarning output
+# systemd-journaldのソケット(/run/systemd/journal/)
+# 利用するログのバックエンドが、journaldのソケットへ直接出力する場合に対応する
 optional {
-    require { type syslogd_var_run_t; }
+    require { type syslogd_var_run_t; } # syslogとjournaldの実行時ディレクトリ
     allow qsnapper_t syslogd_var_run_t:dir { getattr open read search };
     allow qsnapper_t syslogd_var_run_t:sock_file { getattr open read write };
 }
 
 ########################################
-# qsnapper_dbus_t (D-Bus service) policy
+# qsnapper_dbus_t (D-Busサービス) のポリシー
+#
+# rootで動作し、PolicyKitの認可を受けた後にスナップショットの作成・削除・比較・復元・
+# ロールバックを行う
+# システムバスのD-Bus活性化、またはsystemdから起動される
 ########################################
 
-# Self process / capabilities / sockets
-# setfcap: 復元時にsnapshot側のsecurity.capability (file capability) を書き戻すために必要
-#          (fsetxattr() -> cap_convert_nscap() がCAP_SETFCAPを検査する)
+# 自プロセスの操作、ケーパビリティ、ソケット
+#   sys_admin                : Btrfsのsubvolumeとスナップショットの操作、マウント
+#   dac_override / dac_read_search : ファイルのアクセス権に関係なく、スナップショットとlive側を読み書きする
+#   fowner / chown / fsetid  : 復元時に、所有者・アクセス権・SUID/SGIDを元に戻す
+#   setfcap                  : 復元時に、スナップショット側のsecurity.capability (file capability) を書き戻す
+#                              (fsetxattr()からcap_convert_nscap()がCAP_SETFCAPを検査する)
+#   setuid / setgid / sys_resource : 資格情報と資源の制限の変更を許可する既存の権限である
+#                              libsnapperや外部コマンドでの具体的な利用箇所は未確認
+# setfscreateは作成時のSELinuxコンテキストの指定を許可するが、現在の復元処理での利用は未確認
 allow qsnapper_dbus_t self:capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource setfcap };
 allow qsnapper_dbus_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched setrlimit setfscreate execmem execstack };
 allow qsnapper_dbus_t self:fifo_file { getattr open read write ioctl };
 allow qsnapper_dbus_t self:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown };
 allow qsnapper_dbus_t self:unix_dgram_socket { create bind connect read write sendto getattr setattr };
 allow qsnapper_dbus_t self:netlink_route_socket { create bind getattr setattr read write nlmsg_read };
+# 自身の実行ファイルを、qsnapper_dbus_tのエントリポイントとして実行する
 allow qsnapper_dbus_t qsnapper_dbus_exec_t:file { getattr open read execute entrypoint map };
 
-# Shared libraries and system files
+# 共有ライブラリとシステムのファイル
+# Qtとlibsnapperのライブラリの読み込み、ロケール、/procと/sysの参照に必要
 allow qsnapper_dbus_t lib_t:dir { getattr open read search };
 allow qsnapper_dbus_t lib_t:file { getattr open read execute map };
 allow qsnapper_dbus_t lib_t:lnk_file { getattr read };
@@ -575,24 +652,31 @@ allow qsnapper_dbus_t sysctl_t:file { getattr open read };
 allow qsnapper_dbus_t sysctl_kernel_t:dir { getattr open read search };
 allow qsnapper_dbus_t sysctl_kernel_t:file { getattr open read };
 
-# /etc - includes /etc/snapper configuration (full access for restoration)
+# /etc (/etc/snapperの設定を含む)
+# Snapper設定の変更と、/etc配下のファイルの復元のために書き込みを許可する
 allow qsnapper_dbus_t etc_t:dir { getattr setattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t etc_t:file { getattr setattr open read write create unlink rename link };
 allow qsnapper_dbus_t etc_t:lnk_file { getattr read create unlink };
 
-# D-Bus system bus
+# D-Busのシステムバス
+# acquire_svcは、サービス名(com.presire.qsnapper.Operations)をバスに登録するために必要
 allow qsnapper_dbus_t system_dbusd_t:dbus { send_msg acquire_svc };
 allow qsnapper_dbus_t system_dbusd_t:unix_stream_socket connectto;
 allow system_dbusd_t qsnapper_dbus_t:dbus send_msg;
 allow qsnapper_dbus_t system_dbusd_var_run_t:dir { getattr open read search };
 allow qsnapper_dbus_t system_dbusd_var_run_t:sock_file { getattr open read write };
 
-# /var/lib (snapper metadata, RPM/Zypper DB)
+# /var/lib (Snapperのメタデータ、RPM/ZypperのDB)
+# スナップショットの作成・削除と、/var/lib配下のファイルの復元に必要
 allow qsnapper_dbus_t var_lib_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t var_lib_t:file { getattr open read write create unlink rename };
 allow qsnapper_dbus_t var_lib_t:lnk_file { getattr read create unlink };
 
-# Snapshot directory management - /.snapshots (unlabeled_t or fs_t on Btrfs)
+# スナップショットのディレクトリの管理 (/.snapshots)
+# スナップショットの領域がunlabeled_tまたはfs_tで扱われる環境に対応するため、両方を許可する
+# 実際のラベルは、拡張属性・マウントの設定・基本ポリシーによって異なる
+# ioctlの0x9400-0x94ffは、Btrfsのioctl(subvolumeの作成・削除など)の範囲である
+# mount / unmount / mountonは、スナップショットのマウントに使う
 allow qsnapper_dbus_t unlabeled_t:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl mounton };
 allow qsnapper_dbus_t unlabeled_t:file { getattr setattr open read write create unlink rename link };
 allow qsnapper_dbus_t unlabeled_t:lnk_file { getattr setattr read create unlink rename };
@@ -607,17 +691,19 @@ allow qsnapper_dbus_t fs_t:lnk_file { getattr setattr read create unlink rename 
 allow qsnapper_dbus_t fs_t:filesystem { getattr mount unmount };
 allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 
-# Snapshot comparison and restoration: qsnapper_dbus_t is the privileged
-# restore engine and must read AND write any file under any label
-# (cupsd_rw_etc_t, NetworkManager_etc_t, passwd_file_t, *_exec_t, *_etc_t, ...).
-# Granting via file_type/exec_type attributes avoids enumerating every type.
+# スナップショットの比較と復元
+# qsnapper_dbus_tは特権を持つ復元エンジンであり、任意のラベルのファイルを読み書きする必要がある
+# (cupsd_rw_etc_t、NetworkManager_etc_t、passwd_file_t、*_exec_t、*_etc_tなど)
+# 全ての型を列挙せずに済むように、file_type / exec_typeの属性で許可する
 #
-# rename: 復元エンジンはlive側を一時名で作成してからrenameat()で原子的に差し替える
-#         (copySymlinkBeneathRoot) ほか、typechangedのlive pathをrenameat()で退避する
-#         (movePathAsideBeneathRoot)。差し替え対象はfileだけでなくdir / lnk_file /
-#         fifo_fileにもなるため、全classへrenameが必要になる
-# setattr (lnk_file): symlink自体のowner / timesを
-#         fchownat() / utimensat() のAT_SYMLINK_NOFOLLOWで復元するために必要
+#   rename : 復元エンジンは、live側を一時名で作成してからrenameat()で原子的に置き換える
+#            (copySymlinkBeneathRoot)
+#            また、種類が変わったlive側のパスをrenameat()で退避する (movePathAsideBeneathRoot)
+#            置き換えの対象はfileだけでなく、dir / lnk_file / fifo_fileにもなるため、
+#            これらのクラスにrenameが必要になる
+#   setattr (lnk_file) : シンボリックリンク自体の所有者と時刻を、AT_SYMLINK_NOFOLLOWを指定した
+#            fchownat() / utimensat()で復元するために必要
+#   relabelfrom / relabelto : スナップショット側のSELinuxコンテキストをlive側へ書き戻すために必要
 allow qsnapper_dbus_t file_type:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:file { getattr setattr open read write append create unlink rename link map lock ioctl relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:lnk_file { getattr setattr read create unlink rename relabelfrom relabelto };
@@ -625,7 +711,8 @@ allow qsnapper_dbus_t file_type:fifo_file { getattr open read write create unlin
 allow qsnapper_dbus_t file_type:sock_file { getattr open read write create unlink relabelfrom relabelto };
 allow qsnapper_dbus_t exec_type:file { getattr setattr open read write create unlink rename link map lock ioctl relabelfrom relabelto };
 
-# /home root and user home directories (when /home is a separate btrfs subvolume)
+# /homeとユーザのホームディレクトリ
+# /homeが独立したBtrfsのsubvolumeの場合に、ホームディレクトリ配下のファイルを復元する
 allow qsnapper_dbus_t home_root_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_dbus_t home_root_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 allow qsnapper_dbus_t home_root_t:lnk_file { getattr read create unlink };
@@ -659,7 +746,10 @@ allow qsnapper_dbus_t xauth_home_t:dir { getattr setattr open read search write 
 allow qsnapper_dbus_t xauth_home_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 allow qsnapper_dbus_t xauth_home_t:lnk_file { getattr read create unlink };
 
-# /boot and major restoration target directories (/usr, /opt, /bin, /sbin)
+# /bootと主要な復元対象のディレクトリ (/usr、/opt、/bin、/sbin)
+# 復元対象のファイルを書き戻す
+# bin_tは、snapperのコマンド等の外部コマンドを実行するために読み取りと実行を許可する
+# bin_tへの書き込み等は、前述のfile_type / exec_type属性への復元用のルールでも許可される
 allow qsnapper_dbus_t boot_t:dir { getattr setattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t boot_t:file { getattr setattr open read write create unlink rename link };
 allow qsnapper_dbus_t boot_t:lnk_file { getattr read create unlink };
@@ -670,14 +760,17 @@ allow qsnapper_dbus_t usr_t:dir { getattr setattr open read search write add_nam
 allow qsnapper_dbus_t usr_t:file { getattr setattr open read write create unlink rename link map };
 allow qsnapper_dbus_t usr_t:lnk_file { getattr read create unlink };
 
-# /run (read-only) and shell command execution (diff, snapper CLI)
+# /runの実行時データの参照、ソケットへの読み書き、シェルの実行
+# var_run_tには、前述のfile_type属性への復元用の書き込みのルールも適用される
 allow qsnapper_dbus_t var_run_t:dir { getattr open read search };
 allow qsnapper_dbus_t var_run_t:file { getattr open read };
 allow qsnapper_dbus_t var_run_t:lnk_file { getattr read };
 allow qsnapper_dbus_t var_run_t:sock_file { getattr open read write };
 allow qsnapper_dbus_t shell_exec_t:file { getattr open read execute execute_no_trans map };
 
-# Temporary files and logging
+# 一時ファイルとログ
+# サービスのQtのログは、専用のハンドラで/var/log配下のログファイルへ追記する
+# syslogへの送信も許可するが、この許可だけでは実際の送信の経路を意味しない
 allow qsnapper_dbus_t tmp_t:dir { getattr open read search write add_name remove_name };
 allow qsnapper_dbus_t qsnapper_tmp_t:dir { getattr open read search write add_name remove_name create rmdir };
 allow qsnapper_dbus_t qsnapper_tmp_t:file { getattr open read write create unlink rename };
@@ -686,12 +779,15 @@ allow qsnapper_dbus_t var_log_t:file { getattr open read write append create unl
 allow qsnapper_dbus_t devlog_t:sock_file { getattr write };
 allow qsnapper_dbus_t kernel_t:unix_dgram_socket sendto;
 
-# Block devices and network configuration
+# ブロックデバイスとネットワークの設定
+# ブロックデバイスは、Btrfsのファイルシステムの情報を取得するために使う
+# net_conf_tは、名前解決の設定を読み取るために使う
 allow qsnapper_dbus_t device_t:dir { getattr open read search };
 allow qsnapper_dbus_t fixed_disk_device_t:blk_file { getattr open read write ioctl };
 allow qsnapper_dbus_t net_conf_t:file { getattr open read };
 
-# Process inspection (D-Bus auth requires reading caller's /proc info)
+# バスやsystemdから継承したファイルディスクリプタの使用と、GUIのプロセスの情報の参照
+# 現在のPolicyKitの認可はD-Busの接続名を使うため、この/procの参照を認可の必須条件とはしない
 allow qsnapper_dbus_t system_dbusd_t:fd use;
 allow qsnapper_dbus_t init_t:fd use;
 allow qsnapper_dbus_t qsnapper_t:dir { getattr open read search };
@@ -699,35 +795,38 @@ allow qsnapper_dbus_t qsnapper_t:file { getattr open read };
 allow qsnapper_dbus_t qsnapper_t:lnk_file { getattr read };
 allow qsnapper_dbus_t qsnapper_exec_t:file { getattr open read };
 
-# PolicyKit authorization D-Bus communication
+# PolicyKitとのD-Bus通信
+# 特権操作の前に、PolicyKitへ呼び出し元の認可を問い合わせる
 optional {
-    require { type policykit_t; }
+    require { type policykit_t; } # PolicyKitデーモンのドメイン
     allow policykit_t qsnapper_dbus_t:dbus send_msg;
     allow qsnapper_dbus_t policykit_t:dbus send_msg;
 }
 
-# Snapper grub plugin (invoked from libsnapper for setDefault/rollback)
+# Snapperのgrubプラグイン
+# setDefault / rollbackの処理で、libsnapperから呼び出される
 optional {
-    require { type snapper_grub_plugin_exec_t; }
+    require { type snapper_grub_plugin_exec_t; } # Snapperのgrubプラグインの実行ファイル
     allow qsnapper_dbus_t snapper_grub_plugin_exec_t:file { getattr open read execute execute_no_trans map };
 }
 
-# grub2-mkrelpath / grub2-script-check executed by the snapper grub plugin
+# Snapperのgrubプラグインが実行するgrub2-mkrelpath / grub2-script-check
 optional {
-    require { type bootloader_exec_t; }
+    require { type bootloader_exec_t; } # ブートローダのツールの実行ファイル
     allow qsnapper_dbus_t bootloader_exec_t:file { getattr open read execute execute_no_trans map };
 }
 
-# grub plugin writes /boot snapshot entries (root_t)
+# grubプラグインは、/bootへスナップショットのブートエントリを書き込む (root_t)
 allow qsnapper_dbus_t root_t:dir { write add_name remove_name };
 
-# Leap 16.0+ snapperd_*_t types (when snapperd policy is installed)
+# Leap 16.0以降のsnapperd_*_t型 (snapperdのポリシーがインストールされている場合)
+# Snapperの設定・データ・ログにこれらのラベルが付くため、スナップショットの操作と復元に必要
 optional {
     require {
-        type snapperd_conf_t;
-        type snapperd_data_t;
-        type snapperd_exec_t;
-        type snapperd_log_t;
+        type snapperd_conf_t; # Snapperの設定 (/etc/snapper)
+        type snapperd_data_t; # Snapperのデータ (スナップショット)
+        type snapperd_exec_t; # snapperdの実行ファイル
+        type snapperd_log_t;  # Snapperのログ
     }
     allow qsnapper_dbus_t snapperd_conf_t:dir { getattr open read search };
     allow qsnapper_dbus_t snapperd_conf_t:file { getattr open read };
@@ -737,12 +836,14 @@ optional {
     allow qsnapper_dbus_t snapperd_log_t:file { append getattr open };
 }
 
-# SELinux configuration access (distribution-dependent)
+# SELinuxの設定へのアクセス (ディストリビューションに依存する)
+# SELinux関連のライブラリが、ファイルコンテキストの定義を参照する場合に対応する
+# この許可だけでは、復元するファイルのラベルを定義から再計算する処理を意味しない
 optional {
     require {
-        type default_context_t;
-        type file_context_t;
-        type selinux_config_t;
+        type default_context_t; # 既定のコンテキストの設定
+        type file_context_t;    # ファイルコンテキストの定義 (file_contexts)
+        type selinux_config_t;  # SELinuxの設定 (/etc/selinux)
     }
     allow qsnapper_dbus_t default_context_t:dir search;
     allow qsnapper_dbus_t file_context_t:dir search;
@@ -750,16 +851,22 @@ optional {
     allow qsnapper_dbus_t selinux_config_t:dir read;
 }
 
+# run_initの実行ファイルの読み取り
+# 型が存在しないディストリビューションでもビルドできるように、optionalで囲む
 optional {
-    require { type run_init_exec_t; }
+    require { type run_init_exec_t; } # run_initの実行ファイル
     allow qsnapper_dbus_t run_init_exec_t:file { getattr open read };
 }
 
 ########################################
-# Root directory and major system directories - full access
+# ルートディレクトリと主要なシステムディレクトリ
+#
+# ファイルシステムのルート・/var・マウントポイントへのアクセスをまとめて許可する
 ########################################
 
-# Filesystem roots and mount points (qsnapper_t)
+# ファイルシステムのルートとマウントポイント (qsnapper_t)
+# スナップショットの閲覧時に、ルートとマウントポイントを辿れるようにする
+# 既存のルールには書き込み・作成・削除も含まれ、閲覧専用の許可ではない
 allow qsnapper_t root_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
 allow qsnapper_t root_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 allow qsnapper_t root_t:lnk_file { getattr read create unlink };
@@ -774,30 +881,35 @@ allow qsnapper_t var_t:dir { getattr setattr open read search write add_name rem
 allow qsnapper_t var_t:file { getattr setattr open read write append create unlink rename link map lock ioctl };
 allow qsnapper_t var_t:lnk_file { getattr read create unlink };
 
-# Input / sound / video / DMA devices
+# 入力・サウンド・DMAのデバイス
+# 入力・サウンド・DMAのデバイスへの既存のアクセスの許可をまとめる
+# 利用するQtのプラグインやドライバによって、必要なデバイスは異なる
 allow qsnapper_t sound_device_t:chr_file { getattr open read write ioctl map };
 allow qsnapper_t event_device_t:chr_file { getattr open read write ioctl };
 optional {
-    require { type dma_device_t; }
+    require { type dma_device_t; } # DMAヒープのデバイス
     allow qsnapper_t dma_device_t:chr_file { ioctl open read write };
 }
 
-# User name resolution (NSS via /etc/passwd or systemd-userdbd)
+# ユーザ名の解決 (/etc/passwd、またはsystemd-userdbdを使うNSS)
+# GUI側のユーザ名の解決で、NSSが/etc/passwdやsystemd-userdbdを参照する場合に対応する
 optional {
-    require { type passwd_file_t; }
+    require { type passwd_file_t; } # /etc/passwd
     allow qsnapper_t passwd_file_t:file { getattr open read };
 }
 optional {
-    require { type systemd_userdbd_runtime_t; }
+    require { type systemd_userdbd_runtime_t; } # systemd-userdbdのソケット (/run/systemd/userdb)
     allow qsnapper_t systemd_userdbd_runtime_t:dir { getattr open read search };
     allow qsnapper_t systemd_userdbd_runtime_t:sock_file { getattr open read write };
 }
 optional {
-    require { type init_var_run_t; }
+    require { type init_var_run_t; } # systemdの実行時ディレクトリ (/run/systemd)
     allow qsnapper_t init_var_run_t:dir search;
 }
 
-# Filesystem roots and mount points (qsnapper_dbus_t)
+# ファイルシステムのルートとマウントポイント (qsnapper_dbus_t)
+# 復元に必要なルート・既定ラベルの領域・マウントポイントへのアクセスを補足する
+# root_tには、grubプラグイン用およびfile_type属性へのルールによる書き込みの許可もある
 allow qsnapper_dbus_t root_t:dir { getattr open read search };
 allow qsnapper_dbus_t root_t:lnk_file { getattr read };
 allow qsnapper_dbus_t default_t:dir { getattr setattr open read search write add_name remove_name create rmdir ioctl };
@@ -808,15 +920,21 @@ allow qsnapper_dbus_t mnt_t:file { getattr setattr open read write append create
 allow qsnapper_dbus_t mnt_t:lnk_file { getattr read create unlink };
 
 ########################################
-# Domain and file transitions
+# ドメインの遷移とファイルの型遷移
+#
+# 実行ファイルのラベルに応じて、起動時に本モジュールのドメインへ遷移させる
+# 遷移しない場合、GUIもD-Busサービスも起動元のドメインのまま動作し、本ポリシーの制限が効かない
 ########################################
 
-# unconfined_t -> qsnapper_t (GUI launch)
+# GUIの起動 (unconfined_t -> qsnapper_t)
+# 非制限ユーザがGUIを起動したときに、qsnapper_tへ遷移させる
 allow unconfined_t qsnapper_exec_t:file { getattr open read execute map };
 allow unconfined_t qsnapper_t:process transition;
 type_transition unconfined_t qsnapper_exec_t:process qsnapper_t;
 
-# system_dbusd_t / init_t -> qsnapper_dbus_t (systemd D-Bus activation)
+# D-Busサービスの起動 (system_dbusd_t / init_t -> qsnapper_dbus_t)
+# D-Busの活性化、またはsystemdの活性化で起動されたときに、qsnapper_dbus_tへ遷移させる
+# 終了時には、起動元のsystemdへSIGCHLDを送る
 allow system_dbusd_t qsnapper_dbus_exec_t:file { getattr open read execute map };
 allow system_dbusd_t qsnapper_dbus_t:process transition;
 type_transition system_dbusd_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
@@ -825,14 +943,16 @@ allow init_t qsnapper_dbus_t:process { transition signal signull sigkill sigstop
 type_transition init_t qsnapper_dbus_exec_t:process qsnapper_dbus_t;
 allow qsnapper_dbus_t init_t:process sigchld;
 
-# systemd活性化時、systemd (init_t) から継承されるstdin/stdout/stderr等のunix_stream_socketへのread/writeを許可する
-# 継承直後に閉じる経路だが、enforcing下では最初の数バイト書き込みでAVCが出るため明示的に許可する
+# systemdによる活性化の際に、systemd (init_t) から継承する標準入出力等のunix_stream_socketへの読み書きを許可する
+# 継承した直後に閉じる経路だが、enforcingでは最初の数バイトの書き込みでAVCが出るため、明示的に許可する
 allow qsnapper_dbus_t init_t:unix_stream_socket { read write };
 
-# 親プロセス (systemd) からのシグナル属性継承 (siginh) は意図的に拒否し続けつつ、運用ノイズ抑制のためログを抑止する
+# 本モジュールでは、親プロセス(systemd)からのシグナル属性の継承(siginh)は許可しない
+# 拒否される場合は実害のない試行として扱い、運用時のログを埋めないよう記録を抑止する
 dontaudit init_t qsnapper_dbus_t:process siginh;
 
-# Files created in /tmp inherit qsnapper_tmp_t
+# 親ディレクトリがtmp_tの場合に、本モジュールが作成するファイル・ディレクトリ・ソケットをqsnapper_tmp_tにする
+# 他のプログラムの一時ファイルと型で区別し、専用のアクセスのルールを適用できるようにするため
 type_transition qsnapper_t tmp_t:file qsnapper_tmp_t;
 type_transition qsnapper_t tmp_t:dir qsnapper_tmp_t;
 type_transition qsnapper_t tmp_t:sock_file qsnapper_tmp_t;

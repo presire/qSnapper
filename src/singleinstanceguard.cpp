@@ -1,3 +1,8 @@
+/**
+ * @file singleinstanceguard.cpp
+ * @brief 二重起動防止のためのローカルサーバとロックの実装
+ */
+
 #include "singleinstanceguard.h"
 
 #include <QLocalServer>

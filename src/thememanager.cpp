@@ -1,3 +1,8 @@
+/**
+ * @file thememanager.cpp
+ * @brief テーマモードの管理とテーマ依存色の提供の実装
+ */
+
 #include <QSettings>
 #include <QGuiApplication>
 #include <QStyleHints>
@@ -131,21 +136,37 @@ QColor ThemeManager::getColor(const QString &lightColor, const QString &darkColo
 
 // スナップショットタイプの色
 
+/**
+ * @brief 単発スナップショットの色を取得する
+ * @return 単発スナップショットの色
+ */
 QColor ThemeManager::snapshotTypeSingle() const
 {
     return getColor(LightColors::snapshotSingle, DarkColors::snapshotSingle);
 }
 
+/**
+ * @brief Preスナップショットの色を取得する
+ * @return Preスナップショットの色
+ */
 QColor ThemeManager::snapshotTypePre() const
 {
     return getColor(LightColors::snapshotPre, DarkColors::snapshotPre);
 }
 
+/**
+ * @brief Postスナップショットの色を取得する
+ * @return Postスナップショットの色
+ */
 QColor ThemeManager::snapshotTypePost() const
 {
     return getColor(LightColors::snapshotPost, DarkColors::snapshotPost);
 }
 
+/**
+ * @brief 既定スナップショットの色を取得する
+ * @return 既定スナップショットの色
+ */
 QColor ThemeManager::snapshotTypeDefault() const
 {
     return getColor(LightColors::snapshotDefault, DarkColors::snapshotDefault);
@@ -153,21 +174,37 @@ QColor ThemeManager::snapshotTypeDefault() const
 
 // ファイル変更タイプの色
 
+/**
+ * @brief 新規作成ファイルの色を取得する
+ * @return 新規作成ファイルの色
+ */
 QColor ThemeManager::fileChangeCreated() const
 {
     return getColor(LightColors::fileCreated, DarkColors::fileCreated);
 }
 
+/**
+ * @brief 変更ファイルの色を取得する
+ * @return 変更ファイルの色
+ */
 QColor ThemeManager::fileChangeModified() const
 {
     return getColor(LightColors::fileModified, DarkColors::fileModified);
 }
 
+/**
+ * @brief 削除ファイルの色を取得する
+ * @return 削除ファイルの色
+ */
 QColor ThemeManager::fileChangeDeleted() const
 {
     return getColor(LightColors::fileDeleted, DarkColors::fileDeleted);
 }
 
+/**
+ * @brief タイプ変更ファイルの色を取得する
+ * @return タイプ変更ファイルの色
+ */
 QColor ThemeManager::fileChangeTypeChanged() const
 {
     return getColor(LightColors::fileTypeChanged, DarkColors::fileTypeChanged);
@@ -175,21 +212,37 @@ QColor ThemeManager::fileChangeTypeChanged() const
 
 // 状態色
 
+/**
+ * @brief 警告色を取得する
+ * @return 警告色
+ */
 QColor ThemeManager::warningColor() const
 {
     return getColor(LightColors::warning, DarkColors::warning);
 }
 
+/**
+ * @brief エラー色を取得する
+ * @return エラー色
+ */
 QColor ThemeManager::errorColor() const
 {
     return getColor(LightColors::error, DarkColors::error);
 }
 
+/**
+ * @brief 重要色を取得する
+ * @return 重要色
+ */
 QColor ThemeManager::importantColor() const
 {
     return getColor(LightColors::important, DarkColors::important);
 }
 
+/**
+ * @brief 成功色を取得する
+ * @return 成功色
+ */
 QColor ThemeManager::successColor() const
 {
     return getColor(LightColors::success, DarkColors::success);
@@ -197,6 +250,10 @@ QColor ThemeManager::successColor() const
 
 // ダイアログ枠色
 
+/**
+ * @brief ダイアログ枠の色を取得する
+ * @return ダイアログ枠の色
+ */
 QColor ThemeManager::dialogBorderColor() const
 {
     return getColor(LightColors::dialogBorder, DarkColors::dialogBorder);

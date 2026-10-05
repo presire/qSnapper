@@ -10,12 +10,18 @@ class QLocalSocket;
 class QLockFile;
 
 /**
+ * @file singleinstanceguard.h
+ * @brief UID単位のアプリケーション単一インスタンスを保証するガード
+ */
+
+/**
+ * @class SingleInstanceGuard
  * @brief 二重起動を防止するためのガードクラス
  *
  * QLocalServer/QLocalSocketを用いて、UID単位でアプリケーションの単一インスタンスを保証する
  * 既に別インスタンスが起動している場合、そのインスタンスに対してraise要求を送信してから終了できる
  *
- * 使用手順:
+ * 使用手順
  * 1. tryAcquire()を呼び出す
  * 2. 戻り値がfalseの場合、既存インスタンスが存在するので終了する
  * 3. 戻り値がtrueの場合、本インスタンスがプライマリとなる
@@ -33,10 +39,30 @@ class SingleInstanceGuard : public QObject
 
 private:
     // パス生成
-    QString serverName() const;             // サーバ名を生成する
-    QString lockFilePath() const;           // ロックファイルパスを生成する
-    bool tryAcquireLock();                  // ロック取得を試みる
-    static bool isPeerSameUser(const QLocalSocket &socket); // 接続先が同じUIDのプロセスかを確認する
+    /**
+     * @brief サーバ名を生成する
+     * @return UIDを含むローカルサーバ名
+     */
+    QString serverName() const;
+
+    /**
+     * @brief ロックファイルパスを生成する
+     * @return runtimeディレクトリ配下のロックファイルパス
+     */
+    QString lockFilePath() const;
+
+    /**
+     * @brief ロック取得を試みる
+     * @return ロック取得に成功した場合はtrue
+     */
+    bool tryAcquireLock();
+
+    /**
+     * @brief 接続先が同じUIDのプロセスかを確認する
+     * @param socket 確認対象の接続
+     * @return 同じUIDのプロセスである場合はtrue
+     */
+    static bool isPeerSameUser(const QLocalSocket &socket);
 
     // リソース
     QLocalServer *m_server;                 // 単一インスタンス用ローカルサーバ
@@ -44,9 +70,16 @@ private:
     std::unique_ptr<QLockFile> m_lockFile;  // 単一インスタンス用ロックファイル
 
 public:
-    // コンストラクタ/デストラクタ
-    explicit SingleInstanceGuard(QObject *parent = nullptr);    // コンストラクタ
-    ~SingleInstanceGuard() override;                            // デストラクタ
+    /**
+     * @brief SingleInstanceGuardを構築する
+     * @param parent Qt親オブジェクト
+     */
+    explicit SingleInstanceGuard(QObject *parent = nullptr);
+
+    /**
+     * @brief SingleInstanceGuardを破棄する
+     */
+    ~SingleInstanceGuard() override;
 
     /**
      * @brief プライマリインスタンスの取得を試みる
@@ -57,18 +90,23 @@ public:
      *
      * @return プライマリ取得成功時: true、既存インスタンスあり: false
      */
-    bool tryAcquire(); // プライマリインスタンス取得を試みる
+    bool tryAcquire();
 
 signals:
     /**
-     * @brief 別プロセスからの起動要求を受信したときに発火
+     * @brief 別プロセスからの起動要求を受信したときに発火する
      *
      * main.cppでルートウィンドウのshow() / raise() / requestActivate()に接続することを想定している
      */
-    void raiseRequested();  // 起動要求受信時に発行する
+    void raiseRequested();
 
 private slots:
-    void onNewConnection(); // 新規接続を処理する
+    /**
+     * @brief 新規接続を処理する
+     *
+     * 同一UIDの接続であることを確認したうえで、raise要求を発行する
+     */
+    void onNewConnection();
 };
 
 #endif // SINGLEINSTANCEGUARD_H

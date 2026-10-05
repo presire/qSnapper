@@ -1,11 +1,14 @@
-// tst_recordsafety.cpp
-//
-// isRecordSafeText()の単体テスト
-// 契約の詳細は、src/dbusservice/inputvalidator.hを参照
-//
-// 対象の脆弱性: D-Busサービスの変更一覧 (GetFileChanges系) とスナップショット一覧 (ListSnapshots系) はいずれも改行区切りのレコード列である
-// パスやdescriptionに改行を混入できると1エントリが複数行に割れ、2行目以降が攻撃者の選んだ内容を持つ
-// 独立レコードとしてクライアントに解釈される
+/**
+ * @file tst_recordsafety.cpp
+ * @brief isRecordSafeText() と sanitizeRecordText() の単体テスト
+ *
+ * 契約の詳細は src/dbusservice/inputvalidator.h を参照する
+ *
+ * 対象の脆弱性: D-Busサービスの変更一覧 (GetFileChanges系) とスナップショット一覧 (ListSnapshots系) は
+ * いずれも改行区切りのレコード列である
+ * パスやdescriptionに改行を混入できると1エントリが複数行に割れ、2行目以降が攻撃者の選んだ内容を持つ
+ * 独立レコードとしてクライアントに解釈される
+ */
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -15,25 +18,47 @@
 using qsnapper::security::isRecordSafeText;
 using qsnapper::security::sanitizeRecordText;
 
+/**
+ * @class TestRecordSafety
+ * @brief 行指向レコードの安全判定とサニタイズの挙動を確認するテストスイート
+ *
+ * 改行や制御文字がレコード境界を壊さないこと、および sanitizeRecordText() が
+ * 制御文字を置換してレコードを保つことを確認する
+ */
 class TestRecordSafety : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief 安全と判定されるべき入力のデータ行を定義する */
     void accept_data();
+    /** @brief 安全な入力が受け入れられることを確認する */
     void accept();
 
+    /** @brief 危険と判定されるべき入力のデータ行を定義する */
     void reject_data();
+    /** @brief 危険な入力が拒否されることを確認する */
     void reject();
 
+    /** @brief carrierパスがファイル変更レコードを分割することを実際の連結手順で示す */
     void carrierPathSplitsFileChangeRecord();
+    /** @brief 改行入りdescriptionがスナップショットレコードを分割することを示す */
     void carrierDescriptionSplitsSnapshotRecord();
 
+    /** @brief sanitizeRecordText() の入力と期待結果のデータ行を定義する */
     void sanitizeReplacesControlCharacters_data();
+    /** @brief サニタイズが制御文字を置換文字に置き換えることを確認する */
     void sanitizeReplacesControlCharacters();
+    /** @brief サニタイズ後のdescriptionが偽のスナップショット行を生まないことを確認する */
     void sanitizedDescriptionKeepsSnapshotRecord();
 };
 
+/**
+ * @brief isRecordSafeText() が受け入れるべき値を定義する
+ *
+ * 通常パス、空白入りパス、末尾空白、空値、マルチバイト文字、カンマ、等号
+ * U+2028 と U+2029 を含む
+ */
 void TestRecordSafety::accept_data()
 {
     QTest::addColumn<QString>("value");
@@ -75,6 +100,9 @@ void TestRecordSafety::accept_data()
         << (QStringLiteral("/etc/host") + QChar(0x2029) + QStringLiteral("s"));
 }
 
+/**
+ * @brief isRecordSafeText() が安全な値を受け入れることを確認する
+ */
 void TestRecordSafety::accept()
 {
     QFETCH(QString, value);
@@ -82,6 +110,12 @@ void TestRecordSafety::accept()
              qPrintable(QStringLiteral("expected accept: %1").arg(value)));
 }
 
+/**
+ * @brief isRecordSafeText() が拒否すべき値を定義する
+ *
+ * LF、CR、CRLF、NUL、タブ、ESC、DEL、C1制御文字、偽のスナップショット行を
+ * 生む改行入り入力を含む
+ */
 void TestRecordSafety::reject_data()
 {
     QTest::addColumn<QString>("value");
@@ -138,6 +172,9 @@ void TestRecordSafety::reject_data()
         << QStringLiteral("newline forges a whole snapshot row with an attacker-chosen number");
 }
 
+/**
+ * @brief isRecordSafeText() が危険な値を拒否することを確認する
+ */
 void TestRecordSafety::reject()
 {
     QFETCH(QString, value);
@@ -201,6 +238,11 @@ void TestRecordSafety::carrierDescriptionSplitsSnapshotRecord()
     QVERIFY(!isRecordSafeText(forgedDescription));
 }
 
+/**
+ * @brief sanitizeRecordText() の入力と期待結果を定義する
+ *
+ * 通常文字列、空文字列、LF、CRLF、NUL、DEL、C1 NEL、非ASCII文字を含む
+ */
 void TestRecordSafety::sanitizeReplacesControlCharacters_data()
 {
     QTest::addColumn<QString>("value");
@@ -218,6 +260,11 @@ void TestRecordSafety::sanitizeReplacesControlCharacters_data()
     QTest::newRow("non-ASCII kept") << QStringLiteral("更新前 é") << QStringLiteral("更新前 é");
 }
 
+/**
+ * @brief sanitizeRecordText() が制御文字を置換文字に置き換えることを確認する
+ *
+ * 文字数が変わらず、サニタイズ後の値がisRecordSafeText()を満たすことも確認する
+ */
 void TestRecordSafety::sanitizeReplacesControlCharacters()
 {
     QFETCH(QString, value);
@@ -231,6 +278,8 @@ void TestRecordSafety::sanitizeReplacesControlCharacters()
 
 /**
  * @brief 置き換えた後のdescriptionは偽のスナップショット行を生まないことを示す
+ *
+ * sanitizeRecordText() を通すとレコード数が header + 本物1行 の2行のままであることを確認する
  */
 void TestRecordSafety::sanitizedDescriptionKeepsSnapshotRecord()
 {

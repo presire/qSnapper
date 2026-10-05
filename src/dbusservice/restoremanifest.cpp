@@ -1,3 +1,11 @@
+/**
+ * @file restoremanifest.cpp
+ * @brief restoremanifest.hとrestoremanifestregistry.h宣言の実装
+ *
+ * 状態遷移は単調にだけ進み、終端後は変更しない
+ * 上限の判定は変更前に行い、拒否時は計画を一切変化させない
+ */
+
 #include <QDateTime>
 #include <QUuid>
 #include <algorithm>

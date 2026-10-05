@@ -1,7 +1,10 @@
-// tst_comparisoncache.cpp
-// ComparisonCache<T> の単体テスト。
-// Fake型とFakeファクトリを用いて、キャッシュ契約 (再利用・リフレッシュ・
-// キー分離・方向性・クリア・例外安全性) を検証する。
+/**
+ * @file tst_comparisoncache.cpp
+ * @brief ComparisonCache<T> の単体テスト
+ *
+ * Fake型とFakeファクトリを用いて、キャッシュ契約 (再利用・リフレッシュ・
+ * キー分離・方向性・クリア・例外安全性) を検証する
+ */
 
 #include <QtTest/QtTest>
 #include <QString>
@@ -13,29 +16,43 @@
 
 namespace {
 
-// Fake型: 生成回数・破棄回数を静的カウンタで追跡する
+/**
+ * @struct FakeComparison
+ * @brief 生成回数と破棄回数を静的カウンタで追跡するテスト用型
+ *
+ * キャッシュがエントリを再利用したか新規構築したか、破棄したかを
+ * カウンタの増減で判定するために使う
+ */
 struct FakeComparison {
-    static int s_constructCount;
-    static int s_destroyCount;
+    static int s_constructCount;  // 生成回数の累計
+    static int s_destroyCount;    // 破棄回数の累計
+    /** @brief 生成回数と破棄回数のカウンタを0に戻す */
     static void resetCounters()
     {
         s_constructCount = 0;
         s_destroyCount = 0;
     }
 
-    int id;
+    int id;  // インスタンス識別子
 
+    /**
+     * @brief 識別子を指定して生成し生成カウンタを増やす
+     * @param id_ このインスタンスの識別子
+     */
     explicit FakeComparison(int id_) : id(id_)
     {
         ++s_constructCount;
     }
 
+    /** @brief 破棄時に破棄カウンタを増やす */
     ~FakeComparison()
     {
         ++s_destroyCount;
     }
 
+    /** @brief コピー構築を禁止する */
     FakeComparison(const FakeComparison &) = delete;
+    /** @brief コピー代入を禁止する */
     FakeComparison &operator=(const FakeComparison &) = delete;
 };
 
@@ -44,52 +61,69 @@ int FakeComparison::s_destroyCount = 0;
 
 } // namespace
 
+/**
+ * @class TestComparisonCache
+ * @brief ComparisonCache<T> のキャッシュ契約を確認するテストスイート
+ *
+ * 再利用・リフレッシュ・キー分離・方向性・クリア・例外安全性の各契約を
+ * FakeComparison のカウンタで確認する
+ */
 class TestComparisonCache : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief テストケース開始時にFake型のカウンタを初期化する */
     void initTestCase();
 
-    // Reuse: 同一キーで2回目はファクトリを呼ばず再利用する
+    /** @brief 同一キーで2回目はファクトリを呼ばず再利用することを確認する */
     void reuseSkipsFactoryOnSecondCall();
 
-    // Reuse: 異なるキーだとファクトリを呼び直す
+    /** @brief 異なるキーだとファクトリを呼び直すことを確認する */
     void reuseRebuildsOnKeyMismatch();
 
-    // Refresh: 同一キーでも必ず新規構築する
+    /** @brief 同一キーでもRefreshは必ず新規構築することを確認する */
     void refreshAlwaysRebuilds();
 
-    // Refreshでファクトリ例外時にキャッシュが空になる
+    /** @brief Refreshでファクトリ例外時にキャッシュが空になることを確認する */
     void refreshLeavesEmptyOnFactoryThrow();
 
-    // Reuseでファクトリ例外時にキャッシュが空になる
+    /** @brief Reuseでファクトリ例外時にキャッシュが空になることを確認する */
     void reuseLeavesEmptyOnFactoryThrow();
 
-    // キー分離: config・first・secondの各次元が区別される
+    /** @brief キーのconfig次元が区別されることを確認する */
     void keyDistinguishesConfig();
+    /** @brief キーのfirst次元が区別されることを確認する */
     void keyDistinguishesFirst();
+    /** @brief キーのsecond次元が区別されることを確認する */
     void keyDistinguishesSecond();
+    /** @brief single (second=nullopt) とbetween (secondあり) が区別されることを確認する */
     void keyDistinguishesSingleVsBetween();
 
-    // 方向性: (config,1,2)と(config,2,1)は別キー
+    /** @brief キーが方向性を持ち (config,1,2) と (config,2,1) が別キーになることを確認する */
     void keyIsDirectional();
 
-    // hasKeyの契約
+    /** @brief hasKey() がキャッシュの状態を正しく反映することを確認する */
     void hasKeyReflectsState();
 
-    // clear: エントリ破棄
+    /** @brief clear() がエントリを破棄することを確認する */
     void clearDestroysEntry();
 
-    // デストラクタ: キャッシュ破棄時にエントリも破棄
+    /** @brief デストラクタがキャッシュ破棄時にエントリも破棄することを確認する */
     void destructionReleasesEntry();
 };
 
+/**
+ * @brief テストケース開始時にFake型のカウンタを初期化する
+ */
 void TestComparisonCache::initTestCase()
 {
     FakeComparison::resetCounters();
 }
 
+/**
+ * @brief 同一キーで2回目はファクトリを呼ばず再利用することを確認する
+ */
 void TestComparisonCache::reuseSkipsFactoryOnSecondCall()
 {
     FakeComparison::resetCounters();
@@ -112,6 +146,9 @@ void TestComparisonCache::reuseSkipsFactoryOnSecondCall()
     QCOMPARE(FakeComparison::s_constructCount, 1);
 }
 
+/**
+ * @brief 異なるキーだとファクトリを呼び直すことを確認する
+ */
 void TestComparisonCache::reuseRebuildsOnKeyMismatch()
 {
     FakeComparison::resetCounters();
@@ -135,6 +172,9 @@ void TestComparisonCache::reuseRebuildsOnKeyMismatch()
     QVERIFY(FakeComparison::s_destroyCount >= 1);
 }
 
+/**
+ * @brief 同一キーでもRefreshは必ず新規構築することを確認する
+ */
 void TestComparisonCache::refreshAlwaysRebuilds()
 {
     FakeComparison::resetCounters();
@@ -156,6 +196,11 @@ void TestComparisonCache::refreshAlwaysRebuilds()
     QVERIFY(FakeComparison::s_destroyCount >= 1);
 }
 
+/**
+ * @brief Refreshでファクトリ例外時にキャッシュが空になることを確認する
+ *
+ * 古いエントリは破棄済みであり、例外後にhasKey()がfalseになることを確認する
+ */
 void TestComparisonCache::refreshLeavesEmptyOnFactoryThrow()
 {
     FakeComparison::resetCounters();
@@ -189,6 +234,11 @@ void TestComparisonCache::refreshLeavesEmptyOnFactoryThrow()
     QCOMPARE(FakeComparison::s_destroyCount, 1);
 }
 
+/**
+ * @brief Reuseでファクトリ例外時にキャッシュが空になることを確認する
+ *
+ * 最初は空なのでReuseでもファクトリが呼ばれ、例外後にhasKey()がfalseになることを確認する
+ */
 void TestComparisonCache::reuseLeavesEmptyOnFactoryThrow()
 {
     FakeComparison::resetCounters();
@@ -214,6 +264,9 @@ void TestComparisonCache::reuseLeavesEmptyOnFactoryThrow()
     QVERIFY(!cache.hasKey(key));
 }
 
+/**
+ * @brief キーのconfig次元が区別されることを確認する
+ */
 void TestComparisonCache::keyDistinguishesConfig()
 {
     FakeComparison::resetCounters();
@@ -236,6 +289,9 @@ void TestComparisonCache::keyDistinguishesConfig()
     QCOMPARE(FakeComparison::s_constructCount, 2);
 }
 
+/**
+ * @brief キーのfirst次元が区別されることを確認する
+ */
 void TestComparisonCache::keyDistinguishesFirst()
 {
     FakeComparison::resetCounters();
@@ -257,6 +313,9 @@ void TestComparisonCache::keyDistinguishesFirst()
     QVERIFY(cache.hasKey(key2));
 }
 
+/**
+ * @brief キーのsecond次元が区別されることを確認する
+ */
 void TestComparisonCache::keyDistinguishesSecond()
 {
     FakeComparison::resetCounters();
@@ -278,6 +337,9 @@ void TestComparisonCache::keyDistinguishesSecond()
     QVERIFY(cache.hasKey(key2));
 }
 
+/**
+ * @brief single (second=nullopt) とbetween (secondあり) が区別されることを確認する
+ */
 void TestComparisonCache::keyDistinguishesSingleVsBetween()
 {
     FakeComparison::resetCounters();
@@ -302,6 +364,9 @@ void TestComparisonCache::keyDistinguishesSingleVsBetween()
     QCOMPARE(FakeComparison::s_constructCount, 2);
 }
 
+/**
+ * @brief キーが方向性を持ち (config,1,2) と (config,2,1) が別キーになることを確認する
+ */
 void TestComparisonCache::keyIsDirectional()
 {
     FakeComparison::resetCounters();
@@ -324,6 +389,11 @@ void TestComparisonCache::keyIsDirectional()
     QCOMPARE(FakeComparison::s_constructCount, 2);
 }
 
+/**
+ * @brief hasKey() がキャッシュの状態を正しく反映することを確認する
+ *
+ * 空のキャッシュ・構築後・クリア後の各状態を確認する
+ */
 void TestComparisonCache::hasKeyReflectsState()
 {
     FakeComparison::resetCounters();
@@ -347,6 +417,11 @@ void TestComparisonCache::hasKeyReflectsState()
     QVERIFY(!cache.hasKey(key));
 }
 
+/**
+ * @brief clear() がエントリを破棄することを確認する
+ *
+ * クリア後にReuseで再構築できることも確認する
+ */
 void TestComparisonCache::clearDestroysEntry()
 {
     FakeComparison::resetCounters();
@@ -371,6 +446,9 @@ void TestComparisonCache::clearDestroysEntry()
     QCOMPARE(FakeComparison::s_constructCount, 2);
 }
 
+/**
+ * @brief デストラクタがキャッシュ破棄時にエントリも破棄することを確認する
+ */
 void TestComparisonCache::destructionReleasesEntry()
 {
     FakeComparison::resetCounters();

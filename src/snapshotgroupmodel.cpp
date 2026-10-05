@@ -1,3 +1,8 @@
+/**
+ * @file snapshotgroupmodel.cpp
+ * @brief Pre/Postペアのグループ化モデルの実装
+ */
+
 #include "snapshotgroupmodel.h"
 #include "snapshotlistmodel.h"
 #include <QHash>
@@ -213,15 +218,19 @@ void SnapshotGroupModel::rebuild()
     }
 
     // 全スナップショットのデータを収集
+    /**
+     * @struct RawSnapshot
+     * @brief ソースモデルから取り出した1件分の生データ
+     */
     struct RawSnapshot {
-        int number;
-        QString typeString;
-        int previousNumber;
-        QDateTime timestamp;
-        QString user;
-        QString description;
-        QVariantMap userdata;
-        QString cleanupAlgoString;
+        int number;                 // スナップショット番号
+        QString typeString;         // 種別文字列 (single/pre/post)
+        int previousNumber;         // 紐付け元番号
+        QDateTime timestamp;        // 作成日時
+        QString user;               // 作成ユーザ
+        QString description;        // 説明文
+        QVariantMap userdata;       // ユーザデータ
+        QString cleanupAlgoString;  // クリーンアップアルゴリズム文字列
     };
 
     QList<RawSnapshot> snapshots;

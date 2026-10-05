@@ -1,3 +1,11 @@
+/**
+ * @file tst_restoremanifest.cpp
+ * @brief RestoreManifest と RestoreManifestRegistry の状態機械・上限・TTLの単体テスト
+ *
+ * manifest単体の状態遷移、registryのowner境界、容量予算 (owner/UID/global)、
+ * TTL回収とkeepAlive、終了計画storeの保持契約を確認する
+ */
+
 #include <QHash>
 #include <QTest>
 #include <functional>
@@ -7,8 +15,13 @@ using namespace qsnapper::restore;
 
 namespace {
 
-constexpr qint64 kInitialTimeMs = 1000;
+constexpr qint64 kInitialTimeMs = 1000;  // テスト開始時刻(ms)
 
+/**
+ * @brief ManifestErrorをQCOMPARE可能な整数へ変換する
+ * @param error 変換するエラー
+ * @return 列挙値に対応する整数
+ */
 int errorValue(ManifestError error)
 {
     return static_cast<int>(error);
@@ -35,6 +48,16 @@ uint uidForOwner(const QString &owner)
     return uid;
 }
 
+/**
+ * @brief 既定値でregistryにmanifestを作成する補助
+ * @param registry 使用するregistry
+ * @param owner 計画owner (既定は:1.1)
+ * @param mode 復元モード
+ * @param configName 設定名
+ * @param snapshotNumber snapshot番号
+ * @param counterpartSnapshotNumber 比較相手snapshot番号
+ * @return 成功時manifest id
+ */
 QString createManifest(RestoreManifestRegistry &registry,
                        const QString &owner = QStringLiteral(":1.1"),
                        RestoreMode mode = RestoreMode::YastCompatible,
@@ -48,6 +71,13 @@ QString createManifest(RestoreManifestRegistry &registry,
                                   mode, &error);
 }
 
+/**
+ * @brief 単一のmodifiedエントリをstageする補助
+ * @param registry 使用するregistry
+ * @param id 対象manifest id
+ * @param owner 計画owner (既定は:1.1)
+ * @return stageに成功した場合true
+ */
 bool stageOne(RestoreManifestRegistry &registry, const QString &id,
               const QString &owner = QStringLiteral(":1.1"))
 {
@@ -59,39 +89,72 @@ bool stageOne(RestoreManifestRegistry &registry, const QString &id,
 
 } // namespace
 
+/**
+ * @class TestRestoreManifest
+ * @brief RestoreManifest と RestoreManifestRegistry の契約を確認するテストスイート
+ */
 class TestRestoreManifest : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief freeze後のappendEntriesがWrongStateで拒否されエントリ数が増えないことを確認する */
     void appendAfterFreezeIsRejectedWithoutGrowth();
+    /** @brief freeze済みのentry対が置換されず内容が保たれることを確認する */
     void frozenPairsCannotBeReplaced();
+    /** @brief 別ownerからのadvanceがOwnerMismatchで拒否されcursorと状態が動かないことを確認する */
     void crossOwnerAdvanceIsRejectedWithoutMovement();
+    /** @brief owner対象の各操作が別ownerでOwnerMismatchとなり対象manifestの状態も変わらないことを確認する */
     void everyOwnerScopedOperationRejectsWrongOwner();
+    /** @brief TTL超過時の各制御操作がExpiredを返し当該manifestを破棄することを確認する */
     void everyControlOperationDropsExpiredManifest();
+    /** @brief Completed計画へのmarkRunning/advance/cancel/markFailed replayが拒否されることを確認する */
     void completedManifestRejectsReplay();
+    /** @brief Cancelled/Failed計画への各種replayが拒否され状態が保たれることを確認する */
     void cancelledAndFailedManifestsRejectReplay();
+    /** @brief markRunningの2回目がWrongStateで拒否され状態が保たれることを確認する */
     void markRunningTwiceIsRejected();
+    /** @brief removeByOwnerが一致ownerの計画だけを削除することを確認する */
     void removeByOwnerRemovesOnlyMatchingManifests();
+    /** @brief 1 chunk上限を超えるstageEntriesがCapacityExceededで原子的に拒否されることを確認する */
     void oversizedStageChunkIsAtomic();
+    /** @brief entry数上限を超えるstageが原子的に拒否され既存entryが保たれることを確認する */
     void entryCapacityExcessIsAtomic();
+    /** @brief path byte上限を超えるstageが原子的に拒否され既存entryが保たれることを確認する */
     void pathByteCapacityExcessIsAtomic();
+    /** @brief owner単位とグローバルのマニフェスト数上限が効き超過分だけ拒否されることを確認する */
     void registryManifestLimitsAreEnforced();
+    /** @brief staging予算がregistry全体で閉じており接続数で掛け算できないことを確認する */
     void stagingBudgetIsGlobalNotPerConnection();
+    /** @brief 同じUIDの複数ownerがUID単位の上限を合算で超えられないことを確認する */
     void stagingBudgetIsBoundPerUid();
+    /** @brief 複数chunkに分けたstageでもentriesSliceが元の順序を保つことを確認する */
     void entriesPreserveOrderAcrossChunks();
+    /** @brief advanceCursorが範囲外をInvalidArgumentで拒否し境界でCompletedへ遷移することを確認する */
     void cursorBoundsAndCompletionAreEnforced();
+    /** @brief 生成されるmanifest idが不透明かつ衝突しないことを確認する */
     void generatedIdsAreOpaqueAndUnique();
+    /** @brief freeze後のstatusがmode・configName・snapshotNumberを保持することを確認する */
     void frozenStatusPreservesManifestMetadata();
+    /** @brief counterpartが不変に保持されgetterとManifestStatusの全経路で反映されることを確認する */
     void counterpartSnapshotIsImmutableAndSurfaced();
+    /** @brief 空entry列・埋め込みNUL・過長pathなどが原子的に扱われることを確認する */
     void malformedAndEdgeInputIsHandledAtomically();
+    /** @brief Frozen manifestへのregistry経由stageが原子的に拒否されることを確認する */
     void stageOnFrozenManifestIsRejectedWithoutGrowth();
+    /** @brief 欠落・誤owner・失効がAPI境界で同一エラーへ集約される前提でregistry内部の区別を確認する */
     void errorCodesForMissingWrongOwnerAndExpiredAreIndistinguishableAtTheApiBoundary();
+    /** @brief keepAliveがownerと失効を確認した上でTTLのみ延長し状態を変えないことを確認する */
     void keepAliveExtendsTtlWithoutMutatingState();
+    /** @brief 終了計画のstatusがownerに束縛され保持期間経過で消えることを確認する */
     void finishedPlanStatusIsOwnerBoundAndExpires();
+    /** @brief 終了計画storeが上限で古い順に破棄されowner切断で該当分だけ消えることを確認する */
     void finishedPlanStoreIsBoundedAndClearedPerOwner();
 };
 
+/**
+ * @brief freeze後のappendEntriesがWrongStateで拒否されエントリ数が増えないことを検証する
+ */
 void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
 {
     RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
@@ -110,6 +173,9 @@ void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
     QCOMPARE(manifest.totalEntries(), countBefore);
 }
 
+/**
+ * @brief freeze済みのentry対が置換されず内容が保たれることを検証する
+ */
 void TestRestoreManifest::frozenPairsCannotBeReplaced()
 {
     RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
@@ -143,6 +209,9 @@ void TestRestoreManifest::frozenPairsCannotBeReplaced()
     }
 }
 
+/**
+ * @brief 別ownerからのadvanceがOwnerMismatchで拒否されcursorと状態が動かないことを検証する
+ */
 void TestRestoreManifest::crossOwnerAdvanceIsRejectedWithoutMovement()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -166,6 +235,9 @@ void TestRestoreManifest::crossOwnerAdvanceIsRejectedWithoutMovement()
     QCOMPARE(after->state, ManifestState::Running);
 }
 
+/**
+ * @brief owner対象の各操作が別ownerでOwnerMismatchとなり、対象manifestの状態も変わらないことを検証する
+ */
 void TestRestoreManifest::everyOwnerScopedOperationRejectsWrongOwner()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -203,6 +275,9 @@ void TestRestoreManifest::everyOwnerScopedOperationRejectsWrongOwner()
     QCOMPARE(after->cursor, before->cursor);
 }
 
+/**
+ * @brief TTL超過時の各制御操作がExpiredを返し当該manifestを破棄することを検証する
+ */
 void TestRestoreManifest::everyControlOperationDropsExpiredManifest()
 {
     using ExpiredCall = std::function<bool(RestoreManifestRegistry &, const QString &, ManifestError *)>;
@@ -300,6 +375,9 @@ void TestRestoreManifest::everyControlOperationDropsExpiredManifest()
     QCOMPARE(errorValue(error), errorValue(ManifestError::Expired));
 }
 
+/**
+ * @brief Completed計画へのmarkRunning/advance/cancel/markFailed replayが拒否されることを検証する
+ */
 void TestRestoreManifest::completedManifestRejectsReplay()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -330,6 +408,9 @@ void TestRestoreManifest::completedManifestRejectsReplay()
     QCOMPARE(after->cursor, completed->cursor);
 }
 
+/**
+ * @brief Cancelled/Failed計画への各種replayが拒否され状態が保たれることを検証する
+ */
 void TestRestoreManifest::cancelledAndFailedManifestsRejectReplay()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -371,6 +452,9 @@ void TestRestoreManifest::cancelledAndFailedManifestsRejectReplay()
     }
 }
 
+/**
+ * @brief markRunningの2回目がWrongStateで拒否され状態が保たれることを検証する
+ */
 void TestRestoreManifest::markRunningTwiceIsRejected()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -390,6 +474,9 @@ void TestRestoreManifest::markRunningTwiceIsRejected()
     QCOMPARE(status->cursor, 0);
 }
 
+/**
+ * @brief removeByOwnerが一致ownerの計画だけを削除することを検証する
+ */
 void TestRestoreManifest::removeByOwnerRemovesOnlyMatchingManifests()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -415,6 +502,9 @@ void TestRestoreManifest::removeByOwnerRemovesOnlyMatchingManifests()
     QVERIFY(registry.status(survivor, QStringLiteral(":1.2"), &error).has_value());
 }
 
+/**
+ * @brief 1 chunk上限を超えるstageEntriesがCapacityExceededで原子的に拒否されることを検証する
+ */
 void TestRestoreManifest::oversizedStageChunkIsAtomic()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -438,6 +528,9 @@ void TestRestoreManifest::oversizedStageChunkIsAtomic()
     QCOMPARE(status->totalEntries, 0);
 }
 
+/**
+ * @brief entry数上限を超えるstageが原子的に拒否され既存entryが保たれることを検証する
+ */
 void TestRestoreManifest::entryCapacityExcessIsAtomic()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -465,6 +558,9 @@ void TestRestoreManifest::entryCapacityExcessIsAtomic()
     }
 }
 
+/**
+ * @brief path byte上限を超えるstageが原子的に拒否され既存entryが保たれることを検証する
+ */
 void TestRestoreManifest::pathByteCapacityExcessIsAtomic()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -492,6 +588,9 @@ void TestRestoreManifest::pathByteCapacityExcessIsAtomic()
     QCOMPARE(entries->first().path, QStringLiteral("/one"));
 }
 
+/**
+ * @brief owner単位とグローバルのマニフェスト数上限が効き超過分だけ拒否されることを検証する
+ */
 void TestRestoreManifest::registryManifestLimitsAreEnforced()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -790,6 +889,9 @@ void TestRestoreManifest::stagingBudgetIsBoundPerUid()
             >= RestoreManifestRegistry::kMaxPathBytesPerManifest);
 }
 
+/**
+ * @brief 複数chunkに分けたstageでもentriesSliceが元の順序を保つことを検証する
+ */
 void TestRestoreManifest::entriesPreserveOrderAcrossChunks()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -818,6 +920,9 @@ void TestRestoreManifest::entriesPreserveOrderAcrossChunks()
     QCOMPARE(slice->at(2).changeType, QStringLiteral("typechanged"));
 }
 
+/**
+ * @brief advanceCursorが範囲外をInvalidArgumentで拒否し境界でCompletedへ遷移することを検証する
+ */
 void TestRestoreManifest::cursorBoundsAndCompletionAreEnforced()
 {
     RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
@@ -847,6 +952,9 @@ void TestRestoreManifest::cursorBoundsAndCompletionAreEnforced()
     QVERIFY(manifest.isTerminal());
 }
 
+/**
+ * @brief 生成されるmanifest idが不透明かつ衝突しないことを検証する
+ */
 void TestRestoreManifest::generatedIdsAreOpaqueAndUnique()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -866,6 +974,9 @@ void TestRestoreManifest::generatedIdsAreOpaqueAndUnique()
     QVERIFY(!secondIsInteger);
 }
 
+/**
+ * @brief freeze後のstatusがmode・configName・snapshotNumberを保持することを検証する
+ */
 void TestRestoreManifest::frozenStatusPreservesManifestMetadata()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -943,6 +1054,9 @@ void TestRestoreManifest::counterpartSnapshotIsImmutableAndSurfaced()
     QCOMPARE(betweenStatus->counterpartSnapshotNumber, 101);
 }
 
+/**
+ * @brief 空entry列・埋め込みNUL・過長pathなどが原子的に扱われることを検証する
+ */
 void TestRestoreManifest::malformedAndEdgeInputIsHandledAtomically()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -1036,9 +1150,9 @@ void TestRestoreManifest::stageOnFrozenManifestIsRejectedWithoutGrowth()
  * NotFound / OwnerMismatch / Expiredをすべて同一のD-Bus AccessDenied "Restore plan access denied" へ集約する (情報漏洩防止)
  *
  * しかし、registry層ではこの3種は明確に異なるManifestErrorとして区別され、
- * どの経路でも「無関係なマニフェストの状態」および「対象マニフェスト自身の呼び出し前状態」は変更されない。
+ * どの経路でも「無関係なマニフェストの状態」および「対象マニフェスト自身の呼び出し前状態」は変更されない
  *
- * 本テストはその不変条件を検証する。
+ * 本テストはその不変条件を検証する
  */
 void TestRestoreManifest::errorCodesForMissingWrongOwnerAndExpiredAreIndistinguishableAtTheApiBoundary()
 {
@@ -1203,6 +1317,9 @@ void TestRestoreManifest::keepAliveExtendsTtlWithoutMutatingState()
     QCOMPARE(stillAlive->state, beforeKeepAlive->state);
 }
 
+/**
+ * @brief 終了計画のstatusがownerに束縛され保持期間経過で消えることを検証する
+ */
 void TestRestoreManifest::finishedPlanStatusIsOwnerBoundAndExpires()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -1240,6 +1357,9 @@ void TestRestoreManifest::finishedPlanStatusIsOwnerBoundAndExpires()
     QCOMPARE(store.count(), 0);
 }
 
+/**
+ * @brief 終了計画storeが上限で古い順に破棄されowner切断で該当分だけ消えることを検証する
+ */
 void TestRestoreManifest::finishedPlanStoreIsBoundedAndClearedPerOwner()
 {
     qint64 nowMs = kInitialTimeMs;

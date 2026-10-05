@@ -1,8 +1,10 @@
-// tst_singleinstanceguard.cpp
-//
-// SingleInstanceGuardの単体テスト
-// ソケットとlock fileがユーザ専用のruntimeディレクトリに置かれること、
-// runtimeディレクトリを使えない場合に共有の/tmpへフォールバックしないことを確認する
+/**
+ * @file tst_singleinstanceguard.cpp
+ * @brief SingleInstanceGuardの単体テスト
+ *
+ * ソケットとlock fileがユーザ専用のruntimeディレクトリに置かれること、
+ * runtimeディレクトリを使えない場合に共有の/tmpへフォールバックしないことを確認する
+ */
 
 #include <QtTest/QtTest>
 #include <QFileInfo>
@@ -17,6 +19,7 @@
 #include "singleinstanceguard.h"
 
 /**
+ * @class TestSingleInstanceGuard
  * @brief SingleInstanceGuardの単体テスト
  */
 class TestSingleInstanceGuard : public QObject
@@ -32,10 +35,10 @@ private slots:
     void guardIsDisabledWithoutPrivateRuntimeDirectory();
 
 private:
-    QByteArray m_savedRuntimeDir;
-    bool m_hadRuntimeDir = false;
-    QByteArray m_savedTmpDir;
-    bool m_hadTmpDir = false;
+    QByteArray m_savedRuntimeDir;       // 退避したXDG_RUNTIME_DIRの値
+    bool m_hadRuntimeDir = false;       // XDG_RUNTIME_DIRが設定されていたか
+    QByteArray m_savedTmpDir;           // 退避したTMPDIRの値
+    bool m_hadTmpDir = false;           // TMPDIRが設定されていたか
 };
 
 /**

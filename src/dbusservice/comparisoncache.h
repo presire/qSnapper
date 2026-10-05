@@ -1,46 +1,55 @@
-#ifndef COMPARISONCACHE_H
-#define COMPARISONCACHE_H
+/**
+ * @file comparisoncache.h
+ * @brief libsnapper比較結果の単一エントリ保持キャッシュ
+ *
+ * D-Busサービスの単一Qtイベントループスレッドから使う非スレッドセーフな保持器である
+ * 保持できるのは高々1件であり、方向付きのスナップショット対を鍵とする
+ */
+
+#ifndef QSNAPPER_COMPARISONCACHE_H
+#define QSNAPPER_COMPARISONCACHE_H
 
 #include <memory>
 #include <optional>
 #include <QString>
 
 /**
- * @brief Single-entry, non-thread-safe cache for a libsnapper Comparison.
+ * @class ComparisonCache
+ * @brief libsnapper比較結果を高々1件だけ保持するキャッシュ
  *
- * Stores at most one T, keyed by a directional (config, first, optional second)
- * snapshot pair. Designed for the qSnapper D-Bus service's single Qt event-loop
- * thread — not safe for concurrent use.
+ * 方向付きの (設定名、先頭、任意の後続) スナップショット対を鍵とする
+ * qSnapper D-Busサービスの単一Qtイベントループスレッド専用であり、並行利用は安全でない
  *
- * The cached entry is owned via std::unique_ptr. Callers receive a raw T* that
- * remains valid only until the next cache operation (get with a different key
- * or Refresh policy, clear, or cache destruction).
+ * 保持した要素は std::unique_ptr で所有し、呼び出し側へ渡す生ポインタは
+ * 次のcache操作 (別鍵でのget、Refresh指定のget、clear、cache破棄) まで有効である
  *
- * Lifetime contract:
- *   - m_snapper must be declared before the cache in the owning class so that
- *     the cache (and its Comparison) is destroyed before the Snapper.
- *   - The cache must be cleared before any Snapper replacement or
- *     snapshot/current-system mutation.
+ * 存続契約:
+ *   - 所有側クラスでは m_snapper より後にcacheを宣言すること
+ *     破棄順により cache (と比較結果) が Snapper より先に破棄される
+ *   - Snapperの置き換えやスナップショットと現システムの変更の前にcacheをclearすること
+ *
+ * m_key : 現在保持している要素の方向付き鍵 (空なら未保持)
+ * m_entry : 現在保持している要素の所有権
  */
 template <typename T>
 class ComparisonCache
 {
 public:
     /**
-     * @brief Directional cache key.
+     * @class Key
+     * @brief 比較結果の方向付きcache鍵
      *
-     * @var config  Normalized Snapper config name.
-     * @var first   First (source) snapshot number.
-     * @var second  Second (target) snapshot number; nullopt denotes
-     *              a single-vs-current comparison.
+     * config : 正規化済みSnapper設定名
+     * first : 先頭 (比較元) スナップショット番号
+     * second : 後続 (比較先) スナップショット番号 (空なら現システムとの単一比較)
      *
-     * (config, 1, 2) and (config, 2, 1) are distinct keys.
-     * (config, 1, nullopt) and (config, 1, 2) are distinct keys.
+     * (設定、1、2) と (設定、2、1) は別鍵として扱う
+     * (設定、1、空) と (設定、1、2) は別鍵として扱う
      */
     struct Key {
-        QString config;
-        int first;
-        std::optional<int> second;
+        QString config;              // 正規化済みSnapper設定名
+        int first;                   // 先頭 (比較元) スナップショット番号
+        std::optional<int> second;   // 後続 (比較先) 番号 (空なら現システムとの比較)
 
         bool operator==(const Key &other) const
         {
@@ -51,28 +60,28 @@ public:
     };
 
     /**
-     * @brief Cache access policy.
+     * @class Policy
+     * @brief cache参照の方針
      *
-     * - Reuse:   Return the cached entry when the key matches; create only on miss.
-     * - Refresh: Always create a fresh entry, replacing any existing one.
+     * Reuse : 鍵一致で保持要素を返し、miss時のみ生成する
+     * Refresh : 常に新規生成し、既存要素を置き換える
      */
     enum class Policy {
-        Reuse,
-        Refresh
+        Reuse,   // 鍵一致で保持要素を返す
+        Refresh  // 常に新規生成して置き換える
     };
 
     /**
-     * @brief Return a cached or freshly-created entry.
+     * @brief 保持要素または新規生成要素を返す
      *
-     * @param key     Directional key.
-     * @param policy  Reuse or Refresh.
-     * @param factory Callable invoked on cache miss / refresh, returning
-     *               std::unique_ptr<T>. Not invoked on Reuse hit.
-     * @return Pointer to the entry (never null if factory returned non-null).
+     * @param key 方向付き鍵
+     * @param policy ReuseまたはRefresh
+     * @param factory miss時とrefresh時にだけ呼ぶ生成器 (std::unique_ptr<T> を返す)
+     *                Reuseのhit時は呼ばない
+     * @return 要素へのポインタ (生成器が非空を返した場合は非null)
      *
-     * Exception safety: if factory throws, the cache is left empty —
-     * the old entry is destroyed before the factory is called, so no stale
-     * entry survives a failed refresh.
+     * 例外安全性: 生成器が例外を投げた場合cacheは空のまま残る
+     * 生成前に古い要素を破棄するため、失敗したrefreshの古い要素が残らない
      */
     template <typename Factory>
     T *get(const Key &key, Policy policy, Factory &&factory)
@@ -80,7 +89,7 @@ public:
         if (policy == Policy::Reuse && m_key && *m_key == key && m_entry) {
             return m_entry.get();
         }
-        // Clear first so a factory exception leaves the cache empty.
+        // 先に破棄するため、生成器の例外時はcacheが空になる
         m_entry.reset();
         m_key.reset();
         m_entry = factory(key);
@@ -89,7 +98,9 @@ public:
     }
 
     /**
-     * @brief Whether the cache currently holds an entry matching key.
+     * @brief 鍵に一致する要素を保持しているか返す
+     * @param key 照合する方向付き鍵
+     * @return 鍵一致の要素を保持していればtrue
      */
     bool hasKey(const Key &key) const
     {
@@ -97,9 +108,9 @@ public:
     }
 
     /**
-     * @brief Invalidate the cache entry.
+     * @brief cache要素を無効化する
      *
-     * Destroys the stored T (which, for snapper::Comparison, unmounts snapshots).
+     * 保持したTを破棄する (snapper比較結果の場合はスナップショットをunmountする)
      */
     void clear()
     {
@@ -108,8 +119,8 @@ public:
     }
 
 private:
-    std::optional<Key> m_key;
-    std::unique_ptr<T> m_entry;
+    std::optional<Key> m_key;   // 現在保持している要素の方向付き鍵 (空なら未保持)
+    std::unique_ptr<T> m_entry; // 現在保持している要素の所有権
 };
 
-#endif // COMPARISONCACHE_H
+#endif // QSNAPPER_COMPARISONCACHE_H

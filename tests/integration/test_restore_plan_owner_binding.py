@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""test_restore_plan_owner_binding.py - isolated root D-Bus security scenario.
+"""
+@file test_restore_plan_owner_binding.py
+@brief 隔離したroot D-Bus上での復元計画の所有者拘束を検証する
 
-Proves that a second D-Bus sender (B) cannot continue, cancel, stage into, or
-enumerate the state of a staged restore plan owned and authorized by a first
-sender (A), on the private root D-Bus bus started by
-tests/integration/isolated_root_dbus_env.sh. Also proves the single-
-authorization guarantee: exactly one Polkit-equivalent authorization occurs
-for a multi-chunk restore plan, with no re-prompt during execution/cancel.
-Also proves that an over-capacity pre-freeze staging chunk (> the 5000-entry
-kMaxEntriesPerStageChunk limit) is rejected with InvalidArgs, stores ZERO
-entries, and triggers ZERO authorization calls.
+tests/integration/isolated_root_dbus_env.shが起動する専用root D-Busバス上で、
+2番目のD-Bus送信者 (B) が、1番目の送信者 (A) が所有し認可した段階的復元計画を
+継続、キャンセル、追加、または状態列挙できないことを証明する
+単一認可の保証 (複数チャンクの復元計画でPolkit相当の認可は正確に1回だけ発生し、
+実行中やキャンセル時に再プロンプトされない) も証明する
+容量超過の凍結前ステージングチャンク (kMaxEntriesPerStageChunkの5000件超) が
+InvalidArgsで拒否され、エントリを0件しか保存せず、認可呼び出しも0回であることも証明する
 
-Run only via tests/integration/run_isolated_restore_plan_test.sh, which starts
-the private system-like bus (namespace root) before invoking this script and
-sets QSNAPPER_TEST_AUTH_LOG / QSNAPPER_TEST_APPLY_LOG / QSNAPPER_TEST_READY_FILE.
+tests/integration/run_isolated_restore_plan_test.sh経由でのみ実行すること
+このランナーが、本スクリプトを起動する前にsystemに似た専用バス (namespace root) を起動し、
+QSNAPPER_TEST_AUTH_LOG / QSNAPPER_TEST_APPLY_LOG / QSNAPPER_TEST_READY_FILEを設定する
 
-Usage:
-    python3 test_restore_plan_owner_binding.py <path-to-qsnapper_restoreplan_test_service>
+使い方 : python3 test_restore_plan_owner_binding.py <qsnapper_restoreplan_test_serviceのパス>
+終了コード : 0 = 全検査成功、1 = 検査失敗、2 = python3-dbus未導入、64 = 引数不正
 """
 
 from __future__ import annotations
@@ -34,46 +34,77 @@ except ImportError:
     print("ERROR: python3-dbus required", file=sys.stderr)
     sys.exit(2)
 
-# GLib mainloop integration is required so restorePlanFinished signals can be
-# observed deterministically instead of polling a manifest that may already
-# have been reaped (removed) by the service the instant it reaches a terminal
-# state. Must be set BEFORE any dbus.SystemBus() is constructed.
+# 終端状態に達した瞬間にサービスがマニフェストを回収 (削除) してしまう可能性があるため、
+# ポーリングではなくrestorePlanFinishedシグナルを確実に観測するにはGLibメインループ連携が必要である
+# またdbus.SystemBus()を構築する前に設定しなければならない
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 from gi.repository import GLib  # noqa: E402
 
-IFACE = "com.presire.qsnapper.Operations"
-PATH = "/com/presire/qsnapper/Operations"
-ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
+IFACE = "com.presire.qsnapper.Operations"                 # 検査対象のD-Busインタフェース名
+PATH = "/com/presire/qsnapper/Operations"                 # オブジェクトパス
+ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"  # 拒否時に期待するエラー名
 
-STAGE_CHUNK_SIZE = 5000
-STAGE_CHUNK_COUNT = 3
-FAKE_ROOT = "/tmp/qsnapper-fake-restore"
+STAGE_CHUNK_SIZE = 5000                                   # 1チャンク当たりの正常エントリ数
+STAGE_CHUNK_COUNT = 3                                     # 用意する正常チャンク数
+FAKE_ROOT = "/tmp/qsnapper-fake-restore"                  # テストで使う擬似復元先ルート
 
-_failures = 0
+_failures = 0                                             # 失敗件数のカウンタ
 
 
 def proof(label: str, value: object) -> None:
-    """Print one PROOF_* line with a verbatim observable."""
+    """
+    @brief 観測値をそのままPROOF_*行として出力する
+
+    Args:
+        label: PROOF_の後ろに付けるラベル
+        value: 出力する観測値
+    """
     print(f"PROOF_{label}: {value}")
 
 
 def fail(what: str) -> None:
-    """Print a FAIL line and exit non-zero immediately."""
+    """
+    @brief FAIL行を出力して直ちに非ゼロで終了する
+
+    Args:
+        what: 失敗内容
+
+    Raises:
+        SystemExit: 常に終了コード1で終了する
+    """
     print(f"FAIL: {what}", file=sys.stderr)
     sys.exit(1)
 
 
 def make_paths(chunk_index: int, count: int) -> list[str]:
-    """Build count absolute paths for chunk_index, unique across chunks."""
+    """
+    @brief chunk_index用の絶対パスをcount件生成する (チャンク間で重複しない)
+
+    Args:
+        chunk_index: チャンク番号
+        count: 生成するパス数
+
+    Returns:
+        チャンク間で重複しない絶対パスのリスト
+    """
     base = chunk_index * count
     return [f"{FAKE_ROOT}/f{base + i}" for i in range(count)]
 
 
 def expect_access_denied(obj, iface, method_name: str, args: list, tag: str):
-    """Call method_name(*args) and require an AccessDenied D-Bus error.
+    """
+    @brief method_nameを引数付きで呼び出し、AccessDeniedエラーを必須とする
 
-    Returns (error_name, error_message) on success (i.e. the call WAS denied
-    as expected); exits the process via fail() otherwise.
+    Args:
+        obj: 呼び出し対象のD-Busオブジェクト
+        iface: D-Busインタフェース名
+        method_name: 呼び出すメソッド名
+        args: メソッドへ渡す引数
+        tag: PROOFラベルに使う識別子
+
+    Returns:
+        期待どおり拒否された場合は (error_name, error_message) の組
+        それ以外はfail()でプロセスを終了する
     """
     method = getattr(obj, method_name)
     try:
@@ -87,11 +118,19 @@ def expect_access_denied(obj, iface, method_name: str, args: list, tag: str):
         if name != ACCESS_DENIED:
             fail(f"{tag}: expected {ACCESS_DENIED}, got {name}: {text}")
         return name, text
-    return None, None  # unreachable; fail() exits
+    return None, None  # 到達しない (fail()が終了する)
 
 
 def read_log_lines(path: str) -> list[str]:
-    """Return non-empty lines of a log file, or an empty list if absent."""
+    """
+    @brief ログファイルの空でない行を返す
+
+    Args:
+        path: 読み取るログファイルのパス
+
+    Returns:
+        空でない行のリスト、ファイルが無い場合は空リスト
+    """
     if not path or not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as handle:
@@ -99,39 +138,69 @@ def read_log_lines(path: str) -> list[str]:
 
 
 class FinishedSignalWaiter:
-    """Arms a restorePlanFinished match BEFORE the triggering D-Bus call is
-    made.
+    """
+    @class FinishedSignalWaiter
+    @brief 引き金となるD-Bus呼び出しの前にrestorePlanFinishedの待ち受けを開始する
 
-    The bus daemon never replays a signal broadcast before a connection's
-    match rule reached it: if add_signal_receiver() is only called AFTER
-    e.g. CancelRestorePlan() has already returned, the signal (which the
-    service emits synchronously while still inside that same call, before
-    sending the method reply) can already have been broadcast and dropped
-    for this connection. Registering the match first closes that race.
+    バスデーモンは、ある接続のマッチルールが届く前にブロードキャストされたシグナルを再送しない
+    そのためCancelRestorePlan()が戻った後にadd_signal_receiver()を呼ぶと、
+    サービスがその呼び出しの内部で同期的に発行したシグナル (メソッド応答を送る前) は
+    既にブロードキャスト済みで、この接続では取りこぼされている可能性がある
+    マッチを先に登録することでこのraceを塞ぐ
+
+    bus : シグナルを受信するD-Bus接続
+    manifest_id : 待ち受ける対象のマニフェストID
     """
 
     def __init__(self, bus, manifest_id: str):
-        self._captured: dict[str, str] = {}
-        self._loop = GLib.MainLoop()
-        self._manifest_id = manifest_id
-        self._match = bus.add_signal_receiver(
+        """
+        @brief 指定したマニフェストIDのrestorePlanFinished待ち受けを準備する
+
+        Args:
+            bus: シグナルを受信するD-Bus接続
+            manifest_id: 待ち受ける対象のマニフェストID
+        """
+        self._captured: dict[str, str] = {}          # 受信したterminal_stateとmessageを保持する
+        self._loop = GLib.MainLoop()                 # シグナル待ちに使うGLibメインループ
+        self._manifest_id = manifest_id              # 待ち受ける対象のマニフェストID
+        self._match = bus.add_signal_receiver(       # マッチハンドル (wait()の最後でremoveする)
             self._handler, signal_name="restorePlanFinished",
             dbus_interface=IFACE, path=PATH,
         )
 
     def _handler(self, mid, terminal_state, message):
+        """
+        @brief restorePlanFinishedシグナルを受信し、対象IDなら結果を保持して待ちを終える
+
+        Args:
+            mid: シグナルが対象とするマニフェストID
+            terminal_state: 終端状態
+            message: 終端状態に対応する固定文言
+        """
         if mid == self._manifest_id and "terminal_state" not in self._captured:
             self._captured["terminal_state"] = terminal_state
             self._captured["message"] = message
             self._loop.quit()
 
     def _on_timeout(self) -> bool:
+        """
+        @brief タイムアウト時にメインループを終了する
+
+        Returns:
+            False (GLibのタイマーを再登録しない)
+        """
         self._loop.quit()
         return False
 
     def wait(self, timeout_s: float):
-        """Block (bounded) until the signal fires, then return
-        (terminal_state, message), or (None, None) on timeout.
+        """
+        @brief シグナルが発火するまで (上限付きで) 待機する
+
+        Args:
+            timeout_s: 待機時間の上限 (秒)
+
+        Returns:
+            発火時は (terminal_state, message)、タイムアウト時は (None, None)
         """
         if "terminal_state" not in self._captured:
             timeout_id = GLib.timeout_add(int(timeout_s * 1000), self._on_timeout)
@@ -144,7 +213,17 @@ class FinishedSignalWaiter:
 
 
 def wait_for_ready(service: subprocess.Popen, ready_file: str, timeout_s: float = 20.0) -> None:
-    """Block until the service writes READY to ready_file, or fail loudly."""
+    """
+    @brief サービスがready_fileへREADYを書き込むまで待機する
+
+    Args:
+        service: 起動したサービスのプロセス
+        ready_file: サービスの準備完了を示すファイルのパス
+        timeout_s: 待機時間の上限 (秒)
+
+    Raises:
+        SystemExit: サービスが途中終了したか、タイムアウトした場合
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if service.poll() is not None:
@@ -161,6 +240,12 @@ def wait_for_ready(service: subprocess.Popen, ready_file: str, timeout_s: float 
 
 
 def main() -> int:
+    """
+    @brief 所有者拘束と単一認可の検査シナリオを実行する
+
+    Returns:
+        0 = 全検査成功、64 = 引数不正
+    """
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <service-binary-path>", file=sys.stderr)
         return 64
@@ -201,8 +286,8 @@ def main() -> int:
         obj_a = bus_a.get_object(IFACE, PATH)
         obj_b = bus_b.get_object(IFACE, PATH)
 
-        # --- Step 1: A begins a restore plan ---
-        # counterpartSnapshotNumber=0 means "the current system" (sentinel).
+        # --- 手順1: Aが復元計画を開始する ---
+        # counterpartSnapshotNumber=0は「現在のシステム」を表す番兵値である
         manifest_id = obj_a.BeginRestorePlan(
             "root", 1, 0, "direct", dbus_interface=IFACE
         )
@@ -210,10 +295,10 @@ def main() -> int:
         if not manifest_id:
             fail("BeginRestorePlan returned an empty manifest id")
 
-        # --- Step 2: an over-capacity pre-freeze staging chunk (5001 > the
-        # 5000-entry kMaxEntriesPerStageChunk limit) must be rejected with
-        # InvalidArgs, store ZERO entries, and trigger ZERO authorization
-        # calls (the capacity guard runs entirely pre-freeze/pre-auth) ---
+        # --- 手順2: 容量超過の凍結前ステージングチャンク (5001件 > kMaxEntriesPerStageChunkの
+        # 5000件上限) はInvalidArgsで拒否され、エントリを0件しか保存せず、
+        # 認可呼び出しも0回でなければならない
+        # 容量ガードは完全に凍結前かつ認可前に動作する ---
         auth_lines_before_any_staging = read_log_lines(auth_log)
         if len(auth_lines_before_any_staging) != 0:
             fail(
@@ -258,7 +343,7 @@ def main() -> int:
                 f"auth log={auth_lines_after_oversized}"
             )
 
-        # --- Step 3: A stages more than one GOOD chunk (>= 3 x 5000 entries) ---
+        # --- 手順3: Aが正常チャンクを複数 (3 x 5000件以上) ステージングする ---
         total_staged = 0
         for chunk_index in range(STAGE_CHUNK_COUNT):
             paths = make_paths(chunk_index, STAGE_CHUNK_SIZE)
@@ -271,14 +356,14 @@ def main() -> int:
             total_staged += STAGE_CHUNK_SIZE
         proof("TOTAL_STAGED", total_staged)
 
-        # --- Step 4: B cannot stage into A's plan ---
+        # --- 手順4: BはAの計画へステージングできない ---
         expect_access_denied(
             obj_b, IFACE, "StageRestoreEntries",
             [manifest_id, [f"{FAKE_ROOT}/intruder"], ["modified"]],
             "STAGE_CROSS_OWNER",
         )
 
-        # --- Step 5: A commits; exactly one authorization so far ---
+        # --- 手順5: Aがコミットする (ここまでで認可は正確に1回) ---
         committed = obj_a.CommitRestorePlan(manifest_id, dbus_interface=IFACE)
         proof("COMMIT_RESULT", committed)
         if not committed:
@@ -291,7 +376,7 @@ def main() -> int:
                 f"got {len(auth_lines_after_commit)}: {auth_lines_after_commit}"
             )
 
-        # --- Step 6: plan is Running; B is denied on every control method ---
+        # --- 手順6: 計画は実行中で、Bは全ての制御メソッドで拒否される ---
         status_running = obj_a.GetRestorePlanStatus(manifest_id, dbus_interface=IFACE)
         proof("STATUS_AFTER_COMMIT", status_running)
         state_field = status_running.split(",", 2)[1] if status_running else ""
@@ -308,7 +393,7 @@ def main() -> int:
             obj_b, IFACE, "GetRestorePlanStatus", [manifest_id], "STATUS_CROSS_OWNER"
         )
 
-        # --- Step 7: enumeration-oracle check ---
+        # --- 手順7: 列挙オラクルの検査 ---
         fabricated_id = "rm-00000000000000000000000000000000"
         oracle_name, oracle_msg = expect_access_denied(
             obj_b, IFACE, "GetRestorePlanStatus", [fabricated_id], "STATUS_FABRICATED_ID"
@@ -325,8 +410,8 @@ def main() -> int:
                 f"{(status_name, status_msg)!r} vs {(oracle_name, oracle_msg)!r}"
             )
 
-        # --- Step 8: A can still read status; totalEntries fixed, processed
-        # non-decreasing across two consecutive reads ---
+        # --- 手順8: Aは引き続き状態を読める
+        # totalEntriesは固定で、processedは連続する2回の読み取りで減少しない ---
         first_read = obj_a.GetRestorePlanStatus(manifest_id, dbus_interface=IFACE)
         time.sleep(0.05)
         second_read = obj_a.GetRestorePlanStatus(manifest_id, dbus_interface=IFACE)
@@ -334,6 +419,15 @@ def main() -> int:
         proof("OWNER_STATUS_READ_2", second_read)
 
         def parse_status(csv: str):
+            """
+            @brief GetRestorePlanStatusのCSV応答をフィールドへ分解する
+
+            Args:
+                csv: 状態を表すCSV文字列
+
+            Returns:
+                id、state、total、cursor、processedを持つ辞書
+            """
             fields = csv.split(",")
             return {
                 "id": fields[0],
@@ -363,10 +457,11 @@ def main() -> int:
             f"(total={total_staged})",
         )
 
-        # --- Step 9: Aがキャンセルし、finishedシグナルで終端を確認する
-        # (この単一スレッドのサービスでは、executorはCancelRestorePlan内で
-        # 同期的に計画を回収する)。シグナル待ちは、それを発生させる呼び出し
-        # より前に準備する必要がある (FinishedSignalWaiterのdocstring参照)。 ---
+        # --- 手順9: Aがキャンセルし、finishedシグナルで終端を確認する ---
+        # この単一スレッドのサービスでは、executorはCancelRestorePlan内で
+        # 同期的に計画を回収する
+        # シグナル待ちは、それを発生させる呼び出しより前に準備する必要がある
+        # (FinishedSignalWaiterのdocstringを参照)
         finished_waiter = FinishedSignalWaiter(bus_a, manifest_id)
         applied_before_cancel = len(read_log_lines(apply_log))
         cancelled = obj_a.CancelRestorePlan(manifest_id, dbus_interface=IFACE)
@@ -382,14 +477,14 @@ def main() -> int:
                 f"after CancelRestorePlan: got {terminal_state!r}"
             )
         # finishedシグナルはsystem busの全接続へ届くため、終端状態ごとの
-        # 固定文言だけを載せる (pathや詳細を載せない)。
+        # 固定文言だけを載せる (pathや詳細は載せない)
         if terminal_message != "Restore cancelled":
             fail(
                 "restorePlanFinished must carry only the fixed text for its "
                 f"terminal state, got {terminal_message!r}"
             )
 
-        # 詳細は短時間だけ、ownerに限り取得できる。
+        # 詳細は短時間だけ、ownerに限り取得できる
         status_terminal = obj_a.GetRestorePlanStatus(manifest_id, dbus_interface=IFACE)
         proof("OWNER_STATUS_AFTER_TERMINAL", status_terminal)
         terminal_state_field = status_terminal.split(",", 2)[1] if status_terminal else ""
@@ -424,7 +519,7 @@ def main() -> int:
                 f"{applied_after_cancel} -> {applied_settled}"
             )
 
-        # --- Step 10: replay after terminal must be rejected ---
+        # --- 手順10: 終端後の再実行は拒否されなければならない ---
         try:
             obj_a.ContinueRestorePlan(manifest_id, dbus_interface=IFACE)
             fail("ContinueRestorePlan after terminal unexpectedly succeeded")
@@ -444,7 +539,7 @@ def main() -> int:
                     f"{replay_name}: {replay_msg}"
                 )
 
-        # --- Step 11: re-prompt check -- exactly one authorization overall ---
+        # --- 手順11: 再プロンプト検査 (全体で認可は正確に1回) ---
         final_auth_lines = read_log_lines(auth_log)
         proof("AUTH_LOG_FINAL", final_auth_lines)
         if len(final_auth_lines) != 1:

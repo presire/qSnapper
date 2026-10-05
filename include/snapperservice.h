@@ -13,6 +13,12 @@
 Q_DECLARE_LOGGING_CATEGORY(snapperLog)
 
 /**
+ * @file snapperservice.h
+ * @brief Snapper操作を集約するサービスクラス
+ */
+
+/**
+ * @class SnapperService
  * @brief Snapper操作を集約するサービスクラス
  *
  * D-Bus経由でSnapperデーモンと連携し、スナップショットの作成・取得・削除・ロールバック・変更および設定管理を提供するシングルトンサービス
@@ -27,100 +33,315 @@ class SnapperService : public QObject
 
 public:
     // コンストラクタ/デストラクタ/シングルトン
-    explicit SnapperService(QObject *parent = nullptr);         // コンストラクタ
-    ~SnapperService();                                          // デストラクタ
-    static SnapperService* instance();                          // シングルトンインスタンスを取得する
+    /**
+     * @brief SnapperServiceを構築する
+     * @param parent Qt親オブジェクト
+     */
+    explicit SnapperService(QObject *parent = nullptr);
+
+    /**
+     * @brief SnapperServiceを破棄する
+     */
+    ~SnapperService();
+
+    /**
+     * @brief シングルトンインスタンスを取得する
+     * @return SnapperServiceの唯一のインスタンス
+     */
+    static SnapperService* instance();
 
     // 設定状態
-    bool isConfigured();                                        // Snapperが設定済みか判定する
-    Q_INVOKABLE void configureSnapper();                        // Snapperを設定する
+    /**
+     * @brief Snapperが設定済みか判定する
+     * @return 設定済みの場合はtrue
+     */
+    bool isConfigured();
+
+    /**
+     * @brief Snapperを設定する
+     */
+    Q_INVOKABLE void configureSnapper();
 
     // 設定 (config) 切替API
-    QStringList configs();                                      // 利用可能なSnapper設定一覧を取得する
-    QString currentConfig() const { return m_currentConfig; }   // 現在選択中の設定名を取得する
-    Q_INVOKABLE void setCurrentConfig(const QString &name);     // 現在の設定を変更する
-    Q_INVOKABLE void refreshConfigs();                          // 設定一覧を更新する
+    /**
+     * @brief 利用可能なSnapper設定一覧を取得する
+     * @return 設定名の一覧
+     */
+    QStringList configs();
+
+    /**
+     * @brief 現在選択中の設定名を取得する
+     * @return 現在の設定名
+     */
+    QString currentConfig() const { return m_currentConfig; }
+
+    /**
+     * @brief 現在の設定を変更する
+     * @param name 新たな設定名
+     */
+    Q_INVOKABLE void setCurrentConfig(const QString &name);
+
+    /**
+     * @brief 設定一覧を更新する
+     */
+    Q_INVOKABLE void refreshConfigs();
 
     // 外部ブラウザでURLを開く (QML公開)
-    Q_INVOKABLE bool openExternalUrl(const QString &url);       // URLを外部ブラウザで開く
+    /**
+     * @brief URLを外部ブラウザで開く
+     * @param url 開くURL
+     * @return 開く処理を開始できた場合はtrue
+     */
+    Q_INVOKABLE bool openExternalUrl(const QString &url);
 
     // スナップショット作成可否判定
-    Q_INVOKABLE bool createSnapshotAllowed(const QString &snapshotType) const;  // 指定種別のスナップショット作成可否を判定する
+    /**
+     * @brief 指定種別のスナップショット作成可否を判定する
+     * @param snapshotType 判定するスナップショット種別
+     * @return 作成可能な場合はtrue
+     */
+    Q_INVOKABLE bool createSnapshotAllowed(const QString &snapshotType) const;
 
     // スナップショット作成 (QML公開)
-    Q_INVOKABLE int createSingle(const QString &description,                    // 単発スナップショットを作成し番号を返す
+    /**
+     * @brief 単発スナップショットを作成する
+     * @param description 説明文
+     * @param cleanup クリーンアップアルゴリズム
+     * @param important 重要フラグ
+     * @param userdata ユーザデータマップ
+     * @return 作成されたスナップショット番号
+     */
+    Q_INVOKABLE int createSingle(const QString &description,
                                  FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                                  bool important = false,
                                  const QVariantMap &userdata = QVariantMap());
-    Q_INVOKABLE int createPre(const QString &description,                       // Preスナップショットを作成し番号を返す
+
+    /**
+     * @brief Preスナップショットを作成する
+     * @param description 説明文
+     * @param cleanup クリーンアップアルゴリズム
+     * @param important 重要フラグ
+     * @param userdata ユーザデータマップ
+     * @return 作成されたスナップショット番号
+     */
+    Q_INVOKABLE int createPre(const QString &description,
                               FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                               bool important = false,
                               const QVariantMap &userdata = QVariantMap());
-    Q_INVOKABLE int createPost(const QString &description,                      // Postスナップショットを作成し番号を返す
+
+    /**
+     * @brief Postスナップショットを作成する
+     * @param description 説明文
+     * @param previousNumber 紐付け元のPreスナップショット番号
+     * @param cleanup クリーンアップアルゴリズム
+     * @param important 重要フラグ
+     * @param userdata ユーザデータマップ
+     * @return 作成されたスナップショット番号
+     */
+    Q_INVOKABLE int createPost(const QString &description,
                                int previousNumber,
                                FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                                bool important = false,
                                const QVariantMap &userdata = QVariantMap());
 
     // スナップショット取得・操作
-    // 返すオブジェクトはparentを持たず、呼び出し側が所有する
-    // find()はQObjectを直接返すため、QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される
-    // all()はリストを返し、QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++からのみ呼ぶ
-    QList<FsSnapshot*> all();                                                   // 全スナップショットを取得する (C++専用、呼び出し側が所有)
-    Q_INVOKABLE FsSnapshot* find(int number);                                   // 指定番号のスナップショットを検索する (QML可、呼び出し側が所有)
-    Q_INVOKABLE bool rollback(int number);                                      // 指定番号へロールバックする
-    Q_INVOKABLE bool deleteSnapshot(int number);                                // 単一スナップショットを削除する
-    Q_INVOKABLE bool modifySnapshot(int number, const QString &description,     // スナップショット情報を変更する
+    /**
+     * @brief 全スナップショットを取得する
+     *
+     * 返すオブジェクトはparentを持たず、呼び出し側が所有する
+     * all()はリストを返し、QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++からのみ呼ぶ
+     *
+     * @return 呼び出し側が所有するスナップショットリスト
+     */
+    QList<FsSnapshot*> all();
+
+    /**
+     * @brief 指定番号のスナップショットを検索する
+     *
+     * find()はQObjectを直接返すため、QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される
+     * 返すオブジェクトはparentを持たず、呼び出し側が所有する
+     *
+     * @param number 検索するスナップショット番号
+     * @return 呼び出し側が所有するスナップショット、見つからない場合はnullptr
+     */
+    Q_INVOKABLE FsSnapshot* find(int number);
+
+    /**
+     * @brief 指定番号へロールバックする
+     * @param number ロールバック先のスナップショット番号
+     * @return 成功した場合はtrue
+     */
+    Q_INVOKABLE bool rollback(int number);
+
+    /**
+     * @brief 単一スナップショットを削除する
+     * @param number 削除するスナップショット番号
+     * @return 成功した場合はtrue
+     */
+    Q_INVOKABLE bool deleteSnapshot(int number);
+
+    /**
+     * @brief スナップショット情報を変更する
+     * @param number 変更対象のスナップショット番号
+     * @param description 新しい説明文
+     * @param cleanup 新しいクリーンアップアルゴリズム文字列
+     * @param userdata 新しいユーザデータマップ
+     * @return 成功した場合はtrue
+     */
+    Q_INVOKABLE bool modifySnapshot(int number, const QString &description,
                                     const QString &cleanup, const QVariantMap &userdata);
 
     // インストール時設定
-    void setConfigureOnInstall(bool value) { m_configureOnInstall = value; }    // インストール時設定フラグを設定する
-    bool configureOnInstall() const { return m_configureOnInstall; }            // インストール時設定フラグを取得する
+    /**
+     * @brief インストール時設定フラグを設定する
+     * @param value 設定するフラグ値
+     */
+    void setConfigureOnInstall(bool value) { m_configureOnInstall = value; }
+
+    /**
+     * @brief インストール時設定フラグを取得する
+     * @return インストール時に設定を行う場合はtrue
+     */
+    bool configureOnInstall() const { return m_configureOnInstall; }
 
 signals:
-    void configuredChanged(bool configured);                            // 設定状態変更時に発行する
-    void configsChanged();                                              // 設定一覧変更時に発行する
-    void currentConfigChanged();                                        // 現在設定変更時に発行する
-    void snapshotCreated(FsSnapshot *snapshot);                         // スナップショット作成成功時に発行する (所有者はSnapperService、発行中のみ有効)
-    void snapshotCreationFailed(const QString &error);                  // スナップショット作成失敗時に発行する
-    void rollbackCompleted();                                           // ロールバック完了時に発行する
-    void rollbackFailed(const QString &error);                          // ロールバック失敗時に発行する
-    void snapshotDeleted(int number);                                   // 削除成功時に発行する
-    void snapshotDeletionFailed(int number, const QString &error);      // 削除失敗時に発行する
-    void snapshotModified(int number);                                  // 変更成功時に発行する
-    void snapshotModificationFailed(int number, const QString &error);  // 変更失敗時に発行する
+    /**
+     * @brief 設定状態変更時に発行する
+     * @param configured 設定済みかどうか
+     */
+    void configuredChanged(bool configured);
+
+    /**
+     * @brief 設定一覧変更時に発行する
+     */
+    void configsChanged();
+
+    /**
+     * @brief 現在設定変更時に発行する
+     */
+    void currentConfigChanged();
+
+    /**
+     * @brief スナップショット作成成功時に発行する
+     * @param snapshot 作成されたスナップショット (所有者はSnapperService、発行中のみ有効)
+     */
+    void snapshotCreated(FsSnapshot *snapshot);
+
+    /**
+     * @brief スナップショット作成失敗時に発行する
+     * @param error 失敗理由
+     */
+    void snapshotCreationFailed(const QString &error);
+
+    /**
+     * @brief ロールバック完了時に発行する
+     */
+    void rollbackCompleted();
+
+    /**
+     * @brief ロールバック失敗時に発行する
+     * @param error 失敗理由
+     */
+    void rollbackFailed(const QString &error);
+
+    /**
+     * @brief 削除成功時に発行する
+     * @param number 削除されたスナップショット番号
+     */
+    void snapshotDeleted(int number);
+
+    /**
+     * @brief 削除失敗時に発行する
+     * @param number 削除対象のスナップショット番号
+     * @param error 失敗理由
+     */
+    void snapshotDeletionFailed(int number, const QString &error);
+
+    /**
+     * @brief 変更成功時に発行する
+     * @param number 変更されたスナップショット番号
+     */
+    void snapshotModified(int number);
+
+    /**
+     * @brief 変更失敗時に発行する
+     * @param number 変更対象のスナップショット番号
+     * @param error 失敗理由
+     */
+    void snapshotModificationFailed(int number, const QString &error);
 
 private:
     // 内部作成ヘルパー
-    int create(FsSnapshot::SnapshotType snapshotType,                   // スナップショットを作成する内部ヘルパー
+    /**
+     * @brief スナップショットを作成する内部ヘルパー
+     * @param snapshotType 作成するスナップショット種別
+     * @param description 説明文
+     * @param previousNumber 紐付け元のPreスナップショット番号
+     * @param cleanup クリーンアップアルゴリズム
+     * @param important 重要フラグ
+     * @param userdata ユーザデータマップ
+     * @return 作成されたスナップショット番号
+     */
+    int create(FsSnapshot::SnapshotType snapshotType,
                const QString &description, int previousNumber = -1,
                FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                bool important = false,
                const QVariantMap &userdata = QVariantMap());
 
     // パス・環境判定
-    QString targetRoot() const;                                     // ターゲットルートパスを取得する
-    bool nonSwitchedInstallation() const;                           // 非切り替えインストールか判定する
+    /**
+     * @brief ターゲットルートパスを取得する
+     * @return スナップショット対象のルートパス
+     */
+    QString targetRoot() const;
+
+    /**
+     * @brief 非切り替えインストールか判定する
+     * @return 非切り替えインストールの場合はtrue
+     */
+    bool nonSwitchedInstallation() const;
 
     // インストール補助
-    void writeSnapperConfig();                                      // Snapper設定ファイルを書き込む
-    void setupSnapperQuota();                                       // Snapperクォータを設定する
+    /**
+     * @brief Snapper設定ファイルを書き込む
+     */
+    void writeSnapperConfig();
+
+    /**
+     * @brief Snapperクォータを設定する
+     */
+    void setupSnapperQuota();
 
     // 解析・実行
-    QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput); // CSV出力を解析してスナップショットリストを生成する (呼び出し側が所有)
-    bool reconnect();                                               // D-Busサービスへ再接続する
-    static SnapperService *s_instance;                              // シングルトンインスタンス
+    /**
+     * @brief CSV出力を解析してスナップショットリストを生成する
+     *
+     * 返すオブジェクトは呼び出し側が所有する
+     *
+     * @param csvOutput Snapperが返したCSV出力
+     * @return 呼び出し側が所有するスナップショットリスト
+     */
+    QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput);
+
+    /**
+     * @brief D-Busサービスへ再接続する
+     * @return 接続に成功した場合はtrue
+     */
+    bool reconnect();
+
+    // シングルトン
+    static SnapperService *s_instance;  // シングルトンインスタンス
 
     // 状態フラグ
-    bool m_configured;                                              // Snapperが設定済みかどうか
-    bool m_configuredChecked;                                       // 設定チェック済みフラグ
-    bool m_configureOnInstall;                                      // インストール時に設定を行うかどうか
-    bool m_configsChecked;                                          // 設定一覧キャッシュ済みフラグ
+    bool m_configured;          // Snapperが設定済みかどうか
+    bool m_configuredChecked;   // 設定チェック済みフラグ
+    bool m_configureOnInstall;  // インストール時に設定を行うかどうか
+    bool m_configsChecked;      // 設定一覧キャッシュ済みフラグ
 
     // 通信・キャッシュ
-    QDBusInterface *m_dbusInterface;                                // D-Bus通信インターフェース
-    QStringList m_configs;                                          // 利用可能なSnapper設定名のキャッシュ
-    QString m_currentConfig;                                        // 現在選択されている設定名
+    QDBusInterface *m_dbusInterface;    // D-Bus通信インターフェース
+    QStringList m_configs;              // 利用可能なSnapper設定名のキャッシュ
+    QString m_currentConfig;            // 現在選択されている設定名
 };
 
 #endif // SNAPPERSERVICE_H

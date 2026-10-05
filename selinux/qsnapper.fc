@@ -1,15 +1,19 @@
-# qSnapper File Contexts
+# qSnapperのファイルコンテキスト
 #
-# This file defines SELinux security contexts for qSnapper executable files.
+# qSnapperの実行ファイルにSELinuxコンテキストを割り当てる
 #
-# Note: System directories (/etc/snapper, /.snapshots, /var/lib/snapper, etc.)
-# use existing system labels (etc_t, unlabeled_t, fs_t, var_lib_t).
-# Access to these directories is granted in the .te policy file.
+# /etc/snapper、/.snapshots、/var/lib/snapperなどのシステムディレクトリには
+# 既存のラベル(etc_t、unlabeled_t、fs_t、var_lib_t)を使用する
+# これらのディレクトリへのアクセス権は.teファイルで定義する
 #
-# This approach avoids conflicts with openSUSE's existing file context rules.
+# この方法により、openSUSEの既存のファイルコンテキスト規則との競合を避ける
+#
+# CMakeビルドでは、qsnapper.fc.inからビルドディレクトリ内のqsnapper.fcを生成する
+# configure_file()が、CMAKE_INSTALL_PREFIXとGNUInstallDirsに基づくインストール先へ置換変数を展開する
+# ソース側のqsnapper.fcは、単独のMakefileによるビルドで使用する
 
-# Main GUI application (unprivileged user context)
+# GUIアプリケーションの実行ファイル (一般ユーザのコンテキストで動作する)
 /usr/bin/qsnapper	--	system_u:object_r:qsnapper_exec_t:s0
 
-# D-Bus service daemon (privileged, auto-started by D-Bus or systemd)
+# D-Busサービスの実行ファイル (特権操作を行い、D-Busまたはsystemdから自動起動される)
 /usr/libexec/qsnapper-dbus-service	--	system_u:object_r:qsnapper_dbus_exec_t:s0

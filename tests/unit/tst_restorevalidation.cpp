@@ -1,3 +1,12 @@
+/**
+ * @file tst_restorevalidation.cpp
+ * @brief commit時preflightの純粋関数群の単体テスト
+ *
+ * 対象は状態ビットからchangeTypeへの写像、path正規化、権威あるmapの構築、
+ * 凍結済みentryの検証である
+ * libsnapperに依存せず、snapper::File::getPreToPostStatus()と同一のビット値を直接与えて検証する
+ */
+
 #include "restorevalidation.h"
 
 #include <QTest>
@@ -5,38 +14,63 @@
 using namespace qsnapper::restore;
 
 /**
- * @brief commit時preflightの純粋関数群 (状態ビット -> changeType写像、path正規化、権威あるmap構築、凍結済みentry検証) の単体テスト
+ * @class TestRestoreValidation
+ * @brief commit時preflightの純粋関数群を確認するテストスイート
  *
- * libsnapperに依存せず、snapper::File::getPreToPostStatus()と同一のビット値を直接与えて検証する
+ * 状態ビット -> changeType写像、path正規化、権威あるmap構築、凍結済みentry検証を確認する
  */
 class TestRestoreValidation : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief CREATEDビットが他の全ビットに優先することを確認する */
     void createdBitWinsOverEverything();
+    /** @brief DELETEDビットがCREATED以外の全ビットに優先することを確認する */
     void deletedBitBeatsTypeAndBelow();
+    /** @brief TYPEビットがcontentとmetadataに優先することを確認する */
     void typeBitBeatsContentAndMetadata();
+    /** @brief content/metadataのみおよび空ビットがmodifiedへ写像されることを確認する */
     void contentAndMetadataOnlyAndEmptyMapToModified();
+    /** @brief パス正規化が末尾スラッシュを取り除くことを確認する */
     void canonicalizationStripsTrailingSlashes();
+    /** @brief パス正規化が連続する内部スラッシュを畳むことを確認する */
     void canonicalizationCollapsesInnerSlashRuns();
+    /** @brief パス正規化がrootを維持しドット要素を折り畳まないことを確認する */
     void canonicalizationKeepsRootAndDoesNotFoldDotComponents();
+    /** @brief 権威名の復号検証が整形済みパスを受理することを確認する */
     void authoritativeNameAcceptsWellFormedPaths();
+    /** @brief 権威名の復号検証が制御文字をfail-closedで拒否することを確認する */
     void authoritativeNameRejectsControlCharacters();
+    /** @brief 権威名の復号検証が不正UTF-8を拒否することを確認する */
     void authoritativeNameRejectsInvalidUtf8();
+    /** @brief 権威名の復号検証が正当なマルチバイトUTF-8をバイト単位で保存することを確認する */
     void authoritativeNamePreservesValidMultibyteUtf8();
+    /** @brief 権威mapの衝突が検出されることを確認する */
     void authoritativeCollisionIsDetected();
+    /** @brief 権威mapへの同一キー同一型の再登録が受理されることを確認する */
     void authoritativeRedundantIdenticalEntryIsAccepted();
+    /** @brief 権威mapと一致する凍結済みentryが検証を通過することを確認する */
     void frozenEntriesMatchingAuthoritativeMapPass();
+    /** @brief 未知パスと型不一致の計画がrejectされることを確認する */
     void unknownPathAndMismatchedTypeAreRejected();
+    /** @brief 凍結済みentryが上限付きチャンクで漏れなく検証されることを確認する */
     void validationReadsFrozenEntriesInBoundedChunks();
+    /** @brief root configの復元先が従来どおりであることを確認する */
     void restoreDestinationForRootConfigIsUnchanged();
+    /** @brief 復元先がconfigのSUBVOLUME基準で決まることを確認する */
     void restoreDestinationIsBasedOnConfigSubvolume();
+    /** @brief 復元先の構築が安全でない名前を拒否することを確認する */
     void restoreDestinationRejectsUnsafeNames();
+    /** @brief 正規化後にスナップショットメタデータ名が検出されることを確認する */
     void snapshotMetadataNameIsDetectedAfterNormalization();
+    /** @brief root復元後のrw復帰セーフティネットが全条件を要求することを確認する */
     void rootReadWriteSafetyNetRequiresAllConditions();
 };
 
+/**
+ * @brief CREATEDビットが他の全ビットに優先することを確認する
+ */
 void TestRestoreValidation::createdBitWinsOverEverything()
 {
     // CREATED (1) が他の全ビットに優先する
@@ -50,6 +84,9 @@ void TestRestoreValidation::createdBitWinsOverEverything()
              QStringLiteral("created"));
 }
 
+/**
+ * @brief DELETEDビットがCREATED以外の全ビットに優先することを確認する
+ */
 void TestRestoreValidation::deletedBitBeatsTypeAndBelow()
 {
     // DELETED (2) はCREATEDが無い場合に優先する
@@ -61,6 +98,9 @@ void TestRestoreValidation::deletedBitBeatsTypeAndBelow()
              QStringLiteral("deleted"));
 }
 
+/**
+ * @brief TYPEビットがcontentとmetadataに優先することを確認する
+ */
 void TestRestoreValidation::typeBitBeatsContentAndMetadata()
 {
     QCOMPARE(restoreExpectedChangeType(RestoreStatusType),
@@ -73,6 +113,9 @@ void TestRestoreValidation::typeBitBeatsContentAndMetadata()
              QStringLiteral("typechanged"));
 }
 
+/**
+ * @brief content/metadataのみおよび空ビットがmodifiedへ写像されることを確認する
+ */
 void TestRestoreValidation::contentAndMetadataOnlyAndEmptyMapToModified()
 {
     QCOMPARE(restoreExpectedChangeType(RestoreStatusContent),
@@ -90,6 +133,9 @@ void TestRestoreValidation::contentAndMetadataOnlyAndEmptyMapToModified()
              QStringLiteral("modified"));
 }
 
+/**
+ * @brief パス正規化が末尾スラッシュを取り除くことを確認する
+ */
 void TestRestoreValidation::canonicalizationStripsTrailingSlashes()
 {
     QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/etc/example.conf")),
@@ -100,6 +146,9 @@ void TestRestoreValidation::canonicalizationStripsTrailingSlashes()
              QStringLiteral("/etc/conf.d"));
 }
 
+/**
+ * @brief パス正規化が連続する内部スラッシュを畳むことを確認する
+ */
 void TestRestoreValidation::canonicalizationCollapsesInnerSlashRuns()
 {
     QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("//etc//conf.d")),
@@ -108,6 +157,9 @@ void TestRestoreValidation::canonicalizationCollapsesInnerSlashRuns()
              QStringLiteral("/a/b/c"));
 }
 
+/**
+ * @brief パス正規化がrootを維持しドット要素を折り畳まないことを確認する
+ */
 void TestRestoreValidation::canonicalizationKeepsRootAndDoesNotFoldDotComponents()
 {
     // root "/" はそのまま維持される
@@ -225,6 +277,11 @@ void TestRestoreValidation::authoritativeNamePreservesValidMultibyteUtf8()
     QCOMPARE(decoded.toUtf8(), utf8Name);
 }
 
+/**
+ * @brief 権威mapの衝突が検出されることを確認する
+ *
+ * 同一raw名で異なる期待型、末尾スラッシュ違い、正規化で同一になるキーを確認する
+ */
 void TestRestoreValidation::authoritativeCollisionIsDetected()
 {
     QHash<QString, QString> expectedTypes;
@@ -248,6 +305,9 @@ void TestRestoreValidation::authoritativeCollisionIsDetected()
         &second, QStringLiteral("//etc//x"), RestoreStatusType));
 }
 
+/**
+ * @brief 権威mapへの同一キー同一型の再登録が受理されることを確認する
+ */
 void TestRestoreValidation::authoritativeRedundantIdenticalEntryIsAccepted()
 {
     QHash<QString, QString> expectedTypes;
@@ -260,6 +320,9 @@ void TestRestoreValidation::authoritativeRedundantIdenticalEntryIsAccepted()
     QCOMPARE(expectedTypes.size(), 1);
 }
 
+/**
+ * @brief 権威mapと一致する凍結済みentryが検証を通過することを確認する
+ */
 void TestRestoreValidation::frozenEntriesMatchingAuthoritativeMapPass()
 {
     RestoreManifestRegistry registry;
@@ -293,6 +356,9 @@ void TestRestoreValidation::frozenEntriesMatchingAuthoritativeMapPass()
         registry, id, QStringLiteral(":1.1"), expectedTypes, &error));
 }
 
+/**
+ * @brief 未知パスと型不一致の計画がrejectされることを確認する
+ */
 void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
 {
     RestoreManifestRegistry registry;
@@ -357,6 +423,11 @@ void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
     }
 }
 
+/**
+ * @brief 凍結済みentryが上限付きチャンクで漏れなく検証されることを確認する
+ *
+ * 200件 (> 64件のslice上限) を与え、末尾1件だけのmapでは全体がrejectされることを確認する
+ */
 void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
 {
     // 200件 (> 64件のslice上限) の凍結済み計画がchunk分割でも検証される
@@ -391,6 +462,9 @@ void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
         registry, id, QStringLiteral(":1.1"), shortMap, &error));
 }
 
+/**
+ * @brief root configの復元先が従来どおりであることを確認する
+ */
 void TestRestoreValidation::restoreDestinationForRootConfigIsUnchanged()
 {
     // root config (SUBVOLUME=/) では従来どおり"/"基準の宛先になる
@@ -409,6 +483,9 @@ void TestRestoreValidation::restoreDestinationForRootConfigIsUnchanged()
     QCOMPARE(relative, QStringLiteral("a"));
 }
 
+/**
+ * @brief 復元先がconfigのSUBVOLUME基準で決まることを確認する
+ */
 void TestRestoreValidation::restoreDestinationIsBasedOnConfigSubvolume()
 {
     // home config ではconfig相対名"/alice/file"の宛先は"/home/alice/file"である
@@ -435,6 +512,12 @@ void TestRestoreValidation::restoreDestinationIsBasedOnConfigSubvolume()
     QCOMPARE(normalized, QStringLiteral("/home"));
 }
 
+/**
+ * @brief 復元先の構築が安全でない名前を拒否することを確認する
+ *
+ * 相対名、root、親参照、カレント参照、改行、スナップショットメタデータ
+ * 不正なSUBVOLUMEを確認する
+ */
 void TestRestoreValidation::restoreDestinationRejectsUnsafeNames()
 {
     QString rootPath;
@@ -464,6 +547,9 @@ void TestRestoreValidation::restoreDestinationRejectsUnsafeNames()
     QVERIFY(relative.isEmpty());
 }
 
+/**
+ * @brief 正規化後にスナップショットメタデータ名が検出されることを確認する
+ */
 void TestRestoreValidation::snapshotMetadataNameIsDetectedAfterNormalization()
 {
     QVERIFY(isSnapshotMetadataRestoreName(QStringLiteral("/.snapshots")));
@@ -475,6 +561,12 @@ void TestRestoreValidation::snapshotMetadataNameIsDetectedAfterNormalization()
     QVERIFY(!isSnapshotMetadataRestoreName(QStringLiteral("/etc/fstab")));
 }
 
+/**
+ * @brief root復元後のrw復帰セーフティネットが全条件を要求することを確認する
+ *
+ * 実行開始済み、root subvolume対象、復元前状態が既知の3条件が揃い、
+ * 復元後にroになった場合のみrwへ戻すことを確認する
+ */
 void TestRestoreValidation::rootReadWriteSafetyNetRequiresAllConditions()
 {
     RootReadWriteSafetyNetState started;

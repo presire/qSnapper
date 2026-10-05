@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# isolated_root_dbus_env.sh - isolated root D-Bus test harness for qSnapper.
 #
-# Runs an arbitrary command as uid 0 inside a user+mount+PID namespace with a
-# PRIVATE dbus-daemon configured as <type>system</type>. The daemon:
-#   - listens on a unix socket in a tmpfs dir under a mktemp -d root,
-#   - uses EXTERNAL auth only,
-#   - includes a COPY of the real repo ACL
-#     dbus/com.presire.qsnapper.Operations.conf (deny-by-default, root-only
-#     ownership of com.presire.qsnapper.Operations).
+# @file isolated_root_dbus_env.sh
+# @brief qSnapper用の隔離されたroot D-Busテストハーネス
 #
-# The host system bus, /etc, /usr, /var and /run are never touched; no sudo.
+# user/mount/PID名前空間内でuid 0として任意のコマンドを実行する
+# その中でプライベートなdbus-daemonをsystemバス相当として起動する
+#   - mktemp -dで作ったtmpfs上のunixソケットで待ち受ける
+#   - EXTERNAL認証のみを使う
+#   - リポジトリの実ACL(com.presire.qsnapper.Operations)の複製を読み込む
+#     既定で拒否し、Operations名の所有はrootのみに許可する
 #
-# Usage:
-#   isolated_root_dbus_env.sh <command> [args...]
-#   isolated_root_dbus_env.sh --selftest
+# ホストのシステムバス、/etc、/usr、/var、/runには一切触れない
+# sudoも使わない
 #
-# Environment exported for <command>:
-#   DBUS_SYSTEM_BUS_ADDRESS  address of the private bus
-#   ISOLATED_DBUS_TMPROOT    the temp root (socket dir, config, fixtures)
+# 使い方 : isolated_root_dbus_env.sh <command> [args...]
+#          isolated_root_dbus_env.sh --selftest
+# 終了コード : 0 = コマンド成功、64 = 引数不足、66 = ACLまたはデーモンが見つからない、
+#              77 = user名前空間が使えないためスキップ、それ以外はコマンドの終了コード
+#
+# コマンドへエクスポートする環境変数
+#   DBUS_SYSTEM_BUS_ADDRESS  プライベートバスのアドレス
+#   ISOLATED_DBUS_TMPROOT    一時ルート(ソケットdir、設定、フィクスチャ)
+#
 set -Eeuo pipefail
 
-SELFTEST=0
+SELFTEST=0    # 1ならセルフテストを実行する
 if [ "${1:-}" = "--selftest" ]; then
 	SELFTEST=1
 	shift
@@ -31,10 +35,10 @@ if [ "$SELFTEST" -eq 0 ] && [ "$#" -lt 1 ]; then
 	exit 64
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ACL_SRC="$REPO_DIR/dbus/com.presire.qsnapper.Operations.conf"
-DBUS_DAEMON="${DBUS_DAEMON:-/usr/bin/dbus-daemon}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"         # 本スクリプトのあるディレクトリ
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"                           # リポジトリルート
+ACL_SRC="$REPO_DIR/dbus/com.presire.qsnapper.Operations.conf"    # 複製元の実ACL設定
+DBUS_DAEMON="${DBUS_DAEMON:-/usr/bin/dbus-daemon}"                # dbus-daemonのパス(環境変数で上書き可)
 
 if [ ! -r "$ACL_SRC" ]; then
 	echo "ERROR: ACL conf not readable: $ACL_SRC" >&2
@@ -50,13 +54,18 @@ if ! unshare --map-root-user true 2>/dev/null; then
 	exit 77
 fi
 
-TMPROOT="$(mktemp -d /tmp/qsnapper-isolated-dbus.XXXXXX)"
+TMPROOT="$(mktemp -d /tmp/qsnapper-isolated-dbus.XXXXXX)"    # この実行専用の一時ルート
 mkdir -p "$TMPROOT/run" "$TMPROOT/conf" "$TMPROOT/acl" "$TMPROOT/fixtures"
 
+#
+# @brief 一時リソースを後始末して元の終了コードで終了する
+# @return なし (渡された終了コードでexitする)
+# @note [EXIT]/[INT]/[TERM]トラップから呼ばれる
+#       名前空間の終了だけでもデーモンは消えるが、早期失敗でも残さないよう明示的に始末する
+#
 cleanup() {
 	local rc=$?
-	# Belt and braces: the namespace teardown already kills the daemon when the
-	# inner shell exits, but make sure nothing survives even on early failure.
+	# 念のため: 名前空間の後始末でデーモンは消えるが、早期失敗でも残さない
 	pkill -f "dbus-daemon.*$TMPROOT" 2>/dev/null || true
 	rm -rf -- "$TMPROOT"
 	echo "CLEANUP: killed any dbus-daemon using $TMPROOT; removed temp root $TMPROOT (bus socket tmpfs, generated system.conf, ACL conf copy, fixture scripts)"
@@ -64,12 +73,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Copy of the REAL per-member ACL so the deny-by-default policy is exercised.
+# 既定拒否ポリシーが実際に効くよう、メンバー単位の実ACLを複製する
 cp -- "$ACL_SRC" "$TMPROOT/acl/com.presire.qsnapper.Operations.conf"
 chmod 0444 "$TMPROOT/acl/com.presire.qsnapper.Operations.conf"
 
-SOCKDIR="$TMPROOT/run/socket"
-MAIN_CONF="$TMPROOT/conf/system.conf"
+SOCKDIR="$TMPROOT/run/socket"                 # プライベートバスのソケットディレクトリ
+MAIN_CONF="$TMPROOT/conf/system.conf"    # 生成するプライベートバス設定
 cat >"$MAIN_CONF" <<'EOF'
 <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -146,7 +155,7 @@ sed -i \
 	"$MAIN_CONF"
 chmod 0444 "$MAIN_CONF"
 
-# Inner shell: executes INSIDE the user/mount/PID namespace as mapped uid 0.
+# 内部シェル: user/mount/PID名前空間内でmapped uid 0として実行される
 INNER="$TMPROOT/inner.sh"
 cat >"$INNER" <<'EOF'
 #!/usr/bin/env bash
@@ -209,7 +218,7 @@ EOF
 chmod 0700 "$INNER"
 
 if [ "$SELFTEST" -eq 1 ]; then
-	# Throwaway service owning com.presire.qsnapper.Operations as uid 0.
+	# セルフテスト用の使い捨てサービス (uid 0でcom.presire.qsnapper.Operationsを所有する)
 	cat >"$TMPROOT/fixtures/fixture_service.py" <<'EOF'
 #!/usr/bin/env python3
 """Throwaway D-Bus service for the harness self-test.
@@ -250,8 +259,8 @@ print("SERVICE_READY", flush=True)
 loop.run()
 EOF
 
-	# Self-test client: proves uid 0, name ownership, allowed call,
-	# AccessDenied on non-allowlisted member, and two distinct unique names.
+	# セルフテストクライアント: uid 0、名前所有、許可メソッドの成功、
+	# 非許可メソッドのAccessDenied、異なる2つのunique nameを確認する
 	cat >"$TMPROOT/fixtures/selftest.py" <<'EOF'
 #!/usr/bin/env python3
 """Harness self-test: captures the four required observables."""

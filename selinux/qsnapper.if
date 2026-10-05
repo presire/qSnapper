@@ -1,12 +1,12 @@
-## <summary>qSnapper - Qt6/QML GUI for Btrfs/Snapper snapshot management</summary>
+## <summary>Btrfs/Snapperのスナップショットを管理するQt6/QMLのGUIアプリケーション</summary>
 
 ########################################
 ## <summary>
-##	Execute qsnapper in the qsnapper domain.
+##	qsnapperをqsnapperドメインで実行する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed to transition.
+##	ドメイン遷移を許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -21,17 +21,16 @@ interface(`qsnapper_domtrans',`
 
 ########################################
 ## <summary>
-##	Execute qsnapper in the qsnapper domain,
-##	and allow the specified role the qsnapper domain.
+##	qsnapperをqsnapperドメインで実行し、指定したロールにqsnapperドメインを許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed to transition.
+##	ドメイン遷移を許可するドメイン
 ##	</summary>
 ## </param>
 ## <param name="role">
 ##	<summary>
-##	Role allowed access.
+##	アクセスを許可するロール
 ##	</summary>
 ## </param>
 #
@@ -47,11 +46,11 @@ interface(`qsnapper_run',`
 
 ########################################
 ## <summary>
-##	Send and receive D-Bus messages with qsnapper.
+##	qsnapperとのD-Busメッセージの送受信を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed to chat.
+##	通信を許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -67,11 +66,11 @@ interface(`qsnapper_dbus_chat',`
 
 ########################################
 ## <summary>
-##	Read qsnapper configuration files.
+##	qsnapperの設定ファイルの読み取りを許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -88,11 +87,11 @@ interface(`qsnapper_read_config',`
 
 ########################################
 ## <summary>
-##	Manage qsnapper configuration files.
+##	qsnapperの設定ファイルの管理を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -109,11 +108,11 @@ interface(`qsnapper_manage_config',`
 
 ########################################
 ## <summary>
-##	Read qsnapper snapshot files and directories.
+##	qsnapperのスナップショットファイルとディレクトリの読み取りを許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -130,11 +129,11 @@ interface(`qsnapper_read_snapshots',`
 
 ########################################
 ## <summary>
-##	Manage qsnapper snapshot files and directories.
+##	qsnapperのスナップショットファイルとディレクトリの管理を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -151,11 +150,11 @@ interface(`qsnapper_manage_snapshots',`
 
 ########################################
 ## <summary>
-##	Execute qsnapper D-Bus service in the qsnapper_dbus domain.
+##	qsnapperのD-Busサービスをqsnapper_dbusドメインで実行する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed to transition.
+##	ドメイン遷移を許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -170,11 +169,11 @@ interface(`qsnapper_dbus_domtrans',`
 
 ########################################
 ## <summary>
-##	Send and receive D-Bus messages with qsnapper D-Bus service.
+##	qsnapperのD-Busサービスとのメッセージの送受信を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed to chat.
+##	通信を許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -190,11 +189,11 @@ interface(`qsnapper_dbus_service_chat',`
 
 ########################################
 ## <summary>
-##	Read qsnapper log files.
+##	qsnapperのログファイルの読み取りを許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -209,11 +208,11 @@ interface(`qsnapper_read_log',`
 
 ########################################
 ## <summary>
-##	Append to qsnapper log files.
+##	qsnapperのログファイルへの追記を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -228,11 +227,11 @@ interface(`qsnapper_append_log',`
 
 ########################################
 ## <summary>
-##	Manage qsnapper log files.
+##	qsnapperのログファイルの管理を許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 #
@@ -248,17 +247,16 @@ interface(`qsnapper_manage_log',`
 
 ########################################
 ## <summary>
-##	All of the rules required to administrate
-##	a qsnapper environment.
+##	qsnapper環境を管理するために必要な全てのルールを許可する
 ## </summary>
 ## <param name="domain">
 ##	<summary>
-##	Domain allowed access.
+##	アクセスを許可するドメイン
 ##	</summary>
 ## </param>
 ## <param name="role">
 ##	<summary>
-##	Role allowed access.
+##	アクセスを許可するロール
 ##	</summary>
 ## </param>
 ## <rolecap/>

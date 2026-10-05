@@ -1,3 +1,11 @@
+/**
+ * @file tst_restoreplanexecutor.cpp
+ * @brief RestorePlanExecutor の owner境界と chunk 状態機械の単体テスト
+ *
+ * manual scheduler と recording callback を与え、計画の開始・継続・取消・
+ * 失効・放棄・実行中消滅の各経路と、終端通知が必ず一度だけ発火することを確認する
+ */
+
 #include <QQueue>
 #include <QTest>
 #include <QVector>
@@ -9,9 +17,9 @@ using namespace qsnapper::restore;
 
 namespace {
 
-constexpr qint64 kInitialTimeMs = 1000;
-const QString kOwner = QStringLiteral(":1.1");
-const QString kOtherOwner = QStringLiteral(":1.2");
+constexpr qint64 kInitialTimeMs = 1000;              // テスト開始時刻(ms)
+const QString kOwner = QStringLiteral(":1.1");        // 正当な呼び出し元
+const QString kOtherOwner = QStringLiteral(":1.2");   // 別クライアント
 
 /**
  * @brief ManifestErrorをQCOMPARE可能な整数へ変換する
@@ -24,19 +32,21 @@ int errorValue(ManifestError error)
 }
 
 /**
+ * @struct CallbackRecord
  * @brief callbackの呼び出し結果を保持するrecording sink
  */
 struct CallbackRecord {
-    QStringList appliedPaths;
-    QVector<int> progressCurrent;
-    QVector<int> progressTotal;
-    QStringList progressPaths;
-    QVector<ManifestState> finishedStates;
-    QStringList finishedMessages;
-    QString failingPath;
+    QStringList appliedPaths;                // 適用が成功したpath列
+    QVector<int> progressCurrent;            // progress通知の現在値
+    QVector<int> progressTotal;              // progress通知の総数
+    QStringList progressPaths;               // progress通知の対象path
+    QVector<ManifestState> finishedStates;   // 終端通知の状態
+    QStringList finishedMessages;            // 終端通知のメッセージ
+    QString failingPath;                     // このpathの適用だけを失敗させる
 };
 
 /**
+ * @class ManualScheduler
  * @brief chunkを明示的に一つずつ実行できるmanual scheduler
  */
 class ManualScheduler
@@ -84,10 +94,10 @@ public:
         return m_chunks.size();
     }
 
-    int scheduleCount = 0;
+    int scheduleCount = 0;  // enqueueされた通算回数
 
 private:
-    QQueue<std::function<void()>> m_chunks;
+    QQueue<std::function<void()>> m_chunks;  // 未実行chunkの待ち行列
 };
 
 /**
@@ -180,26 +190,41 @@ void configureExecutor(RestorePlanExecutor &executor,
 } // namespace
 
 /**
- * @brief RestorePlanExecutorのowner境界とchunk状態機械を検証する
+ * @class TestRestorePlanExecutor
+ * @brief RestorePlanExecutorのowner境界とchunk状態機械を検証するテストスイート
  */
 class TestRestorePlanExecutor : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief 全entryを順序通り適用してCompletedを一度通知することを確認する */
     void happyPathCompletesInOrder();
+    /** @brief 複数chunkのscheduleと元のtotalに対する単調progressを確認する */
     void multiChunkProgressUsesOriginalTotal();
+    /** @brief 異なるownerのstart・continue・cancelがcallbackを一切発火しないことを確認する */
     void crossOwnerCallsDoNotInvokeCallbacks();
+    /** @brief Completed計画のstart・continue replayがcallbackを増やさないことを確認する */
     void completedPlanRejectsReplay();
+    /** @brief TTL超過後のstartがExpiredとなりcallbackを発火しないことを確認する */
     void expiredPlanDoesNotInvokeCallbacks();
+    /** @brief abandon後は予約済みchunkが何も発火しないことを確認する */
     void abandonedPlanDropsQueuedChunks();
+    /** @brief 最初のchunk後のcancelが後続entryを止めCancelledを一度通知することを確認する */
     void cancelAtChunkBoundaryStopsLaterEntries();
+    /** @brief applier失敗が後続entryを止めFailedを一度通知することを確認する */
     void applierFailureFailsOnce();
+    /** @brief startされていないFrozen計画へのrequestContinueがWrongStateで拒否されることを確認する */
     void continueOnFrozenPlanIsRejectedAsWrongState();
+    /** @brief cancelを2回要求すると2回目がAlreadyTerminalで拒否されfinishedが1回のみ発火することを確認する */
     void cancelTwiceIsRejectedAsAlreadyTerminal();
+    /** @brief cancel後のrequestContinueがAlreadyTerminalで拒否され追加のapplier呼び出しを発生させないことを確認する */
     void continueAfterCancelDoesNotResumeWork();
+    /** @brief 実行中の計画がTTLを跨いで停滞しても回収されず最後まで実行されることを確認する */
     void planStalledPastTtlDuringExecutionKeepsRunning();
+    /** @brief 実行中の計画がregistryから消滅した場合にFailed終端を必ず一度通知することを確認する */
     void vanishedPlanDuringExecutionEmitsFailedTerminal();
+    /** @brief entryごとのkeepAliveにより単一chunkが長時間かかってもidle TTLが満了しないことを確認する */
     void longRunningEntriesKeepPlanAlive();
 };
 
@@ -596,7 +621,7 @@ void TestRestorePlanExecutor::continueAfterCancelDoesNotResumeWork()
  * セキュリティ回帰ロック: 修正前はRunning計画もTTL満了で回収されたため、
  * 任意のローカルユーザがPolkitプロンプトを開いたまま放置してevent loopを
  * TTL超過までブロックするだけで、認可済みの復元が中途で黙って破棄され、
- * live filesystemが中途半端な状態のまま残っていた。
+ * live filesystemが中途半端な状態のまま残っていた
  */
 void TestRestorePlanExecutor::planStalledPastTtlDuringExecutionKeepsRunning()
 {
@@ -642,8 +667,8 @@ void TestRestorePlanExecutor::planStalledPastTtlDuringExecutionKeepsRunning()
  * @brief 実行中の計画がregistryから消滅した場合、Failed終端を必ず一度通知することを検証する
  *
  * F2欠陥の回帰ロック: 修正前はfinishPlan()を経由せずbareなm_activePlans.remove(id)で
- * 無言破棄されるため、finishedStatesが空のままとなりGUIが復元中のまま固まっていた。
- * owner消失時のremoveByOwner等でmanifestが消えた場合も終端通知は必ず発火する。
+ * 無言破棄されるため、finishedStatesが空のままとなりGUIが復元中のまま固まっていた
+ * owner消失時のremoveByOwner等でmanifestが消えた場合も終端通知は必ず発火する
  */
 void TestRestorePlanExecutor::vanishedPlanDuringExecutionEmitsFailedTerminal()
 {
@@ -685,7 +710,7 @@ void TestRestorePlanExecutor::vanishedPlanDuringExecutionEmitsFailedTerminal()
  * @brief entryごとのkeepAliveにより、単一chunkが長時間かかってもidle TTLが満了しないことを検証する
  *
  * applierがentryごとにclockを進めるため、修正前 (per-entry keepAliveが無い状態) では
- * 数entry適用しただけでTTLを超過しfinishVanishedPlan経由でFailedとなっていた。
+ * 数entry適用しただけでTTLを超過しfinishVanishedPlan経由でFailedとなっていた
  */
 void TestRestorePlanExecutor::longRunningEntriesKeepPlanAlive()
 {

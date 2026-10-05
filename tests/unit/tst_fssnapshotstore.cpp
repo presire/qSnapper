@@ -1,10 +1,11 @@
-// tst_fssnapshotstore.cpp
-//
-// FsSnapshotStore の単体テスト
-//
-// 対象の不具合: 非特権のGUIが/var/lib/qsnapperへ書き込もうとしており、権限的に必ず失敗していた
-// 保存先がユーザー単位のデータディレクトリ (QStandardPaths::AppLocalDataLocation) であることと、
-// 保存・読み込み・削除の往復が成立することを固定する
+/**
+ * @file tst_fssnapshotstore.cpp
+ * @brief FsSnapshotStoreの保存先と往復動作を検証する単体テスト
+ *
+ * 対象の不具合: 非特権のGUIが/var/lib/qsnapperへ書き込もうとしており、権限的に必ず失敗していた
+ * 保存先がユーザ単位のデータディレクトリ (QStandardPaths::AppLocalDataLocation) であることと、
+ * 保存・読み込み・削除の往復が成立することを固定する
+ */
 
 #include <QtTest/QtTest>
 #include <QDir>
@@ -13,7 +14,8 @@
 #include "fssnapshotstore.h"
 
 /**
- * @brief FsSnapshotStore の保存先と往復動作を検証するテストクラス
+ * @class TestFsSnapshotStore
+ * @brief FsSnapshotStoreの保存先と往復動作を検証するテストクラス
  */
 class TestFsSnapshotStore : public QObject
 {
@@ -26,7 +28,7 @@ private slots:
     void invalidPurposeIsRejected();
 
 private:
-    QString m_dataDir;
+    QString m_dataDir;      // テストで使うユーザ単位のデータディレクトリ
 };
 
 /**
@@ -34,7 +36,7 @@ private:
  */
 void TestFsSnapshotStore::initTestCase()
 {
-    // 実ユーザーのデータディレクトリを汚さないよう、Qtのテストモードの場所を使う
+    // 実ユーザのデータディレクトリを汚さないよう、Qtのテストモードの場所を使う
     QStandardPaths::setTestModeEnabled(true);
     QCoreApplication::setOrganizationName(QStringLiteral("Presire"));
     QCoreApplication::setApplicationName(QStringLiteral("qSnapperFsSnapshotStoreTest"));
@@ -56,7 +58,7 @@ void TestFsSnapshotStore::cleanupTestCase()
 }
 
 /**
- * @brief 保存・読み込み・削除がユーザー単位のデータディレクトリ上で成立することを確認する
+ * @brief 保存・読み込み・削除がユーザ単位のデータディレクトリ上で成立することを確認する
  */
 void TestFsSnapshotStore::saveLoadCleanRoundTripInUserDataDirectory()
 {

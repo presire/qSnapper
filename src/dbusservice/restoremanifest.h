@@ -1,85 +1,48 @@
+/**
+ * @file restoremanifest.h
+ * @brief 単一復元計画のD-Bus非依存な状態機械
+ *
+ * データ型は restoremanifesttypes.h に分離した
+ * 所有と上限の管理は restoremanifestregistry.h を参照すること
+ * 本ヘッダは registry までまとめて取り込むため既存の取り込み元は変更不要である
+ */
+
 #ifndef QSNAPPER_RESTOREMANIFEST_H
 #define QSNAPPER_RESTOREMANIFEST_H
 
 #include <QString>
-#include <QStringList>
 #include <QVector>
 #include <QtGlobal>
 
-#include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 
+#include "restoremanifesttypes.h"
+
+// 単一復元計画の状態機械を扱う名前空間
 namespace qsnapper::restore {
 
 /**
- * @brief 復元マニフェストの単調なライフサイクル状態
- */
-enum class ManifestState {
-    Staging,
-    Frozen,
-    Running,
-    Completed,
-    Failed,
-    Cancelled
-};
-
-/**
- * @brief マニフェストに固定される復元方式
- */
-enum class RestoreMode {
-    YastCompatible,
-    DirectCopy
-};
-
-/**
- * @brief マニフェスト操作の機械可読エラー
- */
-enum class ManifestError {
-    None,
-    NotFound,
-    OwnerMismatch,
-    WrongState,
-    Expired,
-    CapacityExceeded,
-    InvalidArgument,
-    AlreadyTerminal,
-    GlobalLimit
-};
-
-/**
- * @brief 順序を保持する単一の復元対象
- */
-struct RestoreEntry {
-    QString path;
-    QString changeType;
-};
-
-/**
- * @brief 外部へ公開できるマニフェストの状態スナップショット
- */
-struct ManifestStatus {
-    QString id;
-    ManifestState state = ManifestState::Staging;
-    int totalEntries = 0;
-    int cursor = 0;
-    int processed = 0;
-    RestoreMode mode = RestoreMode::YastCompatible;
-    QString configName;
-    int snapshotNumber = -1;
-    // 復元元との比較相手
-    // 0は「現在のシステム」を表すsentinelである
-    // 内部専用のfieldであり、GetRestorePlanStatusのCSVには含めない
-    int counterpartSnapshotNumber = -1;
-    QString lastError;
-};
-
-/**
+ * @class RestoreManifest
  * @brief 単一復元計画のD-Bus非依存な状態機械
  *
  * owner、設定、スナップショット、mode、id、TTLは構築後不変である
  * freeze後のエントリ列はconstなコンテナへ移され、型として変更できない
+ *
+ * m_owner : 構築時に固定されたD-Bus呼び出し元のユニーク名
+ * m_configName : 構築時に固定されたSnapper設定名
+ * m_snapshotNumber : 構築時に固定された復元元スナップショット番号
+ * m_counterpartSnapshotNumber : 構築時に固定された比較相手番号 (0は現在のシステム)
+ * m_mode : 構築時に固定された復元方式
+ * m_id : 構築時に固定された推測困難なマニフェスト識別子
+ * m_creationTimeMs : 作成時刻 (ミリ秒)
+ * m_ttlMs : 最終活動から失効するまでの時間 (ミリ秒)
+ * m_state : 現在のライフサイクル状態
+ * m_stagingEntries : Staging中に末尾へ追加する可変のエントリ列
+ * m_frozenEntries : freeze後に移される変更不能なエントリ列
+ * m_cursor : 次に処理する0始まりの位置
+ * m_lastActivityMs : TTL判定の起点となる最終活動時刻 (ミリ秒)
+ * m_lastError : 人間向けの失敗理由
  */
 class RestoreManifest
 {
@@ -156,19 +119,20 @@ public:
      * Running状態の計画は認可済みかつexecutorが駆動中であり、TTL回収の対象外とする
      * (owner消失時はregistryのremoveByOwnerが回収する)
      *
-     * @param nowMs 判定時刻 (milliseconds)
+     * @param nowMs 判定時刻 (ミリ秒)
      * @return 非Runningかつ最終活動からTTLを超過していればtrue
      */
     bool isExpired(qint64 nowMs) const;
 
     /**
      * @brief 最終活動時刻を更新する
-     * @param nowMs 新しい最終活動時刻 (milliseconds)
+     * @param nowMs 新しい最終活動時刻 (ミリ秒)
      */
     void touch(qint64 nowMs);
 
+    // 構築時に固定された値を返す参照系
     /**
-     * @brief 所有者unique nameを返す
+     * @brief 所有者ユニーク名を返す
      * @return 構築時に固定された所有者
      */
     const QString &owner() const;
@@ -209,6 +173,7 @@ public:
      */
     RestoreMode mode() const;
 
+    // エントリ列の参照系
     /**
      * @brief 保存済みエントリ総数を返す
      * @return エントリ総数
@@ -243,380 +208,43 @@ public:
     ManifestStatus status() const;
 
 private:
+    // 内部参照系
+    /**
+     * @brief 現在有効なエントリ列を返す
+     * @return 凍結済みなら凍結列、それ以外はStaging列
+     */
     const QVector<RestoreEntry> &entries() const;
+
+    /**
+     * @brief 任意のエラー格納先へ値を設定する
+     * @param err 結果エラーの格納先 (空でもよい)
+     * @param value 設定する値
+     */
     static void setError(ManifestError *err, ManifestError value);
 
-    const QString m_owner;
-    const QString m_configName;
-    const int m_snapshotNumber;
-    const int m_counterpartSnapshotNumber;
-    const RestoreMode m_mode;
-    const QString m_id;
-    const qint64 m_creationTimeMs;
-    const qint64 m_ttlMs;
-    ManifestState m_state = ManifestState::Staging;
-    QVector<RestoreEntry> m_stagingEntries;
-    std::unique_ptr<const QVector<RestoreEntry>> m_frozenEntries;
-    int m_cursor = 0;
-    qint64 m_lastActivityMs;
-    QString m_lastError;
+    // 構築時に固定される値
+    const QString m_owner;                  // D-Bus呼び出し元のユニーク名
+    const QString m_configName;             // Snapper設定名
+    const int m_snapshotNumber;             // 復元元スナップショット番号
+    const int m_counterpartSnapshotNumber;  // 比較相手番号 (0は現在のシステム)
+    const RestoreMode m_mode;               // 復元方式
+    const QString m_id;                     // 推測困難なマニフェスト識別子
+    const qint64 m_creationTimeMs;          // 作成時刻 (ミリ秒)
+    const qint64 m_ttlMs;                   // 最終活動から失効するまでの時間 (ミリ秒)
+    // 可変の実行状態
+    ManifestState m_state = ManifestState::Staging;              // 現在のライフサイクル状態
+    QVector<RestoreEntry> m_stagingEntries;                      // Staging中の可変エントリ列
+    std::unique_ptr<const QVector<RestoreEntry>> m_frozenEntries; // freeze後に移される変更不能列
+    int m_cursor = 0;                                            // 次に処理する0始まりの位置
+    qint64 m_lastActivityMs;                                     // TTL判定の起点となる最終活動時刻
+    QString m_lastError;                                         // 人間向けの失敗理由
 
     Q_DISABLE_COPY(RestoreManifest)
 };
 
-/**
- * @brief owner束縛・TTL・容量上限を強制して復元計画を所有するregistry
- *
- * 単一Qtイベントループスレッドから利用する非スレッドセーフな所有コンテナである
- */
-class RestoreManifestRegistry
-{
-public:
-    static constexpr int kMaxEntriesPerManifest = 200000;
-    static constexpr qint64 kMaxPathBytesPerManifest = 64 * 1024 * 1024;
-    static constexpr int kMaxEntriesPerStageChunk = 5000;
-    static constexpr int kMaxManifestsPerOwner = 4;
-    static constexpr int kMaxManifestsGlobal = 32;
-    static constexpr qint64 kDefaultTtlMs = 10 * 60 * 1000;
-
-    // staging (BeginRestorePlan / StageRestoreEntries) は設計上、認可を要さない
-    // マニフェスト単位の上限だけでは、攻撃者がD-Bus接続を複数開くだけで (ユニーク名ごとに別ownerとして数えられるため) 上限を掛け算でき、
-    // rootサービスに"32マニフェスト x 64[MB] = 2[GB]"を確保させられた
-    //
-    // 以下のグローバル予算は、その掛け算をプロセス全体で1回に閉じる
-    //
-    // 単位はUTF-8 path byteとエントリ数の2軸を持つ
-    // path byteだけでは「1文字pathを大量にstageする」経路 (エントリ1件あたりQString 2本とQVector slotの固定費が乗る) を縛れないため、両方を強制する
-    // 値は「最大構成の計画1件 + 別途staging中の1件」が通る大きさに取ってある
-    static constexpr qint64 kMaxEntriesGlobal = 2 * qint64(kMaxEntriesPerManifest);
-    static constexpr qint64 kMaxPathBytesGlobal = 2 * kMaxPathBytesPerManifest;
-
-    // UID単位の予算
-    // ownerはD-Busのunique name単位であるため、1人のユーザが接続を複数開けば、owner単位の上限を掛け算してグローバル予算を使い切れる
-    // (例: 8接続 x 4計画で全体の32計画を占有し、正規の復元をGlobalLimitで阻止できる)
-    // 呼び出し元のUIDごとにも上限を設け、1人のユーザが使えるのはグローバル予算の一部までとする
-    // 値は「最大構成の計画1件」が通る大きさで、残りのグローバル予算は他のユーザの復元に残る
-    static constexpr int kMaxManifestsPerUid = kMaxManifestsPerOwner;
-    static constexpr qint64 kMaxEntriesPerUid = qint64(kMaxEntriesPerManifest);
-    static constexpr qint64 kMaxPathBytesPerUid = kMaxPathBytesPerManifest;
-
-    /**
-     * @brief 実時間clockを使用する空のregistryを構築する
-     */
-    RestoreManifestRegistry();
-
-    /**
-     * @brief TTL判定と活動更新に使うclockを差し替える
-     * @param clock millisecondsを返す関数
-     *              空なら実時間clockへ戻す
-     */
-    void setClock(std::function<qint64()> clock);
-
-    /**
-     * @brief テスト専用にエントリ数・path byte上限を縮小する
-     * @param maxEntriesPerManifest 正のマニフェスト単位エントリ数上限
-     * @param maxPathBytesPerManifest 非負のマニフェスト単位UTF-8 path byte上限
-     * @param maxEntriesGlobal 正のregistry全体エントリ数上限
-     * @param maxPathBytesGlobal 非負のregistry全体UTF-8 path byte上限
-     * @param maxEntriesPerUid 正のUID単位エントリ数上限
-     * @param maxPathBytesPerUid 非負のUID単位UTF-8 path byte上限
-     *
-     * productionの呼び出し側では使用しない
-     * 固定の公開上限を超える値は固定上限へ丸められる
-     */
-    void setCapacityOverridesForTesting(
-        int maxEntriesPerManifest,
-        qint64 maxPathBytesPerManifest,
-        qint64 maxEntriesGlobal = kMaxEntriesGlobal,
-        qint64 maxPathBytesGlobal = kMaxPathBytesGlobal,
-        qint64 maxEntriesPerUid = kMaxEntriesPerUid,
-        qint64 maxPathBytesPerUid = kMaxPathBytesPerUid);
-
-    /**
-     * @brief ownerに束縛された空のStaging計画を作成する
-     * @param owner D-Bus呼び出し元のunique name
-     * @param ownerUid 呼び出し元のUID (UID単位の予算に使用する)
-     * @param configName Snapper設定名
-     * @param snapshotNumber 復元元スナップショット番号
-     * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
-     * @param mode 復元方式
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 成功時は推測困難なID、拒否時は空文字列
-     */
-    QString createStaging(const QString &owner, uint ownerUid,
-                          const QString &configName, int snapshotNumber,
-                          int counterpartSnapshotNumber, RestoreMode mode,
-                          ManifestError *err);
-
-    /**
-     * @brief owner確認後にpath / changeType列を原子的にstageする
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param paths path列
-     * @param changeTypes pathsと同数の変更種別列
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 追加成功時: true
-     */
-    bool stageEntries(const QString &id, const QString &owner,
-                      const QStringList &paths, const QStringList &changeTypes,
-                      ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェストをfreezeする
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 遷移成功時: true
-     */
-    bool freeze(const QString &id, const QString &owner, ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェストをRunningへ遷移する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 遷移成功時: true
-     */
-    bool markRunning(const QString &id, const QString &owner, ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェストのcursorを進める
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param count 進める正のエントリ数
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 更新成功時: true
-     */
-    bool advance(const QString &id, const QString &owner, int count,
-                 ManifestError *err);
-
-    /**
-     * @brief owner確認済みマニフェストのTTLだけを延長する
-     *
-     * 状態もcursorも変更せず、m_lastActivityMsのみ更新する
-     * 長時間かかる単一chunkの実行中にidle TTLが誤って満了するのを防ぐ
-     *
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param err 結果エラーの格納先
-     * @return TTLを延長できた場合: true
-     */
-    bool keepAlive(const QString &id, const QString &owner, ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェストをFailedへ遷移する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param reason 人間向けの失敗理由
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 遷移成功時: true
-     */
-    bool markFailed(const QString &id, const QString &owner,
-                    const QString &reason, ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェストをCancelledへ遷移する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 遷移成功時: true
-     */
-    bool cancel(const QString &id, const QString &owner, ManifestError *err);
-
-    /**
-     * @brief owner確認後にマニフェスト状態を取得する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 成功時は状態、拒否時はstd::nullopt
-     */
-    std::optional<ManifestStatus> status(const QString &id,
-                                         const QString &owner,
-                                         ManifestError *err);
-
-    /**
-     * @brief owner確認後にexecutor用エントリ範囲を取得する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @param offset 0始まりの開始位置
-     * @param count 最大取得数
-     * @param err 結果エラーの格納先 (省略可)
-     * @return 成功時はエントリ列、拒否時はstd::nullopt
-     */
-    std::optional<QVector<RestoreEntry>> entriesSlice(const QString &id,
-                                                       const QString &owner,
-                                                       int offset, int count,
-                                                       ManifestError *err);
-
-    /**
-     * @brief 消失したownerに属するマニフェストを全て削除する
-     * @param owner 削除対象owner
-     * @return 削除したマニフェスト数
-     */
-    int removeByOwner(const QString &owner);
-
-    /**
-     * @brief 現在時刻で失効したマニフェストを全て削除する
-     * @return 削除したマニフェスト数
-     */
-    int purgeExpired();
-
-    /**
-     * @brief idに一致するマニフェストを所有者確認なしで内部削除する
-     * @param id マニフェスト識別子
-     * @return 存在して削除した場合: true
-     */
-    bool remove(const QString &id);
-
-    /**
-     * @brief registry内のマニフェスト総数を返す
-     * @return マニフェスト総数
-     */
-    int count() const;
-
-    /**
-     * @brief 指定ownerに属するマニフェスト数を返す
-     * @param owner 集計対象owner
-     * @return 一致するマニフェスト数
-     */
-    int countForOwner(const QString &owner) const;
-
-    /**
-     * @brief 指定UIDに属するマニフェスト数を返す
-     * @param ownerUid 集計対象UID
-     * @return 一致するマニフェスト数
-     */
-    int countForUid(uint ownerUid) const;
-
-    /**
-     * @brief 全マニフェストが保持するUTF-8 path byteの合計を返す
-     *
-     * 走査対象は高々kMaxManifestsGlobal件であり、実行中の累算値を4箇所ある削除経路と同期させるよりも、都度集計する方が破綻しない
-     *
-     * @return path byte合計
-     */
-    qint64 globalPathBytes() const;
-
-    /**
-     * @brief 全マニフェストが保持するエントリ数の合計を返す
-     * @return エントリ数合計
-     */
-    qint64 globalEntries() const;
-
-private:
-    struct ManifestRecord {
-        std::unique_ptr<RestoreManifest> manifest;
-        qint64 pathBytes = 0;
-        uint ownerUid = 0;
-    };
-
-    using ManifestMap = std::map<QString, ManifestRecord>;
-
-    RestoreManifest *findOwned(const QString &id, const QString &owner,
-                               ManifestError *err);
-    static void setError(ManifestError *err, ManifestError value);
-    static qint64 defaultNowMs();
-
-    /**
-     * @brief 指定UIDのマニフェストが保持するエントリ数とpath byteの合計を返す
-     * @param ownerUid 集計対象UID
-     * @param entriesOut エントリ数合計の格納先
-     * @param pathBytesOut path byte合計の格納先
-     */
-    void usageForUid(uint ownerUid, qint64 *entriesOut, qint64 *pathBytesOut) const;
-
-    ManifestMap m_manifests;
-    std::function<qint64()> m_clock;
-    int m_maxEntriesPerManifest = kMaxEntriesPerManifest;
-    qint64 m_maxPathBytesPerManifest = kMaxPathBytesPerManifest;
-    qint64 m_maxEntriesGlobal = kMaxEntriesGlobal;
-    qint64 m_maxPathBytesGlobal = kMaxPathBytesGlobal;
-    qint64 m_maxEntriesPerUid = kMaxEntriesPerUid;
-    qint64 m_maxPathBytesPerUid = kMaxPathBytesPerUid;
-};
-
-/**
- * @brief 終端した復元計画の状態を短時間だけowner束縛で保持する
- *
- * 終端signalはsystem busの全接続へ届くため、失敗したpathなどの詳細は載せない
- * 詳細はこのstoreに残し、計画のownerだけがGetRestorePlanStatusで取得する
- *
- * 保持期間と件数に上限を設け、上限を超えた場合は期限の近いものから破棄する
- * 単一Qtイベントループスレッドから利用する非スレッドセーフなコンテナである
- */
-class FinishedRestorePlanStore
-{
-public:
-    static constexpr qint64 kDefaultRetentionMs = 60 * 1000;
-    static constexpr int kMaxEntries = RestoreManifestRegistry::kMaxManifestsGlobal;
-
-    /**
-     * @brief 実時間clockを使用する空のstoreを構築する
-     */
-    FinishedRestorePlanStore();
-
-    /**
-     * @brief 保持期限の判定に使うclockを差し替える
-     * @param clock millisecondsを返す関数
-     *              空なら実時間clockへ戻す
-     */
-    void setClock(std::function<qint64()> clock);
-
-    /**
-     * @brief 終端した計画の状態を記録する
-     * @param owner 計画のowner (D-Busのunique name)
-     * @param status 終端状態を設定済みの計画状態
-     *
-     * idが空の場合は記録しない
-     * ownerの照合はRestoreManifestRegistryと同じく完全一致で行う
-     */
-    void record(const QString &owner, const ManifestStatus &status);
-
-    /**
-     * @brief owner確認後に終端した計画の状態を取得する
-     * @param id マニフェスト識別子
-     * @param owner 呼び出し元owner
-     * @return 保持期限内かつownerが一致する場合は状態、それ以外はstd::nullopt
-     */
-    std::optional<ManifestStatus> status(const QString &id, const QString &owner);
-
-    /**
-     * @brief 消失したownerに属する記録を全て削除する
-     * @param owner 削除対象owner
-     * @return 削除した記録数
-     */
-    int removeByOwner(const QString &owner);
-
-    /**
-     * @brief 保持期限を過ぎた記録を削除する
-     * @return 削除した記録数
-     */
-    int purgeExpired();
-
-    /**
-     * @brief 保持している記録数を返す
-     * @return 記録数
-     */
-    int count() const;
-
-    /**
-     * @brief ownerに属する記録数を返す
-     * @param owner 対象owner
-     * @return 記録数
-     */
-    int countForOwner(const QString &owner) const;
-
-private:
-    struct FinishedRecord {
-        QString owner;
-        ManifestStatus status;
-        qint64 expiresAtMs = 0;
-    };
-
-    std::map<QString, FinishedRecord> m_records;
-    std::function<qint64()> m_clock;
-};
-
 } // namespace qsnapper::restore
+
+// 既存の取り込み元が変更なしで使えるよう所有管理までまとめて取り込む
+#include "restoremanifestregistry.h"
 
 #endif // QSNAPPER_RESTOREMANIFEST_H

@@ -6,24 +6,37 @@
 class QQuickWindow;
 
 /**
+ * @file windowstatemanager.h
+ * @brief メインウィンドウのジオメトリと最大化状態の永続化管理
+ */
+
+/**
+ * @class WindowStateManager
  * @brief メインウィンドウのサイズと最大化状態を永続化するクラス
  *
  * アプリケーション終了時に通常状態 (非最大化) の幅・高さと最大化状態をQSettingsへ保存し、次回起動時にウィンドウへ復元する
  * 最大化中は通常状態のサイズを追跡して保持することで、最大化解除時に元のサイズへ戻せるようにする
  *
- * 設定キー (グループ window) は既存の theme/mode と同じ形式で保存する:
- * - window/width     (int,  既定1280)
- * - window/height    (int,  既定900)
- * - window/maximized (bool, 既定false)
+ * 設定キー (グループ window) は既存の theme/mode と同じ形式で保存する
+ * window/width : int、既定1280
+ * window/height : int、既定900
+ * window/maximized : bool、既定false
  */
 class WindowStateManager : public QObject
 {
     Q_OBJECT
 
 public:
-    // コンストラクタ/デストラクタ
-    explicit WindowStateManager(QObject *parent = nullptr);    // コンストラクタ
-    ~WindowStateManager();                                     // デストラクタ
+    /**
+     * @brief WindowStateManagerを構築する
+     * @param parent Qt親オブジェクト
+     */
+    explicit WindowStateManager(QObject *parent = nullptr);
+
+    /**
+     * @brief WindowStateManagerを破棄する
+     */
+    ~WindowStateManager();
 
     /**
      * @brief 保存済みのウィンドウ状態を復元する
@@ -33,7 +46,7 @@ public:
      *
      * @param window 対象のウィンドウ
      */
-    void restore(QQuickWindow *window); // ウィンドウ状態を復元する
+    void restore(QQuickWindow *window);
 
     /**
      * @brief 現在のウィンドウ状態を保存する
@@ -43,17 +56,30 @@ public:
      *
      * @param window 対象のウィンドウ
      */
-    void save(QQuickWindow *window);    // ウィンドウ状態を保存する
+    void save(QQuickWindow *window);
 
 private:
     // サイズのクランプ
-    int clampWidth(QQuickWindow *window, int requestedWidth) const;     // 幅を画面内にクランプする
-    int clampHeight(QQuickWindow *window, int requestedHeight) const;   // 高さを画面内にクランプする
+    /**
+     * @brief 幅を画面の利用可能領域内にクランプする
+     * @param window 対象のウィンドウ
+     * @param requestedWidth 要求された幅
+     * @return 利用可能領域に収まる幅
+     */
+    int clampWidth(QQuickWindow *window, int requestedWidth) const;
+
+    /**
+     * @brief 高さを画面の利用可能領域内にクランプする
+     * @param window 対象のウィンドウ
+     * @param requestedHeight 要求された高さ
+     * @return 利用可能領域に収まる高さ
+     */
+    int clampHeight(QQuickWindow *window, int requestedHeight) const;
 
     // 追跡状態
-    bool m_restored;            // 復元済みフラグ (二重接続防止)
-    int m_normalWidth;          // 通常状態の幅
-    int m_normalHeight;         // 通常状態の高さ
+    bool m_restored;        // 復元済みフラグ (二重接続防止)
+    int m_normalWidth;      // 通常状態の幅
+    int m_normalHeight;     // 通常状態の高さ
 };
 
 #endif // WINDOWSTATEMANAGER_H

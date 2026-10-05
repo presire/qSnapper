@@ -37,33 +37,43 @@ qt6_standard_project_setup()
 # NO_PLUGIN指定でリソース埋め込みのためqmldirは不要
 qt6_policy(SET QTP0004 OLD)
 
+# GUIアプリケーション本体のC++ソース
 set(SOURCES
     src/main.cpp
     src/fssnapshot.cpp
     src/snapperservice.cpp
     src/fssnapshotstore.cpp
     src/snapshotlistmodel.cpp
-    src/filechangemodel.cpp
+    src/filechangeitem.cpp
+    src/filechangemodel_loading.cpp
+    src/filechangemodel_model.cpp
+    src/filechangemodel_restore.cpp
+    src/filechangemodel_transport.cpp
     src/thememanager.cpp
     src/snapshotgroupmodel.cpp
     src/singleinstanceguard.cpp
     src/windowstatemanager.cpp
 )
 
+# GUIアプリケーション本体の公開ヘッダー
 set(HEADERS
     include/fssnapshot.h
     include/snapperservice.h
     include/fssnapshotstore.h
     include/snapshotlistmodel.h
+    include/filechangeitem.h
     include/filechangemodel.h
+    include/restoreplantransport.h
     include/thememanager.h
     include/snapshotgroupmodel.h
     include/singleinstanceguard.h
     include/windowstatemanager.h
 )
 
+# GUIアプリケーションの実行ファイルを生成
 qt6_add_executable(qsnapper ${SOURCES} ${HEADERS})
 
+# includeディレクトリをGUI側の探索パスへ追加
 target_include_directories(qsnapper PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -80,7 +90,6 @@ qt6_add_qml_module(qsnapper
     QML_FILES
         qml/Main.qml
         qml/pages/SnapshotListPage.qml
-        qml/components/SnapshotItem.qml
         qml/components/SnapshotDetailDialog.qml
         qml/components/RestorePreviewDialog.qml
         qml/components/AboutqSnapperDialog.qml
@@ -115,6 +124,7 @@ target_compile_definitions(qsnapper PRIVATE
     QSNAPPER_VERSION="${PROJECT_VERSION}"
 )
 
+# GUI側で使用するQtモジュールをリンク
 target_link_libraries(qsnapper PRIVATE
     Qt6::Core
     Qt6::Gui
@@ -139,8 +149,17 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/translations
 set(DBUS_SERVICE_SOURCES
     src/dbusservice/main.cpp
     src/dbusservice/snapshotoperations.cpp
+    src/dbusservice/snapshotoperations_auth.cpp
+    src/dbusservice/snapshotoperations_snapshots.cpp
+    src/dbusservice/snapshotoperations_changes.cpp
+    src/dbusservice/snapshotoperations_diff.cpp
+    src/dbusservice/snapshotoperations_restore.cpp
+    src/dbusservice/snapshotoperations_restore_apply.cpp
     src/dbusservice/inputvalidator.cpp
     src/dbusservice/filesystemhelpers.cpp
+    src/dbusservice/filesystemhelpers_internal.cpp
+    src/dbusservice/filesystemhelpers_beneathroot.cpp
+    src/dbusservice/filesystemhelpers_replace.cpp
     src/dbusservice/restoremanifest.cpp
     src/dbusservice/restorevalidation.cpp
     src/dbusservice/restoreplanexecutor.cpp
@@ -148,9 +167,14 @@ set(DBUS_SERVICE_SOURCES
 
 set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
+    src/dbusservice/snapshotoperations_types.h
+    src/dbusservice/snapshotoperations_internal.h
     src/dbusservice/inputvalidator.h
     src/dbusservice/filesystemhelpers.h
+    src/dbusservice/filesystemhelpers_internal.h
     src/dbusservice/restoremanifest.h
+    src/dbusservice/restoremanifesttypes.h
+    src/dbusservice/restoremanifestregistry.h
     src/dbusservice/restorevalidation.h
     src/dbusservice/restoreplanexecutor.h
 )

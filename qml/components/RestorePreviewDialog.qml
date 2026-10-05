@@ -1,6 +1,16 @@
-// ファイル復元プレビューダイアログ
-// スナップショットとの差分を階層的に表示し、
-// 選択したファイル/ディレクトリを復元する機能を提供
+/**
+ * @file RestorePreviewDialog.qml
+ * @brief スナップショットとの差分を表示し、選択したファイルを復元するダイアログ
+ *
+ * SnapshotDetailDialogから開かれ、スナップショットとの差分をツリー表示する
+ * 復元はFileChangeModel経由で段階的復元計画 (BeginRestorePlan -> StageRestoreEntries -> CommitRestorePlan) として実行し、
+ * Commit時にPolkit認証を1度だけ受ける
+ * Pre/PostペアではPre<-->Post間の変更だけを巻き戻す差分ビューのみ復元を許可し、「vs 現在」ビューは閲覧専用とする
+ *
+ * 入力 : configName、snapshotNumber、preSnapshotNumber、postSnapshotNumber (親からバインド)
+ * 出力 : restoreConfirmed()シグナル
+ * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリー・復元計画)、BorderedDialog (枠付きダイアログの基底)
+ */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -15,9 +25,9 @@ BorderedDialog {
     property int postSnapshotNumber: 0               // Postスナップショット番号
     // 現在のTreeViewに表示中のスナップショット番号 (ラジオボタン切替で変更される)
     // snapshotNumberは親のQMLバインディング経由で渡されるため、ここで上書きするとバインディングが壊れ次回以降の表示が不正になる
-    // そのため内部状態は分離する。
-    property int activeSnapshotNumber: 0
-    readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0
+    // そのため内部状態は分離する
+    property int activeSnapshotNumber: 0             // 現在表示中のスナップショット番号
+    readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0  // Pre/Postペアかどうか
 
     // 表示モード定数
     // FileChangeModelは比較の第1引数を復元元として扱うため、Pre <--> Post差分の向きは復元先で決まる
@@ -25,19 +35,19 @@ BorderedDialog {
     readonly property int viewRevertToPre: 0     // Pre <--> Post差分をPreへ戻す向き (復元可)
     readonly property int viewReapplyToPost: 1   // Pre <--> Post差分をPostへ再適用する向き (復元可)
     readonly property int viewVsCurrent: 2       // 選択スナップショットと現在のシステムの差分 (Pre/Postペアでは閲覧専用)
-    property int viewMode: root.viewVsCurrent
+    property int viewMode: root.viewVsCurrent    // 現在の表示モード (初期値は対カレント比較)
 
     // Pre <--> Post間の差分を表示しているかどうか
-    readonly property bool prePostDiffMode: root.viewMode === root.viewRevertToPre
+    readonly property bool prePostDiffMode: root.viewMode === root.viewRevertToPre  // Pre<-->Post差分ビューかどうか
                                             || root.viewMode === root.viewReapplyToPost
 
     // 現在の表示から復元できるかどうか
     // Pre/Postペアでは、Pre <--> Post間で起きた変更だけを巻き戻せる差分ビューのみ復元を許可し、
     // 「vs 現在」ビューは閲覧専用とする (そちらから復元すると、Post以降の手動変更まで巻き戻るため)
-    readonly property bool restorable: root.isPrePostPair ? root.prePostDiffMode : true
+    readonly property bool restorable: root.isPrePostPair ? root.prePostDiffMode : true  // 復元可否
 
     // 復元元スナップショット番号 (0 = 現在の表示からは復元できない)
-    readonly property int restoreSourceNumber: {
+    readonly property int restoreSourceNumber: {  // 復元元スナップショット番号
         if (!root.isPrePostPair) return root.activeSnapshotNumber
         if (root.viewMode === root.viewRevertToPre) return root.preSnapshotNumber
         if (root.viewMode === root.viewReapplyToPost) return root.postSnapshotNumber
@@ -46,7 +56,11 @@ BorderedDialog {
 
     signal restoreConfirmed()                        // 復元確認シグナル
 
-    // 右ペインの選択状態・diff表示をクリアする共通ヘルパ
+    /**
+     * @brief 右ペインの選択状態とdiff表示をクリアする
+     * @note 右ペインの各プロパティ (fileSelected、selectedFilePath など) とdiffTextAreaの内容を初期化する
+     *       モデル側の状態には影響しない
+     */
     function resetRightPane() {
         rightPane.fileSelected = false
         rightPane.selectedFilePath = ""
@@ -58,7 +72,12 @@ BorderedDialog {
         diffTextArea.text = ""
     }
 
-    // Pre/Post または Single --> 対カレント比較
+    /**
+     * @brief 指定スナップショットとの対カレント比較ビューへ切り替える
+     * @param targetNumber 比較対象のスナップショット番号
+     * @note viewModeをviewVsCurrentへ変更し、FileChangeModel::loadChanges()でツリーを再読み込みする
+     *       右ペインの選択状態もクリアする
+     */
     function switchSnapshotView(targetNumber) {
         if (root.viewMode === root.viewVsCurrent && root.activeSnapshotNumber === targetNumber) return
         root.viewMode = root.viewVsCurrent
@@ -68,7 +87,11 @@ BorderedDialog {
         fileChangeModel.loadChanges()                  // ファイルツリーを再読み込み (切替先スナップショット vs 現在のシステムで比較)
     }
 
-    // Pre <--> Post間の差分ビューに切り替える
+    /**
+     * @brief Pre<-->Post間の差分ビューへ切り替える
+     * @param mode viewRevertToPre または viewReapplyToPost
+     * @note Pre/Postペアでない場合と既に同じモードの場合は何もしない
+     */
     function switchPrePostDiffView(mode) {
         if (!root.isPrePostPair) return
         if (root.viewMode === mode) return
@@ -77,9 +100,12 @@ BorderedDialog {
         loadPrePostDiff()
     }
 
-    // 現在のviewModeに対応する向きでPre <--> Post差分を読み込む
-    // 第1引数が復元元になるため、復元先スナップショットを先頭に置いて向きを揃える
-    // 第4引数のtrueで、復元元と現在のシステムの間に差異が無いエントリ (既に復元済みなど) を非表示にする
+    /**
+     * @brief 現在のviewModeに対応する向きでPre<-->Post差分を読み込む
+     * @note 第1引数が復元元になるため、復元先スナップショットを先頭に置いて向きを揃える
+     *       第4引数のtrueで、復元元と現在のシステムの間に差異が無いエントリ (既に復元済みなど) を非表示にする
+     *       FileChangeModel::loadChangesBetween()を呼び出す
+     */
     function loadPrePostDiff() {
         if (root.viewMode === root.viewRevertToPre) {
             fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
@@ -95,7 +121,11 @@ BorderedDialog {
         }
     }
 
-    // 現在の表示条件を保ったままファイルツリーを再読み込みする
+    /**
+     * @brief 現在の表示条件を保ったままファイルツリーを再読み込みする
+     * @note 復元後の再表示に使う
+     *       Pre/Post差分ビューなら同じ向きで、対カレント比較なら現在のスナップショットで読み直す
+     */
     function reloadCurrentView() {
         if (root.prePostDiffMode) {
             loadPrePostDiff()
@@ -149,7 +179,7 @@ BorderedDialog {
     }
 
     // ファイル変更モデル
-    // スナップショットとの差分を階層的に管理
+    // FileChangeModel (C++) がSnapperの変更出力をツリー化し、選択状態とファイル差分取得と段階的復元計画を提供する
     FileChangeModel {
         id: fileChangeModel
 
@@ -195,10 +225,10 @@ BorderedDialog {
                 // 右ペインの選択状態をリセット
                 root.resetRightPane()
 
-                // 復元後は現在のシステムの状態を一覧へ反映させる。
+                // 復元後は現在のシステムの状態を一覧へ反映させる
                 // Pre<-->Post差分はスナップショット同士の比較であり、復元しても内容は変わらないため、
-                // Pre/Postペアでは復元先スナップショット vs 現在 へ切り替える。
-                // このビューには範囲外で追加されたファイルも現れるため、意図しない巻き戻りが無いことも確認できる。
+                // Pre/Postペアでは復元先スナップショット vs 現在 へ切り替える
+                // このビューには範囲外で追加されたファイルも現れるため、意図しない巻き戻りが無いことも確認できる
                 var restoreTarget = root.restoreSourceNumber
                 if (root.isPrePostPair && restoreTarget > 0) {
                     root.switchSnapshotView(restoreTarget)
@@ -371,6 +401,7 @@ BorderedDialog {
                                         }
                                     }
 
+                                    // 行の内容: 復元チェックボックス、変更タイプバッジ、種別アイコン、名前
                                     contentItem: RowLayout {
                                         spacing: 5
 
@@ -497,7 +528,11 @@ BorderedDialog {
                 property string selectedStatusFlags: ""
                 property var fileDetails: ({})
 
-                // 差分を省略した理由 (details部のdiffOmitted) を表示用の文言に変換
+                /**
+                 * @brief 差分を省略した理由を表示用の文言へ変換する
+                 * @param reason サービスが返した省略理由 (binary / too_large / too_many_changes / special_file)
+                 * @return 理由に対応する翻訳済みの説明文、未知の理由では汎用の文言
+                 */
                 function diffOmittedMessage(reason) {
                     switch (reason) {
                         case "binary":
@@ -513,12 +548,21 @@ BorderedDialog {
                     }
                 }
 
-                // HTMLエスケープ
+                /**
+                 * @brief HTMLの特殊文字を実体参照へエスケープする
+                 * @param text エスケープ対象の文字列
+                 * @return & < > を置換した文字列
+                 */
                 function escapeHtml(text) {
                     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 }
 
-                // diffテキストをカラーHTML に変換
+                /**
+                 * @brief diffテキストを行単位で着色したHTMLへ変換する
+                 * @param diffText 整形前のdiff文字列
+                 * @return pre要素で包んだHTML文字列
+                 * @note 追加行は新規色、削除行は削除色、ヘッダ行は変更色とタイプ変更色で着色する
+                 */
                 function formatDiffHtml(diffText) {
                     var lines = diffText.split('\n')
                     var html = '<pre style="font-family: monospace; font-size: 14px; white-space: pre-wrap;">'
@@ -540,7 +584,10 @@ BorderedDialog {
                     return html
                 }
 
-                // コンテンツ変更テキストを取得
+                /**
+                 * @brief 選択中ファイルの変更種別に対応する説明文を返す
+                 * @return 変更種別に応じた翻訳済みの説明文
+                 */
                 function getContentStatusText() {
                     switch (selectedChangeType) {
                         case 0: return qsTr("New file was created.")
@@ -918,7 +965,13 @@ BorderedDialog {
             }
         }
 
-        // 受信した進捗をバッファへ蓄積する (UIへは反映しない)
+        /**
+         * @brief 受信した進捗をバッファへ蓄積する
+         * @param current 現在の処理済み件数
+         * @param total 総件数
+         * @param filePath 現在処理中のファイルパス
+         * @note UIへは即時反映せず、flushTimerで一定間隔ごとにまとめて反映する
+         */
         function queueProgress(current, total, filePath) {
             pendingProgress = current
             pendingTotal = total
@@ -929,7 +982,11 @@ BorderedDialog {
             }
         }
 
-        // 保留中の進捗をUIへ一括反映する
+        /**
+         * @brief 保留中の進捗をUIへ一括反映する
+         * @note 進捗バー、件数表示、ログをまとめて更新する
+         *       ログは全置換ではなくappend()で増分追記し、最下行へ自動スクロールする
+         */
         function flushProgress() {
             if (pendingLines.length === 0) {
                 return
@@ -941,11 +998,15 @@ BorderedDialog {
             // textの全置換はドキュメント全体を再構築するため、増分のみ追記する
             restoreLogArea.append(pendingLines.join("\n"))
             pendingLines = []
-            // lengthはO(1)。text.lengthはドキュメント全体を文字列化するため使わない
+            // lengthはO(1)
+            // text.lengthはドキュメント全体を文字列化するため使わない
             restoreLogArea.cursorPosition = restoreLogArea.length
         }
 
-        // 進捗表示とログを初期化する
+        /**
+         * @brief 進捗表示とログを初期化する
+         * @note タイマを停止し、保留中の進捗と表示中のログをクリアする
+         */
         function resetProgress() {
             flushTimer.stop()
             pendingProgress = 0

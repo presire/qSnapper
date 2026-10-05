@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(qsnapper VERSION 1.3.9 LANGUAGES CXX)
+project(qsnapper VERSION 1.3.10 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -190,7 +190,7 @@ else()
     set(SNAPPER_VERSION_MINOR 0)
 endif()
 
-# ログ出力ディレクトリ (""-DQSNAPPER_LOG_DIR=/path/to/dir"で変更可能)
+# ログ出力ディレクトリ ("-DQSNAPPER_LOG_DIR=/path/to/dir"で変更可能)
 set(QSNAPPER_LOG_DIR "/var/log/qsnapper" CACHE PATH "Log directory for qsnapper-dbus-service")
 message(STATUS "Log directory: ${QSNAPPER_LOG_DIR}")
 

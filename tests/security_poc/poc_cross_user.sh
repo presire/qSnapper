@@ -4,7 +4,7 @@
 # シナリオ:
 #   1. alice (admin) が CreateSnapshot を呼び、Polkit認証を成立させる
 #      → v1.3.2 では m_authenticated が true になる
-#   2. その直後、bob (non-admin) が RestoreFiles 等を呼ぶ
+#   2. その直後、bob (non-admin) が復元計画を commit する (CommitRestorePlan)
 #      → v1.3.2 では m_authenticated=true の影響で通過する
 #   3. 修正版 (P0-2) では m_authenticated が撤去され、bob側は常に拒否される
 #
@@ -41,15 +41,28 @@ sudo -u "$ALICE" dbus-send --system --print-reply \
 ALICE_PID=$!
 sleep 0.5
 
-# Step 2: bob が RestoreFiles を叩く (通常ならnot authorized)
-log "Step 2: bob attempts RestoreFiles while alice session is hot"
+# Step 2: bob が復元計画を commit する (通常ならnot authorized)
+# legacy の RestoreFiles は廃止済み
+# 計画はD-Bus接続に束縛されるため、Begin / Stage / Commit を同じ接続で呼ぶ (python3-dbus)
+log "Step 2: bob attempts CommitRestorePlan while alice session is hot"
 SNAP_ID=$(ensure_snapshot root)
-OUTPUT=$(sudo -u "$BOB" dbus-send --system --print-reply \
-    --dest="$DBUS_SERVICE" "$DBUS_PATH" \
-    "${DBUS_IFACE}.RestoreFiles" \
-    string:"root" int32:"$SNAP_ID" \
-    array:string:"/.snapshots/$SNAP_ID/snapshot/etc/hostname" \
-    array:string:"c" 2>&1 || true)
+OUTPUT=$(sudo -u "$BOB" python3 - "$SNAP_ID" 2>&1 <<'PYEOF' || true
+import sys
+from dbus import SystemBus, Interface
+from dbus.exceptions import DBusException
+
+ops = Interface(SystemBus().get_object("com.presire.qsnapper.Operations",
+                                       "/com/presire/qsnapper/Operations"),
+                "com.presire.qsnapper.Operations")
+try:
+    manifest_id = ops.BeginRestorePlan("root", int(sys.argv[1]), 0, "yast")
+    ops.StageRestoreEntries(manifest_id, ["/etc/hostname"], ["modified"])
+    ops.CommitRestorePlan(manifest_id)
+    print("COMMITTED")
+except DBusException as e:
+    print(f"Error {e.get_dbus_name()}: {e.get_dbus_message()}")
+PYEOF
+)
 
 wait "$ALICE_PID" 2>/dev/null || true
 

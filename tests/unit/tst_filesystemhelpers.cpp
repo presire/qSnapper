@@ -8,7 +8,16 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <functional>
+#include <linux/btrfs.h>
+#include <linux/magic.h>
+#include <sched.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+#include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
@@ -23,20 +32,28 @@ private slots:
     void safeMkpathCreatesNestedDirectories();
     void safeMkpathRejectsSymlinkComponents();
     void safeMkpathRejectsTargetSymlink();
-    void safeOpenRegularFileWriteCreatesRegularFile();
-    void safeOpenRegularFileWriteTruncatesExistingRegularFile();
-    void safeOpenRegularFileWriteAppliesMode();
-    void safeOpenRegularFileWriteFailsWhenParentMissing();
-    void safeOpenRegularFileWriteRejectsSymlink();
     void safeOpenRegularFileReadRejectsSymlink();
     void safeOpenDirectoryRejectsSymlinkPath();
-    void safeRenamePathNoFollowRenamesWithinTrustedParent();
-    void safeSymlinkHelpersRespectTrustedParents();
     void safeReadLinkNoFollowHandlesLargeTarget();
     void safeLstatReportsSymlinkItself();
     void safeRemoveAllRemovesSingleFile();
     void safeRemoveAllRemovesTreeWithoutFollowingSymlink();
     void safeRemoveAllRejectsSymlinkIntermediateComponent();
+    void safeRemoveAllStopsAtMountBoundary();
+    void safeRemoveAllRefusesMountPointTarget();
+    void safeRemoveAllStopsAtSameFilesystemBindMount();
+    void safeRemoveAllBeneathRootStopsAtMountBoundary();
+    void safeRemoveAllStopsAtNestedBtrfsSubvolume();
+
+    // --- 復元時のmetadata保持とrename前後の差し替え検出 (M3 / M7) ---
+    void replaceRegularFileAtReplacesContentWithNewInode();
+    void replaceRegularFileAtPreservesSetuidAndSetgid();
+    void replaceRegularFileAtCopiesAccessAcl();
+    void replaceRegularFileAtDropsInheritedDefaultAcl();
+    void applyRestoredMetadataSyncsDirectoryAcls();
+    void replaceRegularFileAtDetectsTemporaryNameSwap();
+    void replaceRegularFileAtKeepsResolvedParentAfterParentSwap();
+    void replaceSymlinkAtAppliesMetadataAndDetectsSwap();
 
     // --- beneath-root 宛先解決ハードニング (Todo 2) ---
     void splitDestinationBeneathRootAcceptsNestedDestination();
@@ -143,95 +160,6 @@ void TestFilesystemHelpers::safeMkpathRejectsTargetSymlink()
     QVERIFY(!safeMkpath(symlinkPath));
 }
 
-void TestFilesystemHelpers::safeOpenRegularFileWriteCreatesRegularFile()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString filePath = tempDir.path() + QStringLiteral("/state.txt");
-    const int fd = safeOpenRegularFileWrite(filePath, 0644);
-    QVERIFY(fd >= 0);
-
-    const QByteArray payload("12345");
-    QCOMPARE(::write(fd, payload.constData(), static_cast<size_t>(payload.size())), payload.size());
-    ::close(fd);
-
-    QFile file(filePath);
-    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
-    QCOMPARE(file.readAll(), payload);
-}
-
-void TestFilesystemHelpers::safeOpenRegularFileWriteTruncatesExistingRegularFile()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString filePath = tempDir.path() + QStringLiteral("/state.txt");
-    {
-        QFile file(filePath);
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("old content that should be truncated");
-    }
-
-    const int fd = safeOpenRegularFileWrite(filePath, 0644);
-    QVERIFY(fd >= 0);
-
-    const QByteArray payload("new");
-    QCOMPARE(::write(fd, payload.constData(), static_cast<size_t>(payload.size())), payload.size());
-    ::close(fd);
-
-    QFile file(filePath);
-    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
-    QCOMPARE(file.readAll(), payload);
-}
-
-void TestFilesystemHelpers::safeOpenRegularFileWriteAppliesMode()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString filePath = tempDir.path() + QStringLiteral("/mode-0600.txt");
-    const int fd = safeOpenRegularFileWrite(filePath, 0600);
-    QVERIFY(fd >= 0);
-    ::close(fd);
-
-    struct stat st;
-    QVERIFY(::lstat(filePath.toUtf8().constData(), &st) == 0);
-    QCOMPARE(st.st_mode & 0777, 0600);
-}
-
-void TestFilesystemHelpers::safeOpenRegularFileWriteFailsWhenParentMissing()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString filePath = tempDir.path() + QStringLiteral("/missing-parent/file.txt");
-    const int fd = safeOpenRegularFileWrite(filePath, 0644);
-    QVERIFY(fd < 0);
-}
-
-void TestFilesystemHelpers::safeOpenRegularFileWriteRejectsSymlink()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString realFile = tempDir.path() + QStringLiteral("/real.txt");
-    QFile file(realFile);
-    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-    file.write("safe");
-    file.close();
-
-    const QString symlinkPath = tempDir.path() + QStringLiteral("/link.txt");
-    QVERIFY(::symlink(realFile.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
-
-    const int fd = safeOpenRegularFileWrite(symlinkPath, 0644);
-    QVERIFY(fd < 0);
-
-    QFile verify(realFile);
-    QVERIFY(verify.open(QIODevice::ReadOnly | QIODevice::Text));
-    QCOMPARE(verify.readAll(), QByteArray("safe"));
-}
-
 void TestFilesystemHelpers::safeOpenRegularFileReadRejectsSymlink()
 {
     QTemporaryDir tempDir;
@@ -269,70 +197,6 @@ void TestFilesystemHelpers::safeOpenDirectoryRejectsSymlinkPath()
     QVERIFY(fd < 0);
 }
 
-void TestFilesystemHelpers::safeRenamePathNoFollowRenamesWithinTrustedParent()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString sourcePath = tempDir.path() + QStringLiteral("/before.txt");
-    {
-        QFile file(sourcePath);
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("payload");
-    }
-
-    const QString destPath = tempDir.path() + QStringLiteral("/after.txt");
-    QVERIFY(safeRenamePathNoFollow(sourcePath, destPath));
-    QVERIFY(!QFile::exists(sourcePath));
-    QVERIFY(QFile::exists(destPath));
-
-    const QString realDir = tempDir.path() + QStringLiteral("/real");
-    QVERIFY(QDir().mkpath(realDir));
-    const QString parentSymlink = tempDir.path() + QStringLiteral("/link-parent");
-    QVERIFY(::symlink(realDir.toUtf8().constData(), parentSymlink.toUtf8().constData()) == 0);
-
-    const QString badSource = parentSymlink + QStringLiteral("/from.txt");
-    const QString badDest = parentSymlink + QStringLiteral("/to.txt");
-    QVERIFY(!safeRenamePathNoFollow(badSource, badDest));
-}
-
-void TestFilesystemHelpers::safeSymlinkHelpersRespectTrustedParents()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QByteArray target("target-value");
-    const QString linkPath = tempDir.path() + QStringLiteral("/ok-link");
-    QVERIFY(safeCreateSymlinkNoFollow(target, linkPath));
-
-    QByteArray observedTarget;
-    QVERIFY(safeReadLinkNoFollow(linkPath, &observedTarget));
-    QCOMPARE(observedTarget, target);
-
-    struct stat st;
-    QVERIFY(::lstat(linkPath.toUtf8().constData(), &st) == 0);
-    struct timespec ts[2];
-    ts[0] = st.st_atim;
-    ts[1] = st.st_mtim;
-    bool ownerUpdated = false;
-    bool timesUpdated = false;
-    QVERIFY(safeSetSymlinkMetadataNoFollow(linkPath, ::getuid(), ::getgid(), ts,
-                                           &ownerUpdated, &timesUpdated));
-    QVERIFY(ownerUpdated);
-    QVERIFY(timesUpdated);
-
-    const QString realDir = tempDir.path() + QStringLiteral("/real-links");
-    QVERIFY(QDir().mkpath(realDir));
-    const QString parentSymlink = tempDir.path() + QStringLiteral("/symlink-parent");
-    QVERIFY(::symlink(realDir.toUtf8().constData(), parentSymlink.toUtf8().constData()) == 0);
-    const QString escapedPath = parentSymlink + QStringLiteral("/child-link");
-
-    QVERIFY(!safeCreateSymlinkNoFollow(target, escapedPath));
-    QVERIFY(!safeReadLinkNoFollow(escapedPath, &observedTarget));
-    QVERIFY(!safeSetSymlinkMetadataNoFollow(escapedPath, ::getuid(), ::getgid(), ts,
-                                            &ownerUpdated, &timesUpdated));
-}
-
 void TestFilesystemHelpers::safeReadLinkNoFollowHandlesLargeTarget()
 {
     QTemporaryDir tempDir;
@@ -340,10 +204,13 @@ void TestFilesystemHelpers::safeReadLinkNoFollowHandlesLargeTarget()
 
     const QByteArray largeTarget(2048, 'a');
     const QString linkPath = tempDir.path() + QStringLiteral("/large-link");
-    QVERIFY(safeCreateSymlinkNoFollow(largeTarget, linkPath));
+    QVERIFY(::symlink(largeTarget.constData(), linkPath.toUtf8().constData()) == 0);
 
+    const int dirFd = ::open(tempDir.path().toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(dirFd >= 0);
     QByteArray observedTarget;
-    QVERIFY(safeReadLinkNoFollow(linkPath, &observedTarget));
+    QVERIFY(safeReadLinkNoFollowAt(dirFd, QStringLiteral("large-link"), &observedTarget));
+    ::close(dirFd);
     QCOMPARE(observedTarget, largeTarget);
 }
 
@@ -390,7 +257,7 @@ void TestFilesystemHelpers::safeRemoveAllRemovesTreeWithoutFollowingSymlink()
     const QString symlinkPath = treePath + QStringLiteral("/link.txt");
     QVERIFY(::symlink(outsideFile.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
 
-    QVERIFY(safeRemoveAll(treePath));
+    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), treePath));
     QVERIFY(!QDir(treePath).exists());
 
     QFile verify(outsideFile);
@@ -410,7 +277,7 @@ void TestFilesystemHelpers::safeRemoveAllRemovesSingleFile()
         file.write("only");
     }
 
-    QVERIFY(safeRemoveAll(filePath));
+    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), filePath));
     QVERIFY(!QFile::exists(filePath));
 }
 
@@ -433,8 +300,761 @@ void TestFilesystemHelpers::safeRemoveAllRejectsSymlinkIntermediateComponent()
     QVERIFY(::symlink(realDir.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
 
     const QString victimPath = symlinkPath + QStringLiteral("/target.txt");
-    QVERIFY(!safeRemoveAll(victimPath));
+    QVERIFY(!safeRemoveAllBeneathRoot(QStringLiteral("/"), victimPath));
     QVERIFY(QFile::exists(realFile));
+}
+
+// ============================================================================
+// 再帰削除のmount境界検出 (H2)
+// ============================================================================
+
+namespace {
+
+    constexpr int kNamespaceUnavailable = 77;
+
+    /**
+     * @brief 文字列をファイルへ書き込む (子プロセス内でも使えるよう、Qtを使わない)
+     * @param path 書き込み先
+     * @param text 書き込む内容
+     * @return 書き込めた場合true
+     */
+    bool writeTextFile(const char *path, const char *text)
+    {
+        const int fd = ::open(path, O_WRONLY | O_CLOEXEC);
+        if (fd < 0) {
+            return false;
+        }
+        const ssize_t length = static_cast<ssize_t>(std::strlen(text));
+        const bool ok = ::write(fd, text, static_cast<size_t>(length)) == length;
+        ::close(fd);
+        return ok;
+    }
+
+    /**
+     * @brief 非特権のuser + mount namespaceを持つ子プロセスでbodyを実行する
+     *
+     * root権限なしでmountを作るため、子プロセスでunshare(CLONE_NEWUSER | CLONE_NEWNS)し、自uid/gidをnamespace内のrootへ対応付ける
+     * 子プロセスの終了とともにmountも消えるため、テスト後の後片付けが不要になる
+     *
+     * @param body 子プロセスで実行する検証処理 (0: 成功、それ以外: 失敗箇所を示すコード)
+     * @return bodyの戻り値、namespaceを作れない環境ではkNamespaceUnavailable、異常終了時は-1
+     */
+    int runInPrivateMountNamespace(const std::function<int()> &body)
+    {
+        const uid_t uid = ::getuid();
+        const gid_t gid = ::getgid();
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            return -1;
+        }
+        if (pid == 0) {
+            if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) < 0) {
+                ::_exit(kNamespaceUnavailable);
+            }
+            const QByteArray uidMap = "0 " + QByteArray::number(uid) + " 1";
+            const QByteArray gidMap = "0 " + QByteArray::number(gid) + " 1";
+            if (!writeTextFile("/proc/self/setgroups", "deny")
+                    || !writeTextFile("/proc/self/uid_map", uidMap.constData())
+                    || !writeTextFile("/proc/self/gid_map", gidMap.constData())
+                    || ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) < 0) {
+                ::_exit(kNamespaceUnavailable);
+            }
+            ::_exit(body());
+        }
+
+        int status = 0;
+        if (::waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+            return -1;
+        }
+        return WEXITSTATUS(status);
+    }
+
+    /**
+     * @brief 子プロセスで空ファイルを作成する
+     * @param path 作成先
+     * @return 作成できた場合true
+     */
+    bool createEmptyFile(const QString &path)
+    {
+        const int fd = ::open(path.toUtf8().constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            return false;
+        }
+        ::close(fd);
+        return true;
+    }
+
+    /**
+     * @brief symlink非追従でパスの存在を確認する
+     * @param path 確認対象
+     * @return 存在する場合true
+     */
+    bool existsNoFollow(const QString &path)
+    {
+        struct stat st;
+        return ::lstat(path.toUtf8().constData(), &st) == 0;
+    }
+
+}
+
+void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString tree = tempDir.path() + QStringLiteral("/tree");
+    const QString mountPoint = tree + QStringLiteral("/usb");
+    QVERIFY(QDir().mkpath(tree + QStringLiteral("/plain")));
+    QVERIFY(QDir().mkpath(mountPoint));
+    QVERIFY(createEmptyFile(tree + QStringLiteral("/plain/file")));
+
+    const int result = runInPrivateMountNamespace([&]() {
+        if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
+            return kNamespaceUnavailable;
+        }
+        if (::mkdir((mountPoint + QStringLiteral("/data")).toUtf8().constData(), 0755) < 0
+                || !createEmptyFile(mountPoint + QStringLiteral("/data/inside"))
+                || !createEmptyFile(mountPoint + QStringLiteral("/top"))) {
+            return 1;
+        }
+
+        errno = 0;
+        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), tree)) {
+            return 2;
+        }
+        if (errno != EXDEV) {
+            return 3;
+        }
+        // 境界の内側は1件も削除されない
+        if (!existsNoFollow(mountPoint + QStringLiteral("/data/inside"))
+                || !existsNoFollow(mountPoint + QStringLiteral("/top"))) {
+            return 4;
+        }
+        // 境界の外側にある親ディレクトリは残る (中身を失ったmount pointの上位を消さない)
+        if (!existsNoFollow(tree)) {
+            return 5;
+        }
+        return 0;
+    });
+
+    if (result == kNamespaceUnavailable) {
+        QSKIP("Unprivileged user/mount namespaces are not available");
+    }
+    QCOMPARE(result, 0);
+}
+
+void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString mountPoint = tempDir.path() + QStringLiteral("/mnt");
+    QVERIFY(QDir().mkpath(mountPoint));
+
+    const int result = runInPrivateMountNamespace([&]() {
+        if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
+            return kNamespaceUnavailable;
+        }
+        if (!createEmptyFile(mountPoint + QStringLiteral("/inside"))) {
+            return 1;
+        }
+
+        // 削除対象そのものがmount pointである場合も降りない
+        errno = 0;
+        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), mountPoint)) {
+            return 2;
+        }
+        if (errno != EXDEV) {
+            return 3;
+        }
+        return existsNoFollow(mountPoint + QStringLiteral("/inside")) ? 0 : 4;
+    });
+
+    if (result == kNamespaceUnavailable) {
+        QSKIP("Unprivileged user/mount namespaces are not available");
+    }
+    QCOMPARE(result, 0);
+}
+
+void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // 同一FS内のbind mountはst_devが変わらないため、STATX_ATTR_MOUNT_ROOTで検出する必要がある
+    const QString source = tempDir.path() + QStringLiteral("/source");
+    const QString tree = tempDir.path() + QStringLiteral("/tree");
+    const QString bindPoint = tree + QStringLiteral("/bind");
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(bindPoint));
+    QVERIFY(createEmptyFile(source + QStringLiteral("/keep")));
+
+    const int result = runInPrivateMountNamespace([&]() {
+        if (::mount(source.toUtf8().constData(), bindPoint.toUtf8().constData(),
+                    nullptr, MS_BIND, nullptr) < 0) {
+            return kNamespaceUnavailable;
+        }
+
+        struct statx stx;
+        if (::statx(AT_FDCWD, bindPoint.toUtf8().constData(), AT_SYMLINK_NOFOLLOW,
+                    STATX_TYPE, &stx) < 0) {
+            return 1;
+        }
+        if ((stx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) == 0) {
+            // STATX_ATTR_MOUNT_ROOT非対応カーネルではbind mountを検出できない
+            return kNamespaceUnavailable;
+        }
+
+        errno = 0;
+        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), tree)) {
+            return 2;
+        }
+        if (errno != EXDEV) {
+            return 3;
+        }
+        return existsNoFollow(source + QStringLiteral("/keep")) ? 0 : 4;
+    });
+
+    if (result == kNamespaceUnavailable) {
+        QSKIP("Unprivileged bind mounts or STATX_ATTR_MOUNT_ROOT are not available");
+    }
+    QCOMPARE(result, 0);
+    QVERIFY(QFile::exists(source + QStringLiteral("/keep")));
+}
+
+void TestFilesystemHelpers::safeRemoveAllBeneathRootStopsAtMountBoundary()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString root = tempDir.path();
+    const QString created = root + QStringLiteral("/created");
+    const QString mountPoint = created + QStringLiteral("/nfs");
+    QVERIFY(QDir().mkpath(mountPoint));
+    QVERIFY(createEmptyFile(created + QStringLiteral("/sibling")));
+
+    const int result = runInPrivateMountNamespace([&]() {
+        if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
+            return kNamespaceUnavailable;
+        }
+        if (!createEmptyFile(mountPoint + QStringLiteral("/remote"))) {
+            return 1;
+        }
+
+        errno = 0;
+        if (safeRemoveAllBeneathRoot(root, created)) {
+            return 2;
+        }
+        if (errno != EXDEV) {
+            return 3;
+        }
+        return existsNoFollow(mountPoint + QStringLiteral("/remote")) ? 0 : 4;
+    });
+
+    if (result == kNamespaceUnavailable) {
+        QSKIP("Unprivileged user/mount namespaces are not available");
+    }
+    QCOMPARE(result, 0);
+}
+
+void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
+{
+    // ネストしたsubvolumeはmountではないが、st_devが親と異なる
+    // /tmpはtmpfsであることが多いため、HOME配下にbtrfsの作業ディレクトリを作る
+    const QString base = QDir::homePath();
+    struct statfs fsInfo;
+    if (::statfs(base.toUtf8().constData(), &fsInfo) < 0
+            || fsInfo.f_type != BTRFS_SUPER_MAGIC) {
+        QSKIP("HOME is not on btrfs");
+    }
+
+    QTemporaryDir tempDir(base + QStringLiteral("/.qsnapper-test-XXXXXX"));
+    QVERIFY(tempDir.isValid());
+
+    const QString tree = tempDir.path() + QStringLiteral("/tree");
+    QVERIFY(QDir().mkpath(tree));
+
+    const int treeFd = ::open(tree.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(treeFd >= 0);
+    struct btrfs_ioctl_vol_args args;
+    std::memset(&args, 0, sizeof(args));
+    std::strncpy(args.name, "subvol", sizeof(args.name) - 1);
+    const int created = ::ioctl(treeFd, BTRFS_IOC_SUBVOL_CREATE, &args);
+    ::close(treeFd);
+    if (created < 0) {
+        QSKIP("Cannot create a btrfs subvolume as this user");
+    }
+
+    const QString subvolume = tree + QStringLiteral("/subvol");
+    const QString inside = subvolume + QStringLiteral("/inside");
+    QVERIFY(createEmptyFile(inside));
+
+    errno = 0;
+    QVERIFY(!safeRemoveAllBeneathRoot(QStringLiteral("/"), tree));
+    QCOMPARE(errno, EXDEV);
+    QVERIFY(existsNoFollow(inside));
+
+    // 後片付け: 空のsubvolumeは所有者がrmdirできる (kernel 4.18以降)
+    QVERIFY(::unlink(inside.toUtf8().constData()) == 0);
+    if (::rmdir(subvolume.toUtf8().constData()) < 0) {
+        qWarning("Could not remove test subvolume: %s", std::strerror(errno));
+    }
+}
+
+// ============================================================================
+// 復元時のmetadata保持とrename前後の差し替え検出 (M3 / M7)
+// ============================================================================
+
+namespace {
+
+    constexpr quint16 kAclUserObj = 0x01;
+    constexpr quint16 kAclUser = 0x02;
+    constexpr quint16 kAclGroupObj = 0x04;
+    constexpr quint16 kAclMask = 0x10;
+    constexpr quint16 kAclOther = 0x20;
+    constexpr quint32 kAclUndefinedId = 0xffffffffU;
+
+    /**
+     * @brief POSIX ACLの1 entry
+     */
+    struct AclEntry {
+        quint16 tag;
+        quint16 perm;
+        quint32 id;
+    };
+
+    /**
+     * @brief system.posix_acl_* のxattr値 (version 2、little endian) を組み立てる
+     * @param entries tag順・id順に並べたentry
+     * @return xattr値
+     */
+    QByteArray makeAclXattr(const QList<AclEntry> &entries)
+    {
+        QByteArray value;
+        const auto append = [&value](quint64 number, int bytes) {
+            for (int i = 0; i < bytes; ++i) {
+                value.append(static_cast<char>((number >> (8 * i)) & 0xff));
+            }
+        };
+        append(2, 4);
+        for (const AclEntry &entry : entries) {
+            append(entry.tag, 2);
+            append(entry.perm, 2);
+            append(entry.id, 4);
+        }
+        return value;
+    }
+
+    /**
+     * @brief named user entryを1件持つACLを返す (mode 0640相当)
+     * @param namedUser named entryのuid
+     * @return xattr値
+     */
+    QByteArray namedUserAcl(quint32 namedUser)
+    {
+        return makeAclXattr({
+            {kAclUserObj, 6, kAclUndefinedId},
+            {kAclUser, 4, namedUser},
+            {kAclGroupObj, 4, kAclUndefinedId},
+            {kAclMask, 4, kAclUndefinedId},
+            {kAclOther, 0, kAclUndefinedId},
+        });
+    }
+
+    /**
+     * @brief パスのxattr値を読み出す
+     * @param path 対象パス
+     * @param name xattr名
+     * @param valueOut 値の返却先
+     * @return 1: 値あり、0: 属性なし、-1: エラー
+     */
+    int readXattr(const QString &path, const char *name, QByteArray *valueOut)
+    {
+        char buffer[4096];
+        const ssize_t length = ::lgetxattr(path.toUtf8().constData(), name, buffer, sizeof(buffer));
+        if (length < 0) {
+            return errno == ENODATA ? 0 : -1;
+        }
+        *valueOut = QByteArray(buffer, static_cast<qsizetype>(length));
+        return 1;
+    }
+
+    /**
+     * @brief パスへxattrを設定する
+     * @param path 対象パス
+     * @param name xattr名
+     * @param value 値
+     * @return 成功時0、失敗時errno
+     */
+    int writeXattr(const QString &path, const char *name, const QByteArray &value)
+    {
+        if (::lsetxattr(path.toUtf8().constData(), name, value.constData(),
+                        static_cast<size_t>(value.size()), 0) < 0) {
+            return errno;
+        }
+        return 0;
+    }
+
+    /**
+     * @brief ファイルを指定内容・modeで作成する
+     * @param path 作成先
+     * @param content 内容
+     * @param mode 最終的に設定するmode
+     * @return 作成できた場合true
+     */
+    bool createFile(const QString &path, const QByteArray &content, mode_t mode)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                || file.write(content) != content.size()) {
+            return false;
+        }
+        file.close();
+        return ::chmod(path.toUtf8().constData(), mode) == 0;
+    }
+
+    /**
+     * @brief 復元元ファイルを開き、宛先を親dirfd + leaf名で差し替える
+     * @param root 宛先の基点
+     * @param source 復元元パス
+     * @param destination 宛先パス
+     * @param metadataOut metadataの適用結果
+     * @return 差し替えに成功した場合true
+     */
+    bool replaceFromPath(const QString &root, const QString &source, const QString &destination,
+                         RestoredMetadataResult *metadataOut = nullptr)
+    {
+        const int sourceFd = ::open(source.toUtf8().constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (sourceFd < 0) {
+            return false;
+        }
+        QByteArray leafName;
+        const int parentFd = openDestinationParentBeneathRoot(root, destination, &leafName);
+        if (parentFd < 0) {
+            ::close(sourceFd);
+            return false;
+        }
+        const bool replaced = replaceRegularFileAt(parentFd, leafName, sourceFd, false, true, metadataOut);
+        const int savedErrno = errno;
+        ::close(parentFd);
+        ::close(sourceFd);
+        errno = savedErrno;
+        return replaced;
+    }
+
+    /**
+     * @brief ディレクトリ内に一時名 (".qsnapper-") が残っていないか確認する
+     * @param directory 対象ディレクトリ
+     * @return 残っていなければtrue
+     */
+    bool hasNoTemporaryLeftovers(const QString &directory)
+    {
+        const QStringList entries = QDir(directory).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
+        for (const QString &entry : entries) {
+            if (entry.contains(QStringLiteral(".qsnapper-"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief rename直前フックをスコープ終了時に解除する
+     */
+    struct ReplaceHookGuard {
+        explicit ReplaceHookGuard(std::function<void(int, const QByteArray &)> hook)
+        {
+            detail::setBeforeReplaceRenameHookForTesting(std::move(hook));
+        }
+        ~ReplaceHookGuard()
+        {
+            detail::setBeforeReplaceRenameHookForTesting({});
+        }
+        ReplaceHookGuard(const ReplaceHookGuard &) = delete;
+        ReplaceHookGuard &operator=(const ReplaceHookGuard &) = delete;
+    };
+
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtReplacesContentWithNewInode()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/live/file");
+    const QString hardlink = root + QStringLiteral("/live/hardlink");
+    QVERIFY(QDir().mkpath(root + QStringLiteral("/live")));
+    QVERIFY(createFile(source, "snapshot content", 0640));
+    QVERIFY(createFile(destination, "live content that is longer", 0666));
+    QVERIFY(::link(destination.toUtf8().constData(), hardlink.toUtf8().constData()) == 0);
+
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    QFile restored(destination);
+    QVERIFY(restored.open(QIODevice::ReadOnly));
+    QCOMPARE(restored.readAll(), QByteArray("snapshot content"));
+
+    // 既存inodeを上書きしないため、hardlink先は元の内容のまま残り、緩いmodeも引き継がない
+    QFile other(hardlink);
+    QVERIFY(other.open(QIODevice::ReadOnly));
+    QCOMPARE(other.readAll(), QByteArray("live content that is longer"));
+
+    struct stat sourceStat;
+    struct stat restoredStat;
+    QVERIFY(::lstat(source.toUtf8().constData(), &sourceStat) == 0);
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0640U);
+    QCOMPARE(restoredStat.st_mtim.tv_sec, sourceStat.st_mtim.tv_sec);
+    QCOMPARE(restoredStat.st_mtim.tv_nsec, sourceStat.st_mtim.tv_nsec);
+    QVERIFY(hasNoTemporaryLeftovers(root + QStringLiteral("/live")));
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtPreservesSetuidAndSetgid()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/destination");
+    QVERIFY(createFile(source, "#!/bin/sh\n", 06755));
+    QVERIFY(createFile(destination, "old", 0644));
+
+    struct stat sourceStat;
+    QVERIFY(::lstat(source.toUtf8().constData(), &sourceStat) == 0);
+    if ((sourceStat.st_mode & 06000) != 06000) {
+        QSKIP("This filesystem or user cannot set setuid/setgid bits");
+    }
+
+    // 所有者の変更はS_ISUID / S_ISGIDを落とすため、fchown → fchmodの順でなければ失われる
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, sourceStat.st_mode & 07777);
+    QCOMPARE(restoredStat.st_uid, sourceStat.st_uid);
+    QCOMPARE(restoredStat.st_gid, sourceStat.st_gid);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtCopiesAccessAcl()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/destination");
+    QVERIFY(createFile(source, "acl", 0640));
+    QVERIFY(createFile(destination, "old", 0600));
+
+    const QByteArray acl = namedUserAcl(::getuid() + 1000);
+    const int setError = writeXattr(source, "system.posix_acl_access", acl);
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    QByteArray sourceAcl;
+    QByteArray restoredAcl;
+    QCOMPARE(readXattr(source, "system.posix_acl_access", &sourceAcl), 1);
+    QCOMPARE(readXattr(destination, "system.posix_acl_access", &restoredAcl), 1);
+    QCOMPARE(restoredAcl, sourceAcl);
+
+    struct stat sourceStat;
+    struct stat restoredStat;
+    QVERIFY(::lstat(source.toUtf8().constData(), &sourceStat) == 0);
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, sourceStat.st_mode & 07777);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtDropsInheritedDefaultAcl()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString liveDir = root + QStringLiteral("/live");
+    const QString destination = liveDir + QStringLiteral("/file");
+    QVERIFY(QDir().mkpath(liveDir));
+    QVERIFY(createFile(source, "no acl", 0640));
+
+    // 親ディレクトリのdefault ACLが新しいinodeへ継承されても、snapshot側に無いentryを残さない
+    const int setError = writeXattr(liveDir, "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 7, ::getuid() + 1000},
+        {kAclGroupObj, 7, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 7, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    QByteArray restoredAcl;
+    QCOMPARE(readXattr(destination, "system.posix_acl_access", &restoredAcl), 0);
+
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0640U);
+}
+
+void TestFilesystemHelpers::applyRestoredMetadataSyncsDirectoryAcls()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString withAcl = tempDir.path() + QStringLiteral("/with-acl");
+    const QString withoutAcl = tempDir.path() + QStringLiteral("/without-acl");
+    QVERIFY(QDir().mkpath(withAcl));
+    QVERIFY(QDir().mkpath(withoutAcl));
+    QVERIFY(::chmod(withAcl.toUtf8().constData(), 02750) == 0);
+    QVERIFY(::chmod(withoutAcl.toUtf8().constData(), 0755) == 0);
+
+    const QByteArray defaultAcl = makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 5, ::getuid() + 1000},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 5, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    });
+    const int setError = writeXattr(withAcl, "system.posix_acl_default", defaultAcl);
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+    QCOMPARE(writeXattr(withAcl, "system.posix_acl_access", namedUserAcl(::getuid() + 1000)), 0);
+
+    const auto apply = [](const QString &from, const QString &to) {
+        const int sourceFd = ::open(from.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const int destinationFd = ::open(to.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        const RestoredMetadataResult result = applyRestoredMetadata(sourceFd, destinationFd, true);
+        ::close(sourceFd);
+        ::close(destinationFd);
+        return result;
+    };
+
+    // snapshot側のaccess / default ACLを、ACLを持たない既存ディレクトリへ適用する
+    const QString copyTarget = tempDir.path() + QStringLiteral("/copy-target");
+    QVERIFY(QDir().mkpath(copyTarget));
+    QVERIFY(!apply(withAcl, copyTarget).mandatoryFailed);
+    QByteArray value;
+    QCOMPARE(readXattr(copyTarget, "system.posix_acl_default", &value), 1);
+    QCOMPARE(value, defaultAcl);
+    QCOMPARE(readXattr(copyTarget, "system.posix_acl_access", &value), 1);
+
+    // snapshot側にACLが無い場合は、live側のaccess / default ACLを削除する
+    QVERIFY(!apply(withoutAcl, copyTarget).mandatoryFailed);
+    QCOMPARE(readXattr(copyTarget, "system.posix_acl_default", &value), 0);
+    QCOMPARE(readXattr(copyTarget, "system.posix_acl_access", &value), 0);
+
+    struct stat restoredStat;
+    QVERIFY(::lstat(copyTarget.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0755U);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtDetectsTemporaryNameSwap()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/destination");
+    const QString stolen = root + QStringLiteral("/stolen");
+    QVERIFY(createFile(source, "snapshot", 0644));
+    QVERIFY(createFile(destination, "live", 0644));
+
+    // rename直前に一時名を攻撃者のobjectへ差し替える
+    const ReplaceHookGuard guard([&](int parentFd, const QByteArray &temporaryName) {
+        QVERIFY(::renameat(parentFd, temporaryName.constData(), parentFd, "stolen") == 0);
+        const int fd = ::openat(parentFd, temporaryName.constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        QVERIFY(fd >= 0);
+        QVERIFY(::write(fd, "attacker", 8) == 8);
+        ::close(fd);
+    });
+
+    errno = 0;
+    QVERIFY(!replaceFromPath(root, source, destination));
+    QCOMPARE(errno, ESTALE);
+
+    // 攻撃者のobjectは宛先へrenameされず、宛先は元のまま
+    QFile live(destination);
+    QVERIFY(live.open(QIODevice::ReadOnly));
+    QCOMPARE(live.readAll(), QByteArray("live"));
+    QVERIFY(QFile::exists(stolen));
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtKeepsResolvedParentAfterParentSwap()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString parent = root + QStringLiteral("/parent");
+    const QString moved = root + QStringLiteral("/moved");
+    const QString outside = root + QStringLiteral("/outside");
+    QVERIFY(createFile(source, "snapshot", 0644));
+    QVERIFY(QDir().mkpath(parent));
+    QVERIFY(QDir().mkpath(outside));
+
+    // 解決済みの親をsymlinkへ差し替えても、保持している親dirfd上で完結し、symlink先へは書き込まない
+    const ReplaceHookGuard guard([&](int, const QByteArray &) {
+        QVERIFY(::rename(parent.toUtf8().constData(), moved.toUtf8().constData()) == 0);
+        QVERIFY(::symlink(outside.toUtf8().constData(), parent.toUtf8().constData()) == 0);
+    });
+
+    QVERIFY(replaceFromPath(root, source, parent + QStringLiteral("/file")));
+    QVERIFY(QFile::exists(moved + QStringLiteral("/file")));
+    QVERIFY(!QFile::exists(outside + QStringLiteral("/file")));
+    QVERIFY(hasNoTemporaryLeftovers(outside));
+}
+
+void TestFilesystemHelpers::replaceSymlinkAtAppliesMetadataAndDetectsSwap()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString sourceLink = root + QStringLiteral("/source-link");
+    const QString destination = root + QStringLiteral("/destination");
+    QVERIFY(::symlink("target/path", sourceLink.toUtf8().constData()) == 0);
+    const struct timespec times[2] = { {1000000000, 0}, {1100000000, 123} };
+    QVERIFY(::utimensat(AT_FDCWD, sourceLink.toUtf8().constData(), times, AT_SYMLINK_NOFOLLOW) == 0);
+    QVERIFY(createFile(destination, "live", 0644));
+
+    struct stat sourceStat;
+    QVERIFY(::lstat(sourceLink.toUtf8().constData(), &sourceStat) == 0);
+
+    QByteArray leafName;
+    const int parentFd = openDestinationParentBeneathRoot(root, destination, &leafName);
+    QVERIFY(parentFd >= 0);
+
+    bool metadataApplied = false;
+    QVERIFY(replaceSymlinkAt(parentFd, leafName, "target/path", sourceStat, &metadataApplied));
+    QVERIFY(metadataApplied);
+    QCOMPARE(QFile::symLinkTarget(destination).endsWith(QStringLiteral("target/path")), true);
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QVERIFY(S_ISLNK(restoredStat.st_mode));
+    QCOMPARE(restoredStat.st_mtim.tv_sec, sourceStat.st_mtim.tv_sec);
+    QCOMPARE(restoredStat.st_mtim.tv_nsec, sourceStat.st_mtim.tv_nsec);
+
+    // rename直前に一時symlinkを別のsymlinkへ差し替えると検出する
+    {
+        const ReplaceHookGuard guard([&](int hookParentFd, const QByteArray &temporaryName) {
+            QVERIFY(::unlinkat(hookParentFd, temporaryName.constData(), 0) == 0);
+            QVERIFY(::symlinkat("/etc/shadow", hookParentFd, temporaryName.constData()) == 0);
+        });
+        errno = 0;
+        QVERIFY(!replaceSymlinkAt(parentFd, leafName, "other/target", sourceStat, nullptr));
+        QCOMPARE(errno, ESTALE);
+    }
+    ::close(parentFd);
+
+    char target[64] = {};
+    QVERIFY(::readlink(destination.toUtf8().constData(), target, sizeof(target) - 1) > 0);
+    QCOMPARE(QByteArray(target), QByteArray("target/path"));
 }
 
 // ============================================================================
@@ -544,7 +1164,7 @@ void TestFilesystemHelpers::swapComponentToSymlink(const QTemporaryDir &rootDir,
             + components.join(QLatin1Char('/'));
     QVERIFY(QDir(componentPath).exists());
     // 差し替え前の実ディレクトリを攻撃者が削除する操作の再現
-    QVERIFY(safeRemoveAll(componentPath));
+    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), componentPath));
     QVERIFY(::symlink(outsideDir.path().toUtf8().constData(), componentPath.toUtf8().constData())
             == 0);
 }
@@ -931,7 +1551,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsLeafSymlinkToExternalFile()
     const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
 
     // leafを外部センチネルへのsymlinkへ差し替える (parentは実ディレクトリのまま)
-    QVERIFY(safeRemoveAll(victimPath));
+    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), victimPath));
     QVERIFY(::symlink((outsideDir.path() + QStringLiteral("/secret.txt")).toUtf8().constData(),
                       victimPath.toUtf8().constData()) == 0);
 
@@ -960,7 +1580,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsDanglingSymlinkComponent()
     const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
 
     // 中間成分をdangling symlinkへ差し替える
-    QVERIFY(safeRemoveAll(rootDir.path() + QStringLiteral("/a")));
+    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), rootDir.path() + QStringLiteral("/a")));
     QVERIFY(::symlink(QStringLiteral("/nonexistent/qsnapper-dangling-target").toUtf8().constData(),
                       (rootDir.path() + QStringLiteral("/a")).toUtf8().constData()) == 0);
 
@@ -1064,9 +1684,9 @@ void TestFilesystemHelpers::beneathRootSymlinkHelpersApplyWithinRoot()
     const QString linkPath = rootDir.path() + QStringLiteral("/sub/link");
     QVERIFY(safeCreateSymlinkNoFollowBeneathRoot(rootDir.path(), target, linkPath));
 
-    QByteArray observedTarget;
-    QVERIFY(safeReadLinkNoFollow(linkPath, &observedTarget));
-    QCOMPARE(observedTarget, target);
+    char observedTarget[64] = {};
+    QVERIFY(::readlink(linkPath.toUtf8().constData(), observedTarget, sizeof(observedTarget) - 1) > 0);
+    QCOMPARE(QByteArray(observedTarget), target);
 
     struct stat st;
     QVERIFY(::lstat(linkPath.toUtf8().constData(), &st) == 0);

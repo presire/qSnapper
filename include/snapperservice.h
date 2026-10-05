@@ -97,16 +97,11 @@ private:
     bool nonSwitchedInstallation() const;                           // 非切り替えインストールか判定する
 
     // インストール補助
-    void installationHelperStep4();                                 // インストールヘルパー手順4を実行する
     void writeSnapperConfig();                                      // Snapper設定ファイルを書き込む
-    void updateEtcSysconfigYast2();                                 // /etc/sysconfig/yast2を更新する
     void setupSnapperQuota();                                       // Snapperクォータを設定する
 
     // 解析・実行
     QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput); // CSV出力を解析してスナップショットリストを生成する
-    QString executeCommand(const QString &program,                  // 外部コマンドを実行する
-                           const QStringList &arguments,
-                           bool &success);
     bool reconnect();                                               // D-Busサービスへ再接続する
     static SnapperService *s_instance;                              // シングルトンインスタンス
 

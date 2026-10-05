@@ -14,16 +14,75 @@
 #include <QTimer>
 #include <sys/stat.h>
 #include <functional>
+#include <string>
 #include <memory>
 #include <optional>
 #include <snapper/Snapshot.h>
 #include "comparisoncache.h"
 #include "restoremanifest.h"
 #include "restoreplanexecutor.h"
+#include "restorevalidation.h"
 
 namespace snapper {
     class Snapper;
     class Comparison;
+}
+
+namespace qsnapper::diff {
+
+    /**
+     * @brief unified diff生成の資源上限
+     *
+     * rootで動作する単一スレッドのサービスが、巨大なファイルや差分過多の入力でメモリやCPUを使い果たさないよう制限する
+     */
+    struct UnifiedDiffLimits {
+        qint64 maxFileBytes = 4LL * 1024 * 1024;        // 1ファイルあたりの最大読み込みサイズ
+        qint64 binaryProbeBytes = 8LL * 1024;           // バイナリ判定 (NULの有無) を行う先頭のバイト数
+        qint64 maxLinesPerFile = 262144;                // 1ファイルあたりの最大行数
+        qint64 maxTraceBytes = 64LL * 1024 * 1024;      // Myers diffの作業領域 (V配列とtrace) の最大サイズ
+        qint64 maxSteps = 64LL * 1024 * 1024;           // Myers diffの探索ステップ数の上限 (CPU時間の上限)
+    };
+
+    /**
+     * @brief unified diffの生成結果
+     */
+    struct UnifiedDiffResult {
+        QString text;           // unified diff (差分なし・省略時は空)
+        QString omittedReason;  // 省略理由 (binary / too_large / too_many_changes / special_file)、省略していなければ空
+    };
+
+    /**
+     * @brief 2つのファイルを読み込み、unified diff形式の文字列を生成する
+     *
+     * "diff -u"コマンドと互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能
+     * FIFOやデバイスは開かず、上限を超える入力やバイナリは差分を生成せずに省略理由を返す
+     *
+     * @param oldPath 旧ファイルパス (--- ヘッダに使用)
+     * @param newPath 新ファイルパス (+++ ヘッダに使用)
+     * @param limits 資源上限
+     * @return 生成結果 (読み込めないファイルは従来どおり差分なし・省略理由なし)
+     */
+    UnifiedDiffResult generateUnifiedDiff(const QString &oldPath,
+                                          const QString &newPath,
+                                          const UnifiedDiffLimits &limits = UnifiedDiffLimits());
+
+}
+
+namespace qsnapper::restore {
+
+    /**
+     * @brief pin済みの復元元ディレクトリが、ファイルシステムの側で読み取り専用であるかを判定する
+     *
+     * btrfsでは、pin済みfdが属するsubvolumeのread-onlyフラグを見る
+     * それ以外 (LVM thinのxfs / ext4など) では、snapperがsnapshotをMS_RDONLYでmountするため、mountが読み取り専用であることを見る
+     * 判定できない場合は読み取り専用とみなさない
+     *
+     * @param snapshotDirFd pin済みの復元元ディレクトリのfd
+     * @param fstype configのFSTYPE
+     * @return 読み取り専用であることを確認できた場合はtrue
+     */
+    bool isPinnedRestoreSourceReadOnly(int snapshotDirFd, const std::string &fstype);
+
 }
 
 class SnapshotOperations : public QObject, protected QDBusContext
@@ -44,6 +103,11 @@ private:
         // ソース読み取りを全て本fd相対で行うことで、実行中のスナップショット削除 / 同番号スナップショットの再作成 / mount状態の変化に依存せず、
         // 認可された計画が参照したスナップショットそのものから復元し続ける
         int snapshotDirFd = -1;
+        // commit時に固定したconfigのSUBVOLUME (正規化前)
+        // 復元先は"<SUBVOLUME>/<config相対名>"であり、"/"基準で解決してはならない
+        QString subvolume;
+        // 復元後にrootサブボリュームをrwへ戻す安全ネットの実行条件 (commit時に記録する)
+        qsnapper::restore::RootReadWriteSafetyNetState rootReadWriteState;
         bool useReflink = false;
         bool removeOnTypechanged = false;
         bool mounted = false;
@@ -88,6 +152,8 @@ private:
     QDBusServiceWatcher *m_ownerWatcher = nullptr;
     QMap<QString, RestoreExecution> m_restoreExecutions;
     QMap<QString, QString> m_restorePlanOwners;
+    std::function<bool(bool *)> m_rootReadOnlyProbe;    // rootサブボリュームのread-only状態を取得する (テストで差し替え可能)
+    std::function<bool()> m_rootReadWriteRestorer;      // rootサブボリュームをrwへ戻す (テストで差し替え可能)
 
     std::optional<CallReply> m_deferredReply;               // 遅延応答の継続を実行している間のみ有効
                                                             // replyError()がsendErrorReply()ではなくキャプチャ済みmessageを使う判断に用いる
@@ -396,96 +462,68 @@ private:
     int stringToSnapshotType(const QString &typeStr);
 
     /**
-     * @brief RestoreFiles / RestoreFilesDirect 共通実装
+     * @brief live宛先の親ディレクトリを1回だけ解決し、ディレクトリを作成してmetadataを適用する
      *
-     * 両エントリポイントは差分フラグを引数にして本関数へ委譲する
-     * 入力パスはqsnapper::security::isPathWithinSnapshotRootでスナップショットroot内に収まっていることを検証する
+     * 作成とopenを同じ親dirfd上で行い、所有者・mode・ACL (access / default)・xattrをfd経由でsnapshot側に合わせる
      *
-     * @param configName      Snapper設定名
-     * @param snapshotNumber  復元元スナップショット番号
-     * @param filePaths       復元対象ファイルの絶対パス
-     * @param changeTypes     各ファイルのchange種別
-     * @param useReflink      通常ファイルコピー時にFICLONE (btrfs CoW) を試行するか
-     * @param removeOnTypechanged typechanged時に既存ファイルを先に削除するか
-     * @param logTag          ログ前置詞 ("RestoreFiles"等)
+     * @param sourceDirFd pin済みのスナップショット dirfd
+     * @param sourceRelativePath snapshotDirからの相対ソースパス
+     * @param rootPath 名前解決の基準とする絶対パス (configのSUBVOLUME)
+     * @param dst live filesystem上の絶対パス
+     * @return ディレクトリと必須metadataを適用できた場合: true
      */
-    bool restoreFilesImpl(const QString &configName,
-                          int snapshotNumber,
-                          const QStringList &filePaths,
-                          const QStringList &changeTypes,
-                          bool useReflink,
-                          bool removeOnTypechanged,
-                          const char *logTag);
+    static bool applyDirectoryBeneathRoot(int sourceDirFd,
+                                          const QString &sourceRelativePath,
+                                          const QString &rootPath,
+                                          const QString &dst);
 
     /**
-     * @brief 認可済みのrestoreFilesImpl本体
+     * @brief live宛先の親ディレクトリを1回だけ解決し、通常ファイルをコピーして差し替える
      *
-     * 入力検証 (configName / filePaths) はrestoreFilesImpl側で認可前に完了している
-     *
-     * @param configName 検証済み設定名
-     */
-    bool restoreFilesAuthorized(const QString &configName,
-                                int snapshotNumber,
-                                const QStringList &filePaths,
-                                const QStringList &changeTypes,
-                                bool useReflink,
-                                bool removeOnTypechanged,
-                                const char *logTag);
-
-    /**
-     * @brief 通常ファイルをコピーする (オーナー/時刻保持)
-     * @param tryReflink FICLONE (reflink) を先行試行するか
-     */
-    static bool copyRegularFile(const QString &src,
-                                const QString &dst,
-                                bool tryReflink);
-
-    /**
-     * @brief シンボリックリンクをコピーする (リンク先/オーナー/時刻保持)
-     */
-    static bool copySymlink(const QString &src,
-                             const QString &dst);
-
-    /**
-     * @brief live宛先をroot配下で再解決して通常ファイルをコピーする
-     *
+     * 一時ファイルの作成からrenameat()まで同じ親dirfdを使い、名前を再解決しない
      * ソースはpin済みスナップショット dirfd相対で解決する
      * 実行中にsnapshotDirのパス上で削除 / 再作成 / 差し替えが起きても、fdが指すinodeを読み続けるため、
      * 認可時と異なる内容を読み込むことがない
      *
      * @param sourceDirFd pin済みのスナップショット dirfd
      * @param sourceRelativePath snapshotDirからの相対ソースパス (絶対パス・".."/"."成分は不可)
+     * @param rootPath 名前解決の基準とする絶対パス (configのSUBVOLUME)
      * @param dst live filesystem上の絶対パス
      * @param tryReflink FICLONEを先行試行するか
      * @return dataと必須metadataを適用できた場合: true
      */
     static bool copyRegularFileBeneathRoot(int sourceDirFd,
                                            const QString &sourceRelativePath,
+                                           const QString &rootPath,
                                            const QString &dst,
                                            bool tryReflink);
 
     /**
-     * @brief live宛先をroot配下で再解決してsymlinkをコピーする
+     * @brief live宛先の親ディレクトリを1回だけ解決し、symlinkをコピーして差し替える
      *
      * ソースはpin済みスナップショット dirfd相対で解決する (copyRegularFileBeneathRootと同じ理由)
      *
      * @param sourceDirFd pin済みのスナップショット dirfd
      * @param sourceRelativePath snapshotDirからの相対ソースパス
+     * @param rootPath 名前解決の基準とする絶対パス (configのSUBVOLUME)
      * @param dst live filesystem上の絶対パス
      * @return symlinkを作成できた場合: true
      */
     static bool copySymlinkBeneathRoot(int sourceDirFd,
                                        const QString &sourceRelativePath,
+                                       const QString &rootPath,
                                        const QString &dst);
 
     /**
      * @brief live パスをroot配下で再解決して一時的な兄弟パスへ退避する
+     * @param rootPath 名前解決の基準とする絶対パス (configのSUBVOLUME)
      * @param path 退避対象の絶対パス
      * @param movedPath 実際の退避先
      *                  対象不存在時は空文字列
      * @return 退避または対象不存在時true
      */
-    static bool movePathAsideBeneathRoot(const QString &path,
+    static bool movePathAsideBeneathRoot(const QString &rootPath,
+                                         const QString &path,
                                          QString *movedPath);
 
     /**
@@ -574,9 +612,15 @@ private:
     void removeUnusedRestoreOwnerWatches();
 
     /**
-     * @brief 復元後にrootサブボリュームがread-onlyならrwへ戻す安全ネットを実行する
+     * @brief 実行を開始した復元計画に限り、rootサブボリュームをrwへ戻す安全ネットを実行する
+     *
+     * 認可済みで実行を開始し、対象設定のSUBVOLUMEが "/" で、復元前の状態がrwだった場合だけ、復元後にread-onlyになっていればrwへ戻す
+     * 条件を1つでも満たさない場合は、read-only状態の取得も含めて特権操作を一切行わない
+     *
+     * @param state commit時に記録した安全ネットの判定材料
      */
-    static void restoreRootReadWriteSafetyNet();
+    void runRootReadWriteSafetyNet(
+        const qsnapper::restore::RootReadWriteSafetyNetState &state);
 
 public:
     /**
@@ -589,6 +633,17 @@ public:
      * @brief デストラクタ
      */
     ~SnapshotOperations();
+
+    /**
+     * @brief rootサブボリュームのread-only状態の取得とrw化の処理をテスト用に差し替える
+     *
+     * D-Busへは公開しない (slotではない)
+     *
+     * @param readOnlyProbe read-only状態を取得する関数 (取得できた場合true)
+     * @param readWriteRestorer rwへ戻す関数 (成功した場合true)
+     */
+    void setRootSubvolumeAccessForTesting(std::function<bool(bool *)> readOnlyProbe,
+                                          std::function<bool()> readWriteRestorer);
 
 public slots:
     /**
@@ -671,27 +726,6 @@ public slots:
                                const QString &filePath);
 
     /**
-     * @brief ファイルをスナップショットから復元する (YaST互換コピー経路)
-     *
-     * reflinkを用いず、typechangedの事前削除も行わない
-     */
-    bool RestoreFiles(const QString &configName,
-                      int snapshotNumber,
-                      const QStringList &filePaths,
-                      const QStringList &changeTypes);
-
-    /**
-     * @brief ファイルをスナップショットから復元する (高速経路)
-     *
-     * btrfs reflinkを優先
-     * typechangedは既存ファイル削除後にコピー
-     */
-    bool RestoreFilesDirect(const QString &configName,
-                             int snapshotNumber,
-                             const QStringList &filePaths,
-                             const QStringList &changeTypes);
-
-    /**
      * @brief ownerに束縛された空のstaged restore計画を開始する
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元スナップショット番号
@@ -761,16 +795,6 @@ public slots:
 
 
 signals:
-    /**
-     * @brief 復元処理の進捗通知
-     * @param current 現在処理中のファイル番号 (1から始まる)
-     * @param total 総ファイル数
-     * @param filePath 処理中のファイルパス
-     */
-    void restoreProgress(int current,
-                          int total,
-                          const QString &filePath);
-
     /**
      * @brief staged restore計画の進捗通知
      * @param manifestId 実行中計画ID

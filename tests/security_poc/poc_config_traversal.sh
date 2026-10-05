@@ -47,8 +47,8 @@ done
 
 # TODO: 全14メソッド (GetFstype, ListSnapshots, CreateSnapshot, ModifySnapshot,
 #       DeleteSnapshot, RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
-#       GetFileDiffAndDetails, GetFileDiffBetween, RestoreFiles,
-#       RestoreFilesDirect, WriteSnapperConfig, SetupQuota) に対して同じ
+#       GetFileDiffAndDetails, GetFileDiffBetween, BeginRestorePlan,
+#       WriteSnapperConfig, SetupQuota) に対して同じ
 #       14 payload 走査を tests/integration/test_configname_dbus.py に移譲。
 #       本PoCは代表確認のみ。
 

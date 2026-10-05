@@ -646,25 +646,6 @@ FileChangeModel::~FileChangeModel()
 }
 
 /**
- * @brief 復元進捗のスロット
- *
- * D-Busから送信される復元進捗シグナルを受信し、全体の進捗を計算してemitする
- *
- * @param current バッチ内の現在処理中のファイル数
- * @param total バッチ内の総ファイル数
- * @param filePath 現在処理中のファイルパス
- */
-void FileChangeModel::onRestoreProgress(int current, int total, const QString &filePath)
-{
-    // バッチ内の進捗を全体の進捗に変換
-    // currentとtotalはバッチ内の進捗ではなく、UndoStepsの進捗
-    int overallCurrent = m_processedFilesCount + current;
-    int overallTotal = m_totalFilesCount;
-
-    emit restoreProgress(overallCurrent, overallTotal, filePath);
-}
-
-/**
  * @brief 復元計画の進捗スロット (staged restore用)
  *
  * サーバ側manifestが送る進捗シグナルを受信し、元の選択全体を基準に単調な進捗として再送出する
@@ -1186,27 +1167,7 @@ void FileChangeModel::restoreSingleFileFrom(const QString &filePath, int sourceS
         return;
     }
 
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnectDbus()) {
-            emit errorOccurred(tr("D-Bus connection failed"));
-            emit restoreCompleted(false);
-            return;
-        }
-    }
-
-    m_cancelRequested = false;
-    m_restoreHasError = false;
-    m_totalFilesCount = 1;
-    m_processedFilesCount = 0;
-
-    // 事前認証 (Authenticate D-Busメソッド) は撤廃 (P0-2)
-    // Polkit認証は RestoreFiles / RestoreFilesDirect 呼び出し時に都度行われ、
-    // auth_admin_keepにより短時間の連続操作ではUX的にも1回プロンプトと同等になる
-
-    QStringList filePaths;
-    filePaths << filePath;
-
-    // ツリーからchangeTypeを取得
+    // ツリーからchangeTypeを取得する (サービス側はcommit時に権威ある比較結果と照合する)
     QString changeType = QStringLiteral("modified");
     QModelIndex idx = findItemIndex(m_rootItem, filePath);
     if (idx.isValid()) {
@@ -1215,27 +1176,9 @@ void FileChangeModel::restoreSingleFileFrom(const QString &filePath, int sourceS
             changeType = changeTypeToString(item->changeType());
         }
     }
-    QStringList changeTypes;
-    changeTypes << changeType;
 
-    // 復元方式に応じたD-Busメソッドを呼び出し
-    QString methodName = m_useDirectRestore ? "RestoreFilesDirect" : "RestoreFiles";
-    QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(
-        m_dbusInterface->asyncCall(methodName, m_configName, sourceSnapshotNumber, filePaths, changeTypes), this);
-
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher]() {
-        QDBusPendingReply<bool> reply = *watcher;
-        watcher->deleteLater();
-
-        if (reply.isError()) {
-            qWarning() << "Single file restore failed:" << reply.error().message();
-            emit errorOccurred(tr("Restore failed: %1").arg(reply.error().message()));
-            emit restoreCompleted(false);
-        }
-        else {
-            emit restoreCompleted(reply.value());
-        }
-    });
+    // 単一ファイルも選択項目の復元と同じstaged restore (Begin / Stage / Commit) で実行する
+    startRestorePlan(sourceSnapshotNumber, QStringList{filePath}, QStringList{changeType});
 }
 
 /**
@@ -1849,7 +1792,7 @@ void FileChangeModel::setUseDirectRestore(bool use)
 /**
  * @brief ChangeType列挙値をD-Bus送信用の文字列へ変換する
  *
- * RestoreFiles系APIが期待するlower-case文字列へ正規化する
+ * StageRestoreEntriesが期待するlower-case文字列へ正規化する
  *
  * @param type 変換対象の変更種別
  * @return 対応するchangeType文字列
@@ -1973,7 +1916,7 @@ bool FileChangeModel::hasOnlyCreatedRecordsBeneath(FileChangeItem *item)
  * @brief チェック済みアイテムをchangeType付きで再帰収集する
  *
  * ディレクトリは自身の変更と配下の変更を分けて扱い、
- * 最終的にRestoreFiles系APIへ渡せるpath / changeType配列を構築する
+ * 最終的にStageRestoreEntriesへ渡せるpath / changeType配列を構築する
  *
  * @param parent 走査開始ノード
  * @param paths 収集したパスの格納先
@@ -2087,6 +2030,24 @@ bool FileChangeModel::restoreCheckedItemsFrom(int sourceSnapshotNumber)
 
     collectCheckedItemsWithTypes(m_rootItem, checkedPaths, checkedChangeTypes);
 
+    return startRestorePlan(sourceSnapshotNumber, checkedPaths, checkedChangeTypes);
+}
+
+/**
+ * @brief 復元対象を検証・正規化し、staged restore計画を開始する
+ *
+ * 選択項目の復元と単一ファイルの復元の共通処理
+ * 呼び出し側で設定名・読み込み状態・復元元の整合性を検証済みであること
+ *
+ * @param sourceSnapshotNumber 復元元スナップショット番号
+ * @param checkedPaths 復元対象のパス (config相対名)
+ * @param checkedChangeTypes 各パスの変更種別
+ * @return 復元処理が開始された場合: true、エラーの場合: false
+ */
+bool FileChangeModel::startRestorePlan(int sourceSnapshotNumber,
+                                       const QStringList &checkedPaths,
+                                       const QStringList &checkedChangeTypes)
+{
     // 送信前にクライアント側で検証・正規化し、不正エントリを除外する
     // 正規化後のパスで重複を除き、最初の出現順を維持する
     QStringList planPaths;

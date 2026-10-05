@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-test_configname_dbus.py - B-2: configName validation を全 13 メソッドに対して網羅。
+test_configname_dbus.py - B-2: configName validation を全 12 メソッドに対して網羅。
 
 対象メソッド (configName を引数に取るもの):
     ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
     RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
-    GetFileDiffAndDetails, GetFileDiffBetween, RestoreFiles, RestoreFilesDirect,
+    GetFileDiffAndDetails, GetFileDiffBetween, BeginRestorePlan,
     WriteSnapperConfig, SetupQuota
 
 各メソッドに対し 6 種の悪性 configName を投入し、全て InvalidArgs で拒否されることを
@@ -71,10 +71,7 @@ SPECS: list[MethodSpec] = [
     MethodSpec("GetFileChangesBetween", lambda c: [c, 1, 2]),
     MethodSpec("GetFileDiffAndDetails", lambda c: [c, 1, "/etc/hosts"]),
     MethodSpec("GetFileDiffBetween", lambda c: [c, 1, 2, "/etc/hosts"]),
-    MethodSpec("RestoreFiles",
-               lambda c: [c, 1, ["/.snapshots/1/snapshot/etc/hosts"], ["c"]]),
-    MethodSpec("RestoreFilesDirect",
-               lambda c: [c, 1, ["/.snapshots/1/snapshot/etc/hosts"], ["c"]]),
+    MethodSpec("BeginRestorePlan", lambda c: [c, 1, 0, "direct"]),
     MethodSpec("WriteSnapperConfig", lambda c: [c, empty_userdata()]),
     MethodSpec("SetupQuota", lambda c: [c]),
 ]

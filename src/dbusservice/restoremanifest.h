@@ -291,6 +291,15 @@ public:
     static constexpr qint64 kMaxEntriesGlobal = 2 * qint64(kMaxEntriesPerManifest);
     static constexpr qint64 kMaxPathBytesGlobal = 2 * kMaxPathBytesPerManifest;
 
+    // UID単位の予算
+    // ownerはD-Busのunique name単位であるため、1人のユーザが接続を複数開けば、owner単位の上限を掛け算してグローバル予算を使い切れる
+    // (例: 8接続 x 4計画で全体の32計画を占有し、正規の復元をGlobalLimitで阻止できる)
+    // 呼び出し元のUIDごとにも上限を設け、1人のユーザが使えるのはグローバル予算の一部までとする
+    // 値は「最大構成の計画1件」が通る大きさで、残りのグローバル予算は他のユーザの復元に残る
+    static constexpr int kMaxManifestsPerUid = kMaxManifestsPerOwner;
+    static constexpr qint64 kMaxEntriesPerUid = qint64(kMaxEntriesPerManifest);
+    static constexpr qint64 kMaxPathBytesPerUid = kMaxPathBytesPerManifest;
+
     /**
      * @brief 実時間clockを使用する空のregistryを構築する
      */
@@ -309,6 +318,8 @@ public:
      * @param maxPathBytesPerManifest 非負のマニフェスト単位UTF-8 path byte上限
      * @param maxEntriesGlobal 正のregistry全体エントリ数上限
      * @param maxPathBytesGlobal 非負のregistry全体UTF-8 path byte上限
+     * @param maxEntriesPerUid 正のUID単位エントリ数上限
+     * @param maxPathBytesPerUid 非負のUID単位UTF-8 path byte上限
      *
      * productionの呼び出し側では使用しない
      * 固定の公開上限を超える値は固定上限へ丸められる
@@ -317,11 +328,14 @@ public:
         int maxEntriesPerManifest,
         qint64 maxPathBytesPerManifest,
         qint64 maxEntriesGlobal = kMaxEntriesGlobal,
-        qint64 maxPathBytesGlobal = kMaxPathBytesGlobal);
+        qint64 maxPathBytesGlobal = kMaxPathBytesGlobal,
+        qint64 maxEntriesPerUid = kMaxEntriesPerUid,
+        qint64 maxPathBytesPerUid = kMaxPathBytesPerUid);
 
     /**
      * @brief ownerに束縛された空のStaging計画を作成する
      * @param owner D-Bus呼び出し元のunique name
+     * @param ownerUid 呼び出し元のUID (UID単位の予算に使用する)
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元スナップショット番号
      * @param counterpartSnapshotNumber 比較相手のスナップショット番号 (0は現在のシステム)
@@ -329,9 +343,10 @@ public:
      * @param err 結果エラーの格納先 (省略可)
      * @return 成功時は推測困難なID、拒否時は空文字列
      */
-    QString createStaging(const QString &owner, const QString &configName,
-                          int snapshotNumber, int counterpartSnapshotNumber,
-                          RestoreMode mode, ManifestError *err);
+    QString createStaging(const QString &owner, uint ownerUid,
+                          const QString &configName, int snapshotNumber,
+                          int counterpartSnapshotNumber, RestoreMode mode,
+                          ManifestError *err);
 
     /**
      * @brief owner確認後にpath / changeType列を原子的にstageする
@@ -467,6 +482,13 @@ public:
     int countForOwner(const QString &owner) const;
 
     /**
+     * @brief 指定UIDに属するマニフェスト数を返す
+     * @param ownerUid 集計対象UID
+     * @return 一致するマニフェスト数
+     */
+    int countForUid(uint ownerUid) const;
+
+    /**
      * @brief 全マニフェストが保持するUTF-8 path byteの合計を返す
      *
      * 走査対象は高々kMaxManifestsGlobal件であり、実行中の累算値を4箇所ある削除経路と同期させるよりも、都度集計する方が破綻しない
@@ -485,6 +507,7 @@ private:
     struct ManifestRecord {
         std::unique_ptr<RestoreManifest> manifest;
         qint64 pathBytes = 0;
+        uint ownerUid = 0;
     };
 
     using ManifestMap = std::map<QString, ManifestRecord>;
@@ -494,12 +517,22 @@ private:
     static void setError(ManifestError *err, ManifestError value);
     static qint64 defaultNowMs();
 
+    /**
+     * @brief 指定UIDのマニフェストが保持するエントリ数とpath byteの合計を返す
+     * @param ownerUid 集計対象UID
+     * @param entriesOut エントリ数合計の格納先
+     * @param pathBytesOut path byte合計の格納先
+     */
+    void usageForUid(uint ownerUid, qint64 *entriesOut, qint64 *pathBytesOut) const;
+
     ManifestMap m_manifests;
     std::function<qint64()> m_clock;
     int m_maxEntriesPerManifest = kMaxEntriesPerManifest;
     qint64 m_maxPathBytesPerManifest = kMaxPathBytesPerManifest;
     qint64 m_maxEntriesGlobal = kMaxEntriesGlobal;
     qint64 m_maxPathBytesGlobal = kMaxPathBytesGlobal;
+    qint64 m_maxEntriesPerUid = kMaxEntriesPerUid;
+    qint64 m_maxPathBytesPerUid = kMaxPathBytesPerUid;
 };
 
 } // namespace qsnapper::restore

@@ -279,7 +279,7 @@ QString stageAndFreezePlan(qsnapper::restore::RestoreManifestRegistry &registry,
     qsnapper::restore::ManifestError error =
         qsnapper::restore::ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.poc"), QStringLiteral("poc-root"), snapshotNumber,
+        QStringLiteral(":1.poc"), 1000, QStringLiteral("poc-root"), snapshotNumber,
         counterpartSnapshotNumber, qsnapper::restore::RestoreMode::DirectCopy,
         &error);
     if (id.isEmpty()) {

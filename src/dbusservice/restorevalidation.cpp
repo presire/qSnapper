@@ -1,6 +1,7 @@
 #include "restorevalidation.h"
 
 #include <QByteArray>
+#include <QStringList>
 
 #include "inputvalidator.h"
 
@@ -11,6 +12,33 @@ namespace {
 // 1回のentriesSliceで検証するエントリ数の上限
 // RestorePlanExecutorのchunk境界と同規模のbounded sliceであり、凍結済み計画全体 (最大20万エントリ) を1度にメモリへ展開しない
 constexpr int kEntriesPerValidationChunk = 64;
+
+/**
+ * @brief 絶対パスを空成分を除いた成分列へ分解し、安全でない成分を拒否する
+ * @param absolutePath 分解対象の絶対パス
+ * @param componentsOut 分解結果 ("/"のみなら空)
+ * @return 先頭が"/"で、"." / ".."成分・制御文字を含まない場合true
+ */
+bool splitSafeAbsoluteComponents(const QString &absolutePath, QStringList *componentsOut)
+{
+    if (!absolutePath.startsWith(QLatin1Char('/'))) {
+        return false;
+    }
+
+    const QStringList components = absolutePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    for (const QString &component : components) {
+        if (component == QLatin1String(".") || component == QLatin1String("..")) {
+            return false;
+        }
+        for (const QChar ch : component) {
+            if (ch.unicode() < 0x20 || ch.unicode() == 0x7f) {
+                return false;
+            }
+        }
+    }
+    *componentsOut = components;
+    return true;
+}
 
 } // namespace
 
@@ -140,6 +168,70 @@ bool validateFrozenEntriesAgainstAuthoritative(
         *err = ManifestError::None;
     }
     return true;
+}
+
+bool isSnapshotMetadataRestoreName(const QString &configRelativeName)
+{
+    const QStringList components =
+        configRelativeName.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    return !components.isEmpty()
+        && components.first() == QLatin1String(".snapshots");
+}
+
+bool normalizeRestoreSubvolume(const QString &subvolume, QString *rootPathOut)
+{
+    if (!rootPathOut) {
+        return false;
+    }
+    rootPathOut->clear();
+
+    QStringList components;
+    if (!splitSafeAbsoluteComponents(subvolume, &components)) {
+        return false;
+    }
+    *rootPathOut = QLatin1Char('/') + components.join(QLatin1Char('/'));
+    return true;
+}
+
+bool buildRestoreDestination(const QString &subvolume,
+                             const QString &configRelativeName,
+                             QString *rootPathOut,
+                             QString *destinationOut,
+                             QString *relativeOut)
+{
+    if (!rootPathOut || !destinationOut || !relativeOut) {
+        return false;
+    }
+    rootPathOut->clear();
+    destinationOut->clear();
+    relativeOut->clear();
+
+    QString rootPath;
+    QStringList nameComponents;
+    if (!normalizeRestoreSubvolume(subvolume, &rootPath)
+            || !splitSafeAbsoluteComponents(configRelativeName, &nameComponents)
+            || nameComponents.isEmpty()
+            || nameComponents.first() == QLatin1String(".snapshots")) {
+        return false;
+    }
+
+    const QString relative = nameComponents.join(QLatin1Char('/'));
+    *rootPathOut = rootPath;
+    *relativeOut = relative;
+    *destinationOut = rootPath == QStringLiteral("/")
+        ? QLatin1Char('/') + relative
+        : rootPath + QLatin1Char('/') + relative;
+    return true;
+}
+
+bool shouldRestoreRootReadWrite(const RootReadWriteSafetyNetState &state,
+                                bool readOnlyAfterRestore)
+{
+    return state.executionStarted
+        && state.targetsRootSubvolume
+        && state.preRestoreStateKnown
+        && !state.preRestoreReadOnly
+        && readOnlyAfterRestore;
 }
 
 } // namespace qsnapper::restore

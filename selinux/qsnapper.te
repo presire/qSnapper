@@ -150,7 +150,7 @@ require {
     class sem { create destroy getattr setattr read write associate unix_read unix_write };
     class dbus { send_msg acquire_svc };
     class fd { use };
-    class capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource };
+    class capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource setfcap };
     class filesystem { getattr mount unmount };
     class netlink_route_socket { create bind getattr setattr read write nlmsg_read };
     class tcp_socket { create bind connect listen accept read write getattr setattr shutdown name_connect node_bind };
@@ -516,7 +516,9 @@ optional {
 ########################################
 
 # Self process / capabilities / sockets
-allow qsnapper_dbus_t self:capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource };
+# setfcap: 復元時にsnapshot側のsecurity.capability (file capability) を書き戻すために必要
+#          (fsetxattr() -> cap_convert_nscap() がCAP_SETFCAPを検査する)
+allow qsnapper_dbus_t self:capability { sys_admin dac_override dac_read_search fowner chown fsetid setuid setgid sys_resource setfcap };
 allow qsnapper_dbus_t self:process { fork signal signull sigkill sigstop sigchld setpgid getpgid getsched setsched setrlimit setfscreate execmem execstack };
 allow qsnapper_dbus_t self:fifo_file { getattr open read write ioctl };
 allow qsnapper_dbus_t self:unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown };

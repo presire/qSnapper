@@ -1,3 +1,4 @@
+#include <QHash>
 #include <QTest>
 #include <functional>
 #include "restoremanifest.h"
@@ -13,6 +14,27 @@ int errorValue(ManifestError error)
     return static_cast<int>(error);
 }
 
+/**
+ * @brief ownerごとに別のUIDを割り当てる
+ *
+ * 既存のテストは「別owner = 別ユーザ」を前提にしているため、同じownerには同じUIDを、別ownerには別UIDを返す
+ * 同一UIDで複数ownerを扱うテストはcreateStagingへUIDを直接渡す
+ *
+ * @param owner D-Busのunique name
+ * @return ownerに対応するテスト用UID
+ */
+uint uidForOwner(const QString &owner)
+{
+    static QHash<QString, uint> uids;
+    const auto it = uids.constFind(owner);
+    if (it != uids.constEnd()) {
+        return it.value();
+    }
+    const uint uid = 1000 + static_cast<uint>(uids.size());
+    uids.insert(owner, uid);
+    return uid;
+}
+
 QString createManifest(RestoreManifestRegistry &registry,
                        const QString &owner = QStringLiteral(":1.1"),
                        RestoreMode mode = RestoreMode::YastCompatible,
@@ -21,8 +43,9 @@ QString createManifest(RestoreManifestRegistry &registry,
                        int counterpartSnapshotNumber = 0)
 {
     ManifestError error = ManifestError::None;
-    return registry.createStaging(owner, configName, snapshotNumber,
-                                  counterpartSnapshotNumber, mode, &error);
+    return registry.createStaging(owner, uidForOwner(owner), configName,
+                                  snapshotNumber, counterpartSnapshotNumber,
+                                  mode, &error);
 }
 
 bool stageOne(RestoreManifestRegistry &registry, const QString &id,
@@ -55,6 +78,7 @@ private slots:
     void pathByteCapacityExcessIsAtomic();
     void registryManifestLimitsAreEnforced();
     void stagingBudgetIsGlobalNotPerConnection();
+    void stagingBudgetIsBoundPerUid();
     void entriesPreserveOrderAcrossChunks();
     void cursorBoundsAndCompletionAreEnforced();
     void generatedIdsAreOpaqueAndUnique();
@@ -477,7 +501,8 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
     }
     const int perOwnerCount = perOwnerRegistry.count();
     const QString rejectedPerOwner = perOwnerRegistry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
+        QStringLiteral(":1.1"), uidForOwner(QStringLiteral(":1.1")),
+        QStringLiteral("root"), 42, 0,
         RestoreMode::YastCompatible, &error);
     QVERIFY(rejectedPerOwner.isEmpty());
     QCOMPARE(errorValue(error), errorValue(ManifestError::CapacityExceeded));
@@ -491,7 +516,8 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
     }
     const int globalCount = globalRegistry.count();
     const QString rejectedGlobal = globalRegistry.createStaging(
-        QStringLiteral(":3.1"), QStringLiteral("root"), 42, 0,
+        QStringLiteral(":3.1"), uidForOwner(QStringLiteral(":3.1")),
+        QStringLiteral("root"), 42, 0,
         RestoreMode::YastCompatible, &error);
     QVERIFY(rejectedGlobal.isEmpty());
     QCOMPARE(errorValue(error), errorValue(ManifestError::GlobalLimit));
@@ -606,6 +632,162 @@ void TestRestoreManifest::stagingBudgetIsGlobalNotPerConnection()
                 >= RestoreManifestRegistry::kMaxEntriesPerManifest);
 }
 
+/**
+ * @brief 同じUIDの複数ownerは、UID単位の上限を合算で超えられないこと
+ *
+ * ownerはD-Busのunique name単位であるため、owner単位とグローバルの上限だけでは、
+ * 1人のユーザが接続を複数開いてグローバル予算を使い切り、他のユーザの正規の復元をGlobalLimitで阻止できる
+ *
+ * 本テストは、計画数 / エントリ数 / path byteの3軸で、
+ * 同じUIDの別ownerがUID単位の上限でCapacityExceededになり、別のUIDは影響を受けないことを固定する
+ */
+void TestRestoreManifest::stagingBudgetIsBoundPerUid()
+{
+    constexpr uint kAttackerUid = 2000;
+    constexpr uint kOtherUid = 2001;
+
+    // --- 計画数の軸 ---
+    {
+        qint64 nowMs = kInitialTimeMs;
+        RestoreManifestRegistry registry;
+        registry.setClock([&nowMs]() { return nowMs; });
+        ManifestError error = ManifestError::None;
+        for (int index = 0; index < RestoreManifestRegistry::kMaxManifestsPerUid; ++index) {
+            // 接続ごとに1件ずつなので、owner単位の上限には掛からない
+            QVERIFY(!registry.createStaging(QStringLiteral(":5.%1").arg(index), kAttackerUid,
+                                            QStringLiteral("root"), 42, 0,
+                                            RestoreMode::YastCompatible, &error).isEmpty());
+        }
+        const int countBefore = registry.count();
+        const QString rejected = registry.createStaging(
+            QStringLiteral(":5.99"), kAttackerUid, QStringLiteral("root"), 42, 0,
+            RestoreMode::YastCompatible, &error);
+        QVERIFY2(rejected.isEmpty(),
+                 "a new connection of the same user must not get its own plan budget");
+        QCOMPARE(errorValue(error), errorValue(ManifestError::CapacityExceeded));
+        QCOMPARE(registry.count(), countBefore);
+        QCOMPARE(registry.countForUid(kAttackerUid),
+                 RestoreManifestRegistry::kMaxManifestsPerUid);
+
+        // 別のユーザは影響を受けない
+        QVERIFY(!registry.createStaging(QStringLiteral(":6.1"), kOtherUid,
+                                        QStringLiteral("root"), 42, 0,
+                                        RestoreMode::YastCompatible, &error).isEmpty());
+        QCOMPARE(registry.countForUid(kOtherUid), 1);
+
+        // productionの既定値では、1人のユーザが全体の計画数を占有できない
+        QVERIFY(RestoreManifestRegistry::kMaxManifestsPerUid
+                < RestoreManifestRegistry::kMaxManifestsGlobal);
+    }
+
+    // --- エントリ数の軸 ---
+    {
+        qint64 nowMs = kInitialTimeMs;
+        RestoreManifestRegistry registry;
+        registry.setClock([&nowMs]() { return nowMs; });
+        registry.setCapacityOverridesForTesting(100, 1024,
+                                                /*maxEntriesGlobal=*/100,
+                                                /*maxPathBytesGlobal=*/1024,
+                                                /*maxEntriesPerUid=*/3,
+                                                /*maxPathBytesPerUid=*/1024);
+        ManifestError error = ManifestError::None;
+        const QString ownerA = QStringLiteral(":5.1");
+        const QString ownerB = QStringLiteral(":5.2");
+        const QString ownerC = QStringLiteral(":6.1");
+        const QString idA = registry.createStaging(ownerA, kAttackerUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        const QString idB = registry.createStaging(ownerB, kAttackerUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        const QString idC = registry.createStaging(ownerC, kOtherUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        QVERIFY(!idA.isEmpty());
+        QVERIFY(!idB.isEmpty());
+        QVERIFY(!idC.isEmpty());
+
+        QVERIFY(registry.stageEntries(idA, ownerA,
+                                      {QStringLiteral("/a1"), QStringLiteral("/a2")},
+                                      {QStringLiteral("created"), QStringLiteral("modified")},
+                                      &error));
+
+        // 同じUIDの別ownerは、UIDの残り (1件) を超えて積めない
+        QVERIFY2(!registry.stageEntries(idB, ownerB,
+                                        {QStringLiteral("/b1"), QStringLiteral("/b2")},
+                                        {QStringLiteral("created"), QStringLiteral("deleted")},
+                                        &error),
+                 "a second connection of the same user must not get its own entry budget");
+        QCOMPARE(errorValue(error), errorValue(ManifestError::CapacityExceeded));
+        const auto bAfterReject = registry.status(idB, ownerB, &error);
+        QVERIFY(bAfterReject.has_value());
+        QCOMPARE(bAfterReject->totalEntries, 0);
+        QCOMPARE(registry.globalEntries(), qint64(2));
+
+        // 残余分は通る
+        QVERIFY(registry.stageEntries(idB, ownerB, {QStringLiteral("/b1")},
+                                      {QStringLiteral("created")}, &error));
+
+        // 別のユーザは自分のUID予算を丸ごと使える
+        QVERIFY(registry.stageEntries(idC, ownerC,
+                                      {QStringLiteral("/c1"), QStringLiteral("/c2"),
+                                       QStringLiteral("/c3")},
+                                      {QStringLiteral("created"), QStringLiteral("created"),
+                                       QStringLiteral("created")},
+                                      &error));
+        QCOMPARE(registry.globalEntries(), qint64(6));
+    }
+
+    // --- path byteの軸 ---
+    {
+        qint64 nowMs = kInitialTimeMs;
+        RestoreManifestRegistry registry;
+        registry.setClock([&nowMs]() { return nowMs; });
+        registry.setCapacityOverridesForTesting(100, 1024,
+                                                /*maxEntriesGlobal=*/100,
+                                                /*maxPathBytesGlobal=*/1024,
+                                                /*maxEntriesPerUid=*/100,
+                                                /*maxPathBytesPerUid=*/12);
+        ManifestError error = ManifestError::None;
+        const QString ownerA = QStringLiteral(":5.1");
+        const QString ownerB = QStringLiteral(":5.2");
+        const QString ownerC = QStringLiteral(":6.1");
+        const QString idA = registry.createStaging(ownerA, kAttackerUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        const QString idB = registry.createStaging(ownerB, kAttackerUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        const QString idC = registry.createStaging(ownerC, kOtherUid, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+        QVERIFY(!idA.isEmpty());
+        QVERIFY(!idB.isEmpty());
+        QVERIFY(!idC.isEmpty());
+
+        // "/aaaaaaaa" = 9byte
+        QVERIFY(registry.stageEntries(idA, ownerA, {QStringLiteral("/aaaaaaaa")},
+                                      {QStringLiteral("created")}, &error));
+
+        // UIDの残りは3byteしかないので "/bbbbbbbb" (9byte) は入らない
+        QVERIFY2(!registry.stageEntries(idB, ownerB, {QStringLiteral("/bbbbbbbb")},
+                                        {QStringLiteral("created")}, &error),
+                 "a second connection of the same user must not get its own path-byte budget");
+        QCOMPARE(errorValue(error), errorValue(ManifestError::CapacityExceeded));
+        QCOMPARE(registry.globalPathBytes(), qint64(9));
+
+        // 別のユーザは影響を受けない
+        QVERIFY(registry.stageEntries(idC, ownerC, {QStringLiteral("/cccccccc")},
+                                      {QStringLiteral("created")}, &error));
+        QCOMPARE(registry.globalPathBytes(), qint64(18));
+    }
+
+    // --- productionの既定値で、1人のユーザがグローバル予算を使い切れないこと ---
+    QVERIFY(RestoreManifestRegistry::kMaxEntriesPerUid
+            < RestoreManifestRegistry::kMaxEntriesGlobal);
+    QVERIFY(RestoreManifestRegistry::kMaxPathBytesPerUid
+            < RestoreManifestRegistry::kMaxPathBytesGlobal);
+    // 最大構成の計画1件は必ず通ること (正規利用を壊さない)
+    QVERIFY(RestoreManifestRegistry::kMaxEntriesPerUid
+            >= RestoreManifestRegistry::kMaxEntriesPerManifest);
+    QVERIFY(RestoreManifestRegistry::kMaxPathBytesPerUid
+            >= RestoreManifestRegistry::kMaxPathBytesPerManifest);
+}
+
 void TestRestoreManifest::entriesPreserveOrderAcrossChunks()
 {
     qint64 nowMs = kInitialTimeMs;
@@ -689,7 +871,8 @@ void TestRestoreManifest::frozenStatusPreservesManifestMetadata()
     registry.setClock([&nowMs]() { return nowMs; });
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("home-config"), 987, 988,
+        QStringLiteral(":1.1"), uidForOwner(QStringLiteral(":1.1")),
+        QStringLiteral("home-config"), 987, 988,
         RestoreMode::DirectCopy, &error);
     QVERIFY(!id.isEmpty());
     QVERIFY(stageOne(registry, id));

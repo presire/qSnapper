@@ -2,8 +2,16 @@
 #include <QStringList>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <linux/fs.h>
 #include <linux/openat2.h>
+#include <sys/ioctl.h>
+#include <sys/sendfile.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#include <sys/xattr.h>
+#include <time.h>
 #include <unistd.h>
 #include <errno.h>
 #include "filesystemhelpers.h"
@@ -395,27 +403,76 @@ namespace qsnapper::security {
         }
 
         /**
-         * @brief 親dirfd配下の1エントリをsymlink非追従で削除する
+         * @brief statxの結果がmount境界 (別mountのroot、または親と異なるデバイス) を示すかを判定する
+         *
+         * STATX_ATTR_MOUNT_ROOTはattributes_maskで対応が示された場合のみ信用する
+         * btrfsのネストしたsubvolumeはmountではないが、st_devが親と異なるため境界として扱う
+         *
+         * @param stx 判定対象のstatx結果
+         * @param parentDev 親ディレクトリのst_dev
+         * @return 境界である場合: true
+         */
+        bool isMountBoundary(const struct statx &stx, dev_t parentDev)
+        {
+            const bool mountRootKnown = (stx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) != 0;
+            if (mountRootKnown && (stx.stx_attributes & STATX_ATTR_MOUNT_ROOT) != 0) {
+                return true;
+            }
+            return makedev(stx.stx_dev_major, stx.stx_dev_minor) != parentDev;
+        }
+
+        /**
+         * @brief 親dirfd配下の1エントリを、symlink非追従かつmount境界を越えずに削除する
+         *
+         * 削除対象そのものと、降りていく各ディレクトリについてmount境界を確認する
+         * 境界 (USB / NFS / FUSE / bind mount / ネストしたsubvolume等) を見つけた時点で降下を止め、errno=EXDEVで失敗を返す
+         * 境界の内側は1件も削除しない
+         * 境界を黙ってスキップして成功扱いにすると、呼び出し元は削除が完了したと誤認するため、必ず失敗として返す
+         *
+         * statxはAT_STATX_DONT_SYNCで呼び、FUSE / NFS等の境界先へ属性取得要求を送らない (応答しないFUSEでサービスが停止するのを防ぐ)
          *
          * @param parentFd 親ディレクトリfd
+         * @param parentDev 親ディレクトリのst_dev
          * @param entryName 削除対象のleaf名
-         * @return 削除成功時: true
+         * @return 削除成功時 (対象が存在しない場合を含む): true
          */
-        bool removeEntryAt(int parentFd, const QByteArray &entryName)
+        bool removeEntryWithinDeviceAt(int parentFd, dev_t parentDev, const QByteArray &entryName)
         {
-            struct stat st;
-            if (::fstatat(parentFd, entryName.constData(), &st, AT_SYMLINK_NOFOLLOW) < 0) {
+            constexpr int kStatxFlags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_DONT_SYNC;
+            struct statx stx;
+            if (::statx(parentFd, entryName.constData(), kStatxFlags,
+                        STATX_TYPE | STATX_INO, &stx) < 0) {
                 return errno == ENOENT;
             }
 
+            if (isMountBoundary(stx, parentDev)) {
+                errno = EXDEV;
+                return false;
+            }
+
             // symlink / regular file / fifo / deviceは、unlinkat()側で削除する
-            if (!S_ISDIR(st.st_mode)) {
+            if (!S_ISDIR(stx.stx_mode)) {
                 return ::unlinkat(parentFd, entryName.constData(), 0) == 0 || errno == ENOENT;
             }
 
             int childFd = ::openat(parentFd, entryName.constData(),
                                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
             if (childFd < 0) {
+                return false;
+            }
+
+            // statxからopenatまでの間に名前を差し替えられていないか、開いたディレクトリ自体が境界でないかを確認する
+            struct statx opened;
+            if (::statx(childFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
+                        STATX_TYPE | STATX_INO, &opened) < 0) {
+                const int savedErrno = errno;
+                ::close(childFd);
+                errno = savedErrno;
+                return false;
+            }
+            if (isMountBoundary(opened, parentDev) || opened.stx_ino != stx.stx_ino) {
+                ::close(childFd);
+                errno = EXDEV;
                 return false;
             }
 
@@ -435,7 +492,7 @@ namespace qsnapper::security {
                     continue;
                 }
 
-                if (!removeEntryAt(childFd, QByteArray(name))) {
+                if (!removeEntryWithinDeviceAt(childFd, parentDev, QByteArray(name))) {
                     const int savedErrno = errno;
                     ::closedir(dir);
                     errno = savedErrno;
@@ -448,6 +505,24 @@ namespace qsnapper::security {
             }
 
             return ::unlinkat(parentFd, entryName.constData(), AT_REMOVEDIR) == 0 || errno == ENOENT;
+        }
+
+        /**
+         * @brief 親dirfd配下の1エントリを、symlink非追従かつmount境界を越えずに削除する
+         *
+         * 親ディレクトリと異なるデバイス上のエントリ (mount境界) を検出した場合はerrno=EXDEVで失敗する
+         *
+         * @param parentFd 親ディレクトリfd
+         * @param entryName 削除対象のleaf名
+         * @return 削除成功時: true
+         */
+        bool removeEntryAt(int parentFd, const QByteArray &entryName)
+        {
+            struct stat parentStat;
+            if (::fstat(parentFd, &parentStat) < 0) {
+                return false;
+            }
+            return removeEntryWithinDeviceAt(parentFd, parentStat.st_dev, entryName);
         }
 
         /**
@@ -469,6 +544,44 @@ namespace qsnapper::security {
             }
 
             return true;
+        }
+
+        /**
+         * @brief 親dirfd上のleafを、regular fileである場合に限り読み取り用に開く
+         *
+         * FIFOやデバイスはopen()自体がブロックしたり副作用を起こしたりするため、開く前にfstatat()でregular fileであることを確認する
+         * 確認とopenの間にFIFOへ差し替えられても待ち続けないよう、O_NONBLOCK | O_NOCTTYで開き (regular fileの読み込みには影響しない)、fstat()で再確認する
+         *
+         * @param parentFd 親ディレクトリのfd
+         * @param leafName 親ディレクトリ内の名前
+         * @return 成功時: file descriptor、失敗時: -1 (errno設定)
+         */
+        int openRegularFileReadInParent(int parentFd, const QByteArray &leafName)
+        {
+            struct stat leafStat;
+            if (::fstatat(parentFd, leafName.constData(), &leafStat, AT_SYMLINK_NOFOLLOW) < 0) {
+                return -1;
+            }
+            if (!S_ISREG(leafStat.st_mode)) {
+                // symlinkはO_NOFOLLOWで開いた場合と同じELOOPを返し、従来のerrno契約を保つ
+                errno = S_ISLNK(leafStat.st_mode) ? ELOOP : EINVAL;
+                return -1;
+            }
+
+            const int fd = ::openat(parentFd, leafName.constData(),
+                                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+            if (fd < 0) {
+                return -1;
+            }
+
+            if (!validateRegularFileDescriptor(fd)) {
+                const int validationErrno = errno;
+                ::close(fd);
+                errno = validationErrno;
+                return -1;
+            }
+
+            return fd;
         }
 
         /**
@@ -741,42 +854,6 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief 通常ファイルを安全に書き込みオープンする
-     *
-     * @param path 対象ファイルの絶対パス
-     * @param mode 作成時モード
-     * @return 成功時: file descriptor、失敗時: -1
-     */
-    int safeOpenRegularFileWrite(const QString &path, mode_t mode)
-    {
-        QByteArray leafName;
-        const int parentFd = openParentDirectoryNoFollow(path, false, mode, &leafName);
-        if (parentFd < 0) {
-            return -1;
-        }
-
-        // 親ディレクトリfdを固定したopenat()により、leafを作成 / 上書きする
-        const int fd = ::openat(parentFd, leafName.constData(),
-                                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
-                                mode);
-        const int savedErrno = errno;
-        ::close(parentFd);
-        errno = savedErrno;
-        if (fd < 0) {
-            return -1;
-        }
-
-        if (!validateRegularFileDescriptor(fd)) {
-            const int validationErrno = errno;
-            ::close(fd);
-            errno = validationErrno;
-            return -1;
-        }
-
-        return fd;
-    }
-
-    /**
      * @brief 通常ファイルを安全に読み取りオープンする
      *
      * @param path 対象ファイルの絶対パス
@@ -790,200 +867,11 @@ namespace qsnapper::security {
             return -1;
         }
 
-        const int fd = ::openat(parentFd, leafName.constData(),
-                                O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        const int fd = openRegularFileReadInParent(parentFd, leafName);
         const int savedErrno = errno;
         ::close(parentFd);
         errno = savedErrno;
-        if (fd < 0) {
-            return -1;
-        }
-
-        if (!validateRegularFileDescriptor(fd)) {
-            const int validationErrno = errno;
-            ::close(fd);
-            errno = validationErrno;
-            return -1;
-        }
-
         return fd;
-    }
-
-    /**
-     * @brief パス配下をsymlink非追従で再帰削除する
-     *
-     * @param path 削除対象の絶対パス
-     * @return 削除成功時: true
-     */
-    bool safeRemoveAll(const QString &path)
-    {
-        if (path.isEmpty() || path == QStringLiteral("/")) {
-            errno = EINVAL;
-            return false;
-        }
-
-        QByteArray leafName;
-        const int parentFd = openParentDirectoryNoFollow(path, false, 0, &leafName);
-        if (parentFd < 0) {
-            return errno == ENOENT;
-        }
-
-        const bool removed = removeEntryAt(parentFd, leafName);
-        const int savedErrno = errno;
-        ::close(parentFd);
-        errno = savedErrno;
-        return removed;
-    }
-
-    /**
-     * @brief 親dirfdを固定したrenameat()でパスを移動する
-     *
-     * @param sourcePath 移動元の絶対パス
-     * @param destinationPath 移動先の絶対パス
-     * @return 成功時: true
-     */
-    bool safeRenamePathNoFollow(const QString &sourcePath, const QString &destinationPath)
-    {
-        QByteArray sourceLeaf;
-        const int sourceParentFd = openParentDirectoryNoFollow(sourcePath, false, 0, &sourceLeaf);
-        if (sourceParentFd < 0) {
-            return false;
-        }
-
-        QByteArray destinationLeaf;
-        const int destinationParentFd = openParentDirectoryNoFollow(destinationPath, false, 0, &destinationLeaf);
-        if (destinationParentFd < 0) {
-            const int savedErrno = errno;
-            ::close(sourceParentFd);
-            errno = savedErrno;
-            return false;
-        }
-
-        const bool ok = (::renameat(sourceParentFd, sourceLeaf.constData(),
-                                    destinationParentFd, destinationLeaf.constData()) == 0);
-        const int savedErrno = errno;
-        ::close(destinationParentFd);
-        ::close(sourceParentFd);
-        errno = savedErrno;
-        return ok;
-    }
-
-    /**
-     * @brief symlink targetをreadlinkat()で取得する
-     *
-     * @param path 対象symlinkの絶対パス
-     * @param targetOut 読み出したtargetの格納先
-     * @return 成功時: true
-     */
-    bool safeReadLinkNoFollow(const QString &path, QByteArray *targetOut)
-    {
-        if (!targetOut) {
-            errno = EINVAL;
-            return false;
-        }
-
-        QByteArray leafName;
-        const int parentFd = openParentDirectoryNoFollow(path, false, 0, &leafName);
-        if (parentFd < 0) {
-            return false;
-        }
-
-        // 固定PATH_MAXで切り詰めないよう、必要に応じてバッファを拡張する
-        QByteArray buffer(256, '\0');
-        for (;;) {
-            const ssize_t len = ::readlinkat(parentFd, leafName.constData(), buffer.data(),
-                                             static_cast<size_t>(buffer.size()));
-            if (len < 0) {
-                const int savedErrno = errno;
-                ::close(parentFd);
-                errno = savedErrno;
-                return false;
-            }
-
-            if (len < buffer.size()) {
-                buffer.truncate(static_cast<qsizetype>(len));
-                *targetOut = buffer;
-                ::close(parentFd);
-                return true;
-            }
-
-            buffer.resize(buffer.size() * 2);
-        }
-    }
-
-    /**
-     * @brief symlinkat()を用いてsymlinkを作成する
-     *
-     * @param target 作成するsymlinkのtarget
-     * @param path 作成先の絶対パス
-     * @return 成功時: true
-     */
-    bool safeCreateSymlinkNoFollow(const QByteArray &target, const QString &path)
-    {
-        QByteArray leafName;
-        const int parentFd = openParentDirectoryNoFollow(path, false, 0, &leafName);
-        if (parentFd < 0) {
-            return false;
-        }
-
-        const bool ok = (::symlinkat(target.constData(), parentFd, leafName.constData()) == 0);
-        const int savedErrno = errno;
-        ::close(parentFd);
-        errno = savedErrno;
-        return ok;
-    }
-
-    /**
-     * @brief symlink自体のowner / timesをAT_SYMLINK_NOFOLLOWで更新する
-     *
-     * @param path 対象symlinkの絶対パス
-     * @param owner 設定するowner UID
-     * @param group 設定するgroup GID
-     * @param times 設定するaccess / modification time
-     * @param ownerUpdated owner更新成功結果の返却先
-     * @param timesUpdated times更新成功結果の返却先
-     * @return 両方成功した場合 true
-     */
-    bool safeSetSymlinkMetadataNoFollow(const QString &path,
-                                        uid_t owner,
-                                        gid_t group,
-                                        const struct timespec times[2],
-                                        bool *ownerUpdated,
-                                        bool *timesUpdated)
-    {
-        if (!ownerUpdated || !timesUpdated || !times) {
-            errno = EINVAL;
-            return false;
-        }
-
-        *ownerUpdated = false;
-        *timesUpdated = false;
-
-        QByteArray leafName;
-        const int parentFd = openParentDirectoryNoFollow(path, false, 0, &leafName);
-        if (parentFd < 0) {
-            return false;
-        }
-
-        bool allOk = true;
-        if (::fchownat(parentFd, leafName.constData(), owner, group, AT_SYMLINK_NOFOLLOW) == 0) {
-            *ownerUpdated = true;
-        }
-        else {
-            allOk = false;
-        }
-
-        if (::utimensat(parentFd, leafName.constData(), times, AT_SYMLINK_NOFOLLOW) == 0) {
-            *timesUpdated = true;
-        }
-        else {
-            allOk = false;
-        }
-
-        const int savedErrno = errno;
-        ::close(parentFd);
-        errno = savedErrno;
-        return allOk;
     }
 
     /**
@@ -1119,22 +1007,10 @@ namespace qsnapper::security {
             return -1;
         }
 
-        const int fd = ::openat(parentFd, leafName.constData(),
-                                O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        const int fd = openRegularFileReadInParent(parentFd, leafName);
         const int savedErrno = errno;
         ::close(parentFd);
         errno = savedErrno;
-        if (fd < 0) {
-            return -1;
-        }
-
-        if (!validateRegularFileDescriptor(fd)) {
-            const int validationErrno = errno;
-            ::close(fd);
-            errno = validationErrno;
-            return -1;
-        }
-
         return fd;
     }
 
@@ -1198,6 +1074,22 @@ namespace qsnapper::security {
                     relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
             return openParentDirectoryInRootAt(dirFd, components, leafNameOut,
                                                forceNoOpenat2);
+        }
+
+        /**
+         * @brief rename直前フックの保存先
+         * @return フックへの参照
+         */
+        std::function<void(int, const QByteArray &)> &beforeReplaceRenameHook()
+        {
+            static std::function<void(int, const QByteArray &)> hook;
+            return hook;
+        }
+
+        void setBeforeReplaceRenameHookForTesting(
+                std::function<void(int parentFd, const QByteArray &temporaryName)> hook)
+        {
+            beforeReplaceRenameHook() = std::move(hook);
         }
     } // namespace detail
 
@@ -1590,5 +1482,502 @@ namespace qsnapper::security {
         }
 
         return allOk;
+    }
+
+    namespace {
+        constexpr const char *kAclAccessXattr = "system.posix_acl_access";
+        constexpr const char *kAclDefaultXattr = "system.posix_acl_default";
+        constexpr const char *kCapabilityXattr = "security.capability";
+
+        /**
+         * @brief fdからxattrの値を読み出す
+         *
+         * 読み出しの間に値が伸びた場合 (ERANGE) は数回だけ再試行する
+         *
+         * @param fd 対象fd
+         * @param name xattr名
+         * @param valueOut 値の返却先
+         * @return 1: 値あり、0: 属性なし (ENODATA)、-1: エラー (errno設定、ENOTSUPを含む)
+         */
+        int readXattrFd(int fd, const char *name, QByteArray *valueOut)
+        {
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                const ssize_t size = ::fgetxattr(fd, name, nullptr, 0);
+                if (size < 0) {
+                    return errno == ENODATA ? 0 : -1;
+                }
+
+                QByteArray value(static_cast<qsizetype>(size), '\0');
+                const ssize_t length = ::fgetxattr(fd, name, value.data(), static_cast<size_t>(value.size()));
+                if (length >= 0) {
+                    value.truncate(static_cast<qsizetype>(length));
+                    *valueOut = value;
+                    return 1;
+                }
+                if (errno == ENODATA) {
+                    return 0;
+                }
+                if (errno != ERANGE) {
+                    return -1;
+                }
+            }
+
+            errno = ERANGE;
+            return -1;
+        }
+
+        /**
+         * @brief POSIX ACLを復元元と一致させる
+         *
+         * 復元元にあれば設定し、無ければ復元先から削除する
+         * 復元元のFSがACLに対応していない (ENOTSUP) 場合は「ACLなし」として扱う
+         *
+         * @param sourceFd 復元元fd
+         * @param destinationFd 復元先fd
+         * @param name ACLのxattr名
+         * @return 一致させられた場合true (失敗時はerrno設定)
+         */
+        bool syncAclXattrFd(int sourceFd, int destinationFd, const char *name)
+        {
+            QByteArray value;
+            const int state = readXattrFd(sourceFd, name, &value);
+            if (state < 0 && errno != ENOTSUP) {
+                return false;
+            }
+
+            if (state == 1) {
+                return ::fsetxattr(destinationFd, name, value.constData(),
+                                   static_cast<size_t>(value.size()), 0) == 0;
+            }
+
+            if (::fremovexattr(destinationFd, name) == 0 || errno == ENODATA || errno == ENOTSUP) {
+                return true;
+            }
+
+            return false;
+        }
+
+        /**
+         * @brief 必須・個別処理のxattr以外を、best-effortでコピーする
+         * @param sourceFd 復元元fd
+         * @param destinationFd 復元先fd
+         * @return コピーできなかったxattrの件数 (一覧を取得できなかった場合は1)
+         */
+        int copyRemainingXattrsBestEffort(int sourceFd, int destinationFd)
+        {
+            QByteArray names;
+            bool listed = false;
+            for (int attempt = 0; attempt < 4 && !listed; ++attempt) {
+                const ssize_t size = ::flistxattr(sourceFd, nullptr, 0);
+                if (size < 0) {
+                    return errno == ENOTSUP ? 0 : 1;
+                }
+
+                names = QByteArray(static_cast<qsizetype>(size), '\0');
+                const ssize_t length = ::flistxattr(sourceFd, names.data(), static_cast<size_t>(names.size()));
+                if (length >= 0) {
+                    names.truncate(static_cast<qsizetype>(length));
+                    listed = true;
+                }
+                else if (errno != ERANGE) {
+                    return 1;
+                }
+            }
+            if (!listed) {
+                return 1;
+            }
+
+            int failures = 0;
+            for (const QByteArray &name : names.split('\0')) {
+                if (name.isEmpty() || name == kAclAccessXattr || name == kAclDefaultXattr
+                        || name == kCapabilityXattr) {
+                    continue;
+                }
+
+                QByteArray value;
+                const int state = readXattrFd(sourceFd, name.constData(), &value);
+                if (state == 0) {
+                    continue;
+                }
+                if (state < 0
+                        || ::fsetxattr(destinationFd, name.constData(), value.constData(),
+                                       static_cast<size_t>(value.size()), 0) < 0) {
+                    ++failures;
+                }
+            }
+
+            return failures;
+        }
+
+        /**
+         * @brief 宛先leaf名と同じディレクトリに置く一時leaf名を生成する
+         *
+         * 形式は "." + leaf + "." + tag + "." + pid + "." + ミリ秒 + "." + attempt
+         * NAME_MAXを超える場合はleaf部分を文字単位で切り詰める (UTF-8の途中で切らない)
+         *
+         * @param leafName 宛先の最終成分名
+         * @param tag 用途を示すASCIIのタグ
+         * @param attempt 試行番号
+         * @return 一時leaf名
+         */
+        QByteArray temporarySiblingLeafName(const QByteArray &leafName, const char *tag, int attempt)
+        {
+            struct timespec now;
+            ::clock_gettime(CLOCK_REALTIME, &now);
+            const qint64 milliseconds = static_cast<qint64>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+
+            const QByteArray suffix = QByteArray(".") + tag
+                    + '.' + QByteArray::number(static_cast<qint64>(::getpid()))
+                    + '.' + QByteArray::number(milliseconds)
+                    + '.' + QByteArray::number(attempt);
+
+            const qsizetype maxBaseBytes = static_cast<qsizetype>(NAME_MAX) - 1 - suffix.size();
+            QString base = QString::fromUtf8(leafName);
+            while (!base.isEmpty() && base.toUtf8().size() > maxBaseBytes) {
+                base.chop(1);
+            }
+
+            return QByteArray(".") + base.toUtf8() + suffix;
+        }
+
+        /**
+         * @brief 親dirfd上の名前が、期待するinodeを指しているか確認する
+         * @param parentFd 親dirfd
+         * @param name leaf名
+         * @param expected 期待するinodeのstat
+         * @return 同一inodeならtrue (不一致時はerrno=ESTALE)
+         */
+        bool isSameInodeAt(int parentFd, const QByteArray &name, const struct stat &expected)
+        {
+            struct stat current;
+            if (::fstatat(parentFd, name.constData(), &current, AT_SYMLINK_NOFOLLOW) < 0) {
+                return false;
+            }
+            if (current.st_dev != expected.st_dev || current.st_ino != expected.st_ino) {
+                errno = ESTALE;
+                return false;
+            }
+            return true;
+        }
+
+        /**
+         * @brief 一時objectを、自分が作成したinodeを指している場合に限り削除する
+         *
+         * 差し替えられていた場合は他者のobjectを消さないよう、何もしない
+         * errnoは呼び出し前の値を保持する
+         *
+         * @param parentFd 親dirfd
+         * @param temporaryName 一時leaf名
+         * @param created 作成直後に記録したstat
+         */
+        void discardTemporaryAt(int parentFd, const QByteArray &temporaryName, const struct stat &created)
+        {
+            const int savedErrno = errno;
+            if (isSameInodeAt(parentFd, temporaryName, created)) {
+                ::unlinkat(parentFd, temporaryName.constData(), 0);
+            }
+            errno = savedErrno;
+        }
+
+        /**
+         * @brief rename直前の検証、renameat()、rename直後の検証を行う
+         * @param parentFd 親dirfd
+         * @param temporaryName 一時leaf名
+         * @param leafName 宛先leaf名
+         * @param created 作成直後に記録した一時objectのstat
+         * @return 自分のinodeを宛先へ差し替えられた場合true (失敗時はerrno設定)
+         */
+        bool renameVerifiedAt(int parentFd, const QByteArray &temporaryName,
+                              const QByteArray &leafName, const struct stat &created)
+        {
+            if (const auto &hook = detail::beforeReplaceRenameHook()) {
+                hook(parentFd, temporaryName);
+            }
+
+            if (!isSameInodeAt(parentFd, temporaryName, created)) {
+                // 差し替えられた一時名は自分のobjectではないため、削除もrenameもしない
+                errno = ESTALE;
+                return false;
+            }
+
+            if (::renameat(parentFd, temporaryName.constData(), parentFd, leafName.constData()) < 0) {
+                discardTemporaryAt(parentFd, temporaryName, created);
+                return false;
+            }
+
+            // rename直後に宛先が別objectへ差し替えられていないか確認する
+            if (!isSameInodeAt(parentFd, leafName, created)) {
+                errno = ESTALE;
+                return false;
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief 親dirfdと宛先leaf名の引数を検証する
+         * @param parentFd 親dirfd
+         * @param leafName 宛先leaf名
+         * @return 妥当な場合true (不正時はerrno=EINVAL)
+         */
+        bool isValidReplaceTarget(int parentFd, const QByteArray &leafName)
+        {
+            if (parentFd < 0 || leafName.isEmpty() || leafName == "." || leafName == ".."
+                    || leafName.contains('/') || leafName.contains('\0')) {
+                errno = EINVAL;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    int safeOpenDirectoryReadAt(int dirFd, const QString &relativePath)
+    {
+        if (dirFd < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        if (!validateRelativePathAt(relativePath, nullptr)) {
+            return -1;
+        }
+
+        // 検証済みの同一relativePathから親dirfdとleaf名を導出する (TOCTOUなし)
+        const QStringList components = relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QByteArray leafName;
+        const UniqueFd parentFd(openParentDirectoryInRootAt(dirFd, components, &leafName));
+        if (!parentFd.isValid()) {
+            return -1;
+        }
+
+        return ::openat(parentFd.get(), leafName.constData(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+
+    int openDestinationParentBeneathRoot(const QString &rootPath, const QString &destinationPath,
+                                         QByteArray *leafNameOut)
+    {
+        if (!leafNameOut) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        QStringList components;
+        if (!splitDestinationComponents(rootPath, destinationPath, &components)) {
+            return -1;
+        }
+
+        return openLeafParentBeneathRoot(rootPath, components, false, 0, leafNameOut);
+    }
+
+    RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory)
+    {
+        RestoredMetadataResult result;
+        const auto recordMandatoryFailure = [&result]() {
+            if (!result.mandatoryFailed) {
+                result.mandatoryFailed = true;
+                result.mandatoryErrno = errno;
+            }
+        };
+
+        struct stat sourceStat;
+        if (::fstat(sourceFd, &sourceStat) < 0) {
+            recordMandatoryFailure();
+            return result;
+        }
+
+        // 所有者の変更はS_ISUID / S_ISGIDとsecurity.capabilityを落とすため、modeとcapabilityより先に行う
+        if (::fchown(destinationFd, sourceStat.st_uid, sourceStat.st_gid) < 0) {
+            recordMandatoryFailure();
+        }
+        if (::fchmod(destinationFd, sourceStat.st_mode & 07777) < 0) {
+            recordMandatoryFailure();
+        }
+
+        if (!syncAclXattrFd(sourceFd, destinationFd, kAclAccessXattr)) {
+            recordMandatoryFailure();
+        }
+        if (isDirectory && !syncAclXattrFd(sourceFd, destinationFd, kAclDefaultXattr)) {
+            recordMandatoryFailure();
+        }
+
+        // ACLの設定はgroupのpermission bitを書き換えるため、最終的なmodeを復元元と一致させる
+        struct stat destinationStat;
+        if (::fstat(destinationFd, &destinationStat) == 0
+                && (destinationStat.st_mode & 07777) != (sourceStat.st_mode & 07777)
+                && ::fchmod(destinationFd, sourceStat.st_mode & 07777) < 0) {
+            recordMandatoryFailure();
+        }
+
+        result.optionalFailures = copyRemainingXattrsBestEffort(sourceFd, destinationFd);
+
+        // file capabilityは所有者とmodeの変更で失われるため、最後に設定する
+        // 新規inodeには存在しないため、復元元に無い場合の削除は不要
+        if (!isDirectory) {
+            QByteArray capability;
+            const int state = readXattrFd(sourceFd, kCapabilityXattr, &capability);
+            if (state < 0 && errno != ENOTSUP) {
+                recordMandatoryFailure();
+            }
+            else if (state == 1
+                     && ::fsetxattr(destinationFd, kCapabilityXattr, capability.constData(),
+                                    static_cast<size_t>(capability.size()), 0) < 0) {
+                recordMandatoryFailure();
+            }
+        }
+
+        return result;
+    }
+
+    bool replaceRegularFileAt(int destinationParentFd, const QByteArray &leafName, int sourceFd,
+                              bool tryReflink, bool mustPreserveMetadata,
+                              RestoredMetadataResult *metadataOut)
+    {
+        if (!isValidReplaceTarget(destinationParentFd, leafName) || sourceFd < 0) {
+            errno = EINVAL;
+            return false;
+        }
+
+        struct stat sourceStat;
+        if (::fstat(sourceFd, &sourceStat) < 0) {
+            return false;
+        }
+        if (!S_ISREG(sourceStat.st_mode)) {
+            errno = EINVAL;
+            return false;
+        }
+
+        // 権限を絞った状態 (0600) で作成し、所有者とmodeは後からfd経由で設定する
+        QByteArray temporaryName;
+        int rawFd = -1;
+        for (int attempt = 0; attempt < 16 && rawFd < 0; ++attempt) {
+            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-copy", attempt);
+            rawFd = ::openat(destinationParentFd, temporaryName.constData(),
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (rawFd < 0 && errno != EEXIST) {
+                return false;
+            }
+        }
+        if (rawFd < 0) {
+            return false;
+        }
+
+        UniqueFd destinationFd(rawFd);
+        struct stat created;
+        if (::fstat(destinationFd.get(), &created) < 0) {
+            return false;
+        }
+
+        const auto abortReplace = [&]() {
+            const int savedErrno = errno;
+            destinationFd.reset();
+            discardTemporaryAt(destinationParentFd, temporaryName, created);
+            errno = savedErrno;
+            return false;
+        };
+
+        bool copied = tryReflink && ::ioctl(destinationFd.get(), FICLONE, sourceFd) == 0;
+        if (!copied) {
+            off_t offset = 0;
+            off_t remaining = sourceStat.st_size;
+            while (remaining > 0) {
+                const ssize_t written = ::sendfile(destinationFd.get(), sourceFd, &offset,
+                                                   static_cast<size_t>(remaining));
+                if (written < 0) {
+                    return abortReplace();
+                }
+                if (written == 0) {
+                    // 期待したbyte数に達する前にEOFになった
+                    errno = EIO;
+                    return abortReplace();
+                }
+                remaining -= written;
+            }
+        }
+
+        const RestoredMetadataResult metadata = applyRestoredMetadata(sourceFd, destinationFd.get(), false);
+        if (metadataOut) {
+            *metadataOut = metadata;
+        }
+        if (metadata.mandatoryFailed && mustPreserveMetadata) {
+            errno = metadata.mandatoryErrno;
+            return abortReplace();
+        }
+
+        const struct timespec times[2] = { sourceStat.st_atim, sourceStat.st_mtim };
+        if (::futimens(destinationFd.get(), times) < 0 && mustPreserveMetadata) {
+            return abortReplace();
+        }
+
+        destinationFd.reset();
+        return renameVerifiedAt(destinationParentFd, temporaryName, leafName, created);
+    }
+
+    bool replaceSymlinkAt(int destinationParentFd, const QByteArray &leafName,
+                          const QByteArray &linkTarget, const struct stat &sourceStat,
+                          bool *metadataApplied)
+    {
+        if (metadataApplied) {
+            *metadataApplied = false;
+        }
+        if (!isValidReplaceTarget(destinationParentFd, leafName) || linkTarget.isEmpty()) {
+            errno = EINVAL;
+            return false;
+        }
+
+        QByteArray temporaryName;
+        bool createdLink = false;
+        for (int attempt = 0; attempt < 16 && !createdLink; ++attempt) {
+            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-link", attempt);
+            if (::symlinkat(linkTarget.constData(), destinationParentFd, temporaryName.constData()) == 0) {
+                createdLink = true;
+            }
+            else if (errno != EEXIST) {
+                return false;
+            }
+        }
+        if (!createdLink) {
+            return false;
+        }
+
+        // 作成した一時symlink自体をfdで固定し、以降の操作で名前を再解決しない
+        const UniqueFd linkFd(::openat(destinationParentFd, temporaryName.constData(),
+                                       O_PATH | O_NOFOLLOW | O_CLOEXEC));
+        if (!linkFd.isValid()) {
+            return false;
+        }
+
+        struct stat created;
+        if (::fstat(linkFd.get(), &created) < 0) {
+            return false;
+        }
+
+        // 作成直後に差し替えられていないか (symlink、所有者がeuid、targetが一致) を確認する
+        QByteArray currentTarget(linkTarget.size() + 1, '\0');
+        const ssize_t targetLength = ::readlinkat(linkFd.get(), "", currentTarget.data(),
+                                                  static_cast<size_t>(currentTarget.size()));
+        if (!S_ISLNK(created.st_mode) || created.st_uid != ::geteuid()
+                || targetLength != static_cast<ssize_t>(linkTarget.size())
+                || currentTarget.left(targetLength) != linkTarget) {
+            errno = ESTALE;
+            return false;
+        }
+
+        const bool ownerUpdated = ::fchownat(linkFd.get(), "", sourceStat.st_uid, sourceStat.st_gid,
+                                       AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) == 0;
+        const struct timespec times[2] = { sourceStat.st_atim, sourceStat.st_mtim };
+        bool timesUpdated = ::utimensat(linkFd.get(), "", times, AT_EMPTY_PATH) == 0;
+        if (!timesUpdated && errno == EINVAL) {
+            // utimensat()のAT_EMPTY_PATHに対応していないカーネル向け:
+            // 同じ親dirfd上の一時名へ適用し、前後で同じinodeであることを確認する
+            timesUpdated = isSameInodeAt(destinationParentFd, temporaryName, created)
+                    && ::utimensat(destinationParentFd, temporaryName.constData(), times, AT_SYMLINK_NOFOLLOW) == 0
+                    && isSameInodeAt(destinationParentFd, temporaryName, created);
+        }
+        if (metadataApplied) {
+            *metadataApplied = ownerUpdated && timesUpdated;
+        }
+
+        return renameVerifiedAt(destinationParentFd, temporaryName, leafName, created);
     }
 } // namespace qsnapper::security

@@ -30,6 +30,11 @@ private slots:
     void frozenEntriesMatchingAuthoritativeMapPass();
     void unknownPathAndMismatchedTypeAreRejected();
     void validationReadsFrozenEntriesInBoundedChunks();
+    void restoreDestinationForRootConfigIsUnchanged();
+    void restoreDestinationIsBasedOnConfigSubvolume();
+    void restoreDestinationRejectsUnsafeNames();
+    void snapshotMetadataNameIsDetectedAfterNormalization();
+    void rootReadWriteSafetyNetRequiresAllConditions();
 };
 
 void TestRestoreValidation::createdBitWinsOverEverything()
@@ -260,7 +265,7 @@ void TestRestoreValidation::frozenEntriesMatchingAuthoritativeMapPass()
     RestoreManifestRegistry registry;
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
         RestoreMode::YastCompatible, &error);
     QVERIFY(!id.isEmpty());
     QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
@@ -293,7 +298,7 @@ void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
     RestoreManifestRegistry registry;
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
         RestoreMode::YastCompatible, &error);
     QVERIFY(!id.isEmpty());
     QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
@@ -319,7 +324,7 @@ void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
         // /etc/foreign.confを宣言した凍結済み計画を用意する
         RestoreManifestRegistry tamperedRegistry;
         const QString tamperedId = tamperedRegistry.createStaging(
-            QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+            QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
             RestoreMode::YastCompatible, &error);
         QVERIFY(!tamperedId.isEmpty());
         QVERIFY(tamperedRegistry.stageEntries(
@@ -337,7 +342,7 @@ void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
     {
         RestoreManifestRegistry tamperedRegistry;
         const QString tamperedId = tamperedRegistry.createStaging(
-            QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+            QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
             RestoreMode::YastCompatible, &error);
         QVERIFY(!tamperedId.isEmpty());
         QVERIFY(tamperedRegistry.stageEntries(
@@ -358,7 +363,7 @@ void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
     RestoreManifestRegistry registry;
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), QStringLiteral("root"), 100, 101,
+        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
         RestoreMode::YastCompatible, &error);
     QVERIFY(!id.isEmpty());
 
@@ -384,6 +389,124 @@ void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
         &shortMap, slice->first().path, RestoreStatusContent));
     QVERIFY(!validateFrozenEntriesAgainstAuthoritative(
         registry, id, QStringLiteral(":1.1"), shortMap, &error));
+}
+
+void TestRestoreValidation::restoreDestinationForRootConfigIsUnchanged()
+{
+    // root config (SUBVOLUME=/) では従来どおり"/"基準の宛先になる
+    QString rootPath;
+    QString destination;
+    QString relative;
+    QVERIFY(buildRestoreDestination(QStringLiteral("/"), QStringLiteral("/etc/fstab"),
+                                    &rootPath, &destination, &relative));
+    QCOMPARE(rootPath, QStringLiteral("/"));
+    QCOMPARE(destination, QStringLiteral("/etc/fstab"));
+    QCOMPARE(relative, QStringLiteral("etc/fstab"));
+
+    QVERIFY(buildRestoreDestination(QStringLiteral("/"), QStringLiteral("/a"),
+                                    &rootPath, &destination, &relative));
+    QCOMPARE(destination, QStringLiteral("/a"));
+    QCOMPARE(relative, QStringLiteral("a"));
+}
+
+void TestRestoreValidation::restoreDestinationIsBasedOnConfigSubvolume()
+{
+    // home config ではconfig相対名"/alice/file"の宛先は"/home/alice/file"である
+    QString rootPath;
+    QString destination;
+    QString relative;
+    QVERIFY(buildRestoreDestination(QStringLiteral("/home"), QStringLiteral("/alice/file"),
+                                    &rootPath, &destination, &relative));
+    QCOMPARE(rootPath, QStringLiteral("/home"));
+    QCOMPARE(destination, QStringLiteral("/home/alice/file"));
+    QCOMPARE(relative, QStringLiteral("alice/file"));
+
+    // SUBVOLUMEと名前の冗長な"/"は正規化される
+    QVERIFY(buildRestoreDestination(QStringLiteral("//srv/data/"), QStringLiteral("//x//y/"),
+                                    &rootPath, &destination, &relative));
+    QCOMPARE(rootPath, QStringLiteral("/srv/data"));
+    QCOMPARE(destination, QStringLiteral("/srv/data/x/y"));
+    QCOMPARE(relative, QStringLiteral("x/y"));
+
+    QString normalized;
+    QVERIFY(normalizeRestoreSubvolume(QStringLiteral("/"), &normalized));
+    QCOMPARE(normalized, QStringLiteral("/"));
+    QVERIFY(normalizeRestoreSubvolume(QStringLiteral("/home/"), &normalized));
+    QCOMPARE(normalized, QStringLiteral("/home"));
+}
+
+void TestRestoreValidation::restoreDestinationRejectsUnsafeNames()
+{
+    QString rootPath;
+    QString destination;
+    QString relative;
+    const QString subvolume = QStringLiteral("/home");
+
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("alice/file"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("/"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("/alice/../etc/shadow"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("/alice/./file"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("/alice/fi\nle"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("/.snapshots/1/snapshot"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(subvolume, QStringLiteral("//.snapshots/1"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(QStringLiteral("home"), QStringLiteral("/alice"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(!buildRestoreDestination(QStringLiteral("/home/../etc"), QStringLiteral("/alice"),
+                                     &rootPath, &destination, &relative));
+    QVERIFY(destination.isEmpty());
+    QVERIFY(relative.isEmpty());
+}
+
+void TestRestoreValidation::snapshotMetadataNameIsDetectedAfterNormalization()
+{
+    QVERIFY(isSnapshotMetadataRestoreName(QStringLiteral("/.snapshots")));
+    QVERIFY(isSnapshotMetadataRestoreName(QStringLiteral("/.snapshots/1/snapshot/etc")));
+    QVERIFY(isSnapshotMetadataRestoreName(QStringLiteral("//.snapshots/1")));
+    QVERIFY(isSnapshotMetadataRestoreName(QStringLiteral("///.snapshots/")));
+    QVERIFY(!isSnapshotMetadataRestoreName(QStringLiteral("/.snapshotsx")));
+    QVERIFY(!isSnapshotMetadataRestoreName(QStringLiteral("/home/.snapshots")));
+    QVERIFY(!isSnapshotMetadataRestoreName(QStringLiteral("/etc/fstab")));
+}
+
+void TestRestoreValidation::rootReadWriteSafetyNetRequiresAllConditions()
+{
+    RootReadWriteSafetyNetState started;
+    started.executionStarted = true;
+    started.targetsRootSubvolume = true;
+    started.preRestoreStateKnown = true;
+    started.preRestoreReadOnly = false;
+
+    // 3条件が揃い、復元後にroになった場合のみrwへ戻す
+    QVERIFY(shouldRestoreRootReadWrite(started, true));
+    QVERIFY(!shouldRestoreRootReadWrite(started, false));
+
+    // 実行を開始していない計画 (Begin -> Cancel等) では何もしない
+    RootReadWriteSafetyNetState notStarted = started;
+    notStarted.executionStarted = false;
+    QVERIFY(!shouldRestoreRootReadWrite(notStarted, true));
+    QVERIFY(!shouldRestoreRootReadWrite(RootReadWriteSafetyNetState{}, true));
+
+    // 非root config
+    RootReadWriteSafetyNetState nonRoot = started;
+    nonRoot.targetsRootSubvolume = false;
+    QVERIFY(!shouldRestoreRootReadWrite(nonRoot, true));
+
+    // 元からroだったroot (読み取り専用スナップショットからの起動等)
+    RootReadWriteSafetyNetState wasReadOnly = started;
+    wasReadOnly.preRestoreReadOnly = true;
+    QVERIFY(!shouldRestoreRootReadWrite(wasReadOnly, true));
+
+    // 復元前の状態を記録できなかった場合
+    RootReadWriteSafetyNetState unknown = started;
+    unknown.preRestoreStateKnown = false;
+    QVERIFY(!shouldRestoreRootReadWrite(unknown, true));
 }
 
 QTEST_MAIN(TestRestoreValidation)

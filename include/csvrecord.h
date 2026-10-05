@@ -101,6 +101,28 @@ namespace qsnapper {
             fields.append(current);
             return fields;
         }
+
+        /**
+         * @brief CreateSnapshotの応答CSVから、作成されたスナップショットの番号を取り出す
+         *
+         * 応答はヘッダ行 ("number,...") と作成されたスナップショット1件のレコード行から成る
+         * 一覧の末尾を新規作成分とみなすと、並行して作成された別のスナップショットや
+         * 番号の並び順によって取り違えるため、サーバーが返した番号で特定する
+         *
+         * @param reply CreateSnapshotの応答文字列
+         * @return スナップショット番号 (1以上)、応答の形式が不正な場合: -1
+         */
+        inline int parseCreatedSnapshotNumber(const QString &reply)
+        {
+            const QStringList lines = reply.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+            if (lines.size() != 2 || splitRecord(lines.at(0)).value(0) != QLatin1String("number")) {
+                return -1;
+            }
+
+            bool ok = false;
+            const int number = splitRecord(lines.at(1)).value(0).toInt(&ok);
+            return ok && number > 0 ? number : -1;
+        }
     } // namespace csv
 } // namespace qsnapper
 

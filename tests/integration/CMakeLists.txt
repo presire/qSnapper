@@ -31,8 +31,8 @@ else()
 endif()
 
 # --- restore_authorization_boundaries: 通常CTest ---
-# legacy (RestoreFiles / RestoreFilesDirect) と
-# staged (BeginRestorePlan..CancelRestorePlan) の2つのD-Bus認可境界が"snapshotoperations.cpp"の実ソース上で変化していないことを静的に検証する
+# staged (BeginRestorePlan..CancelRestorePlan) のD-Bus認可境界が"snapshotoperations.cpp"の実ソース上で変化していないこと、
+# および廃止したlegacy (RestoreFiles / RestoreFilesDirect) が再導入されていないことを静的に検証する
 # Python3インタプリタが見つからない環境ではconfigureを失敗させず、STATUSメッセージのみでこのテストの登録をスキップする
 if(Python3_Interpreter_FOUND)
     add_test(NAME restore_authorization_boundaries

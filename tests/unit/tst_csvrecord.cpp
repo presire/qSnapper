@@ -33,6 +33,8 @@ private slots:
     void legacyUnquotedMatchesNaiveSplit();
     void controlCharactersStillRejected();
     void fullRecordRoundTrip();
+    void createdSnapshotNumberIsTakenFromReply();
+    void malformedCreateReplyIsRejected();
 };
 
 void TestCsvRecord::commaInDescriptionRoundTrips()
@@ -216,6 +218,35 @@ void TestCsvRecord::fullRecordRoundTrip()
     QCOMPARE(fields.at(6), description);
     QCOMPARE(fields.at(7), pair1);
     QCOMPARE(fields.at(8), pair2);
+}
+
+/**
+ * @brief CreateSnapshotの応答から、一覧の末尾ではなく応答中の番号で作成分を特定することを確認する
+ */
+void TestCsvRecord::createdSnapshotNumberIsTakenFromReply()
+{
+    const QString header = QStringLiteral("number,type,pre-number,date,user,cleanup,description,userdata\n");
+
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
+                 header + QStringLiteral("42,single,-1,2026-10-05T12:00:00,0,,\"a, b\",\n")), 42);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
+                 header + QStringLiteral("7,post,6,2026-10-05T12:00:00,0,number,x,key=value")), 7);
+}
+
+/**
+ * @brief 形式が不正な応答では番号を推測しないことを確認する
+ */
+void TestCsvRecord::malformedCreateReplyIsRejected()
+{
+    const QString header = QStringLiteral("number,type,pre-number,date,user,cleanup,description,userdata\n");
+
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(QString()), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(header), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(QStringLiteral("42,single\n")), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(header + QStringLiteral("abc,single\n")), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(header + QStringLiteral("0,single\n")), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
+                 header + QStringLiteral("41,single\n42,single\n")), -1);
 }
 
 QTEST_MAIN(TestCsvRecord)

@@ -182,9 +182,59 @@ target_link_libraries(tst_csvrecord PRIVATE
 set_target_properties(tst_csvrecord PROPERTIES AUTOMOC ON)
 add_test(NAME tst_csvrecord COMMAND tst_csvrecord)
 
+# --- tst_fssnapshotstore ---
+# クライアント側のPreスナップショット番号ストア (保存先がユーザー単位のデータディレクトリであること)
+add_executable(tst_fssnapshotstore
+    tst_fssnapshotstore.cpp
+    ${CMAKE_SOURCE_DIR}/src/fssnapshotstore.cpp
+)
+target_include_directories(tst_fssnapshotstore PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_fssnapshotstore PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_fssnapshotstore PROPERTIES AUTOMOC ON)
+add_test(NAME tst_fssnapshotstore COMMAND tst_fssnapshotstore)
+
+# --- tst_snapshotoperations ---
+# 実際のSnapshotOperationsを生成し、D-Busを介さずにスロットを直接呼んで復元計画の終端処理を検証する
+# 特権操作 (rootサブボリュームのrw化) はテスト用の差し替え関数で観測し、実システムへは触れない
+find_package(Qt6 REQUIRED COMPONENTS DBus)
+add_executable(tst_snapshotoperations
+    tst_snapshotoperations.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/inputvalidator.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations.h
+)
+target_include_directories(tst_snapshotoperations PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_definitions(tst_snapshotoperations PRIVATE
+    LIBSNAPPER_VERSION_MAJOR=${SNAPPER_VERSION_MAJOR}
+    LIBSNAPPER_VERSION_MINOR=${SNAPPER_VERSION_MINOR}
+)
+target_link_libraries(tst_snapshotoperations PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Test
+    PolkitQt6-1::Core
+    PkgConfig::POLKIT_GOBJECT
+    snapper
+    btrfsutil
+)
+set_target_properties(tst_snapshotoperations PROPERTIES AUTOMOC ON)
+add_test(NAME tst_snapshotoperations COMMAND tst_snapshotoperations)
+
 # ASan / UBSanを全テストに適用 (Debugビルド時に"-DQSNAPPER_TEST_SANITIZE=ON")
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_fssnapshotstore)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

@@ -4,12 +4,12 @@
 #include <QDir>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
 #include "fssnapshotstore.h"
 
-const QString FsSnapshotStore::SNAPSHOT_DIR = QStringLiteral("/var/lib/qsnapper");
 const QString FsSnapshotStore::SNAPSHOT_FILE_PREFIX = QStringLiteral("pre_snapshot_");
 const QString FsSnapshotStore::SNAPSHOT_FILE_SUFFIX = QStringLiteral(".id");
 
@@ -20,9 +20,17 @@ namespace {
         return !purpose.isEmpty() && re.match(purpose).hasMatch();
     }
 
-    bool ensureSnapshotDirectory()
+    /**
+     * @brief 保存先ディレクトリを作成し、利用可能であることを確認する
+     * @param snapshotDir 保存先ディレクトリ
+     * @return 自ユーザーが所有するディレクトリとして利用できる場合はtrue
+     */
+    bool ensureSnapshotDirectory(const QString &snapshotDir)
     {
-        const QString snapshotDir = QStringLiteral("/var/lib/qsnapper");
+        if (snapshotDir.isEmpty()) {
+            return false;
+        }
+
         QDir dir;
         if (!dir.mkpath(snapshotDir)) {
             return false;
@@ -32,8 +40,9 @@ namespace {
         struct stat st;
         // 注意:
         // このクライアントサイドのヘルパーは、D-Busサービスのファイルシステム強化レイヤーに対してリンクされていない
-        // パスはユーザが入力するものではなく、アプリケーションが所有する固定のディレクトリであるため、ここでは単純な lstat() で十分である
-        return ::lstat(encodedPath.constData(), &st) == 0 && S_ISDIR(st.st_mode);
+        // パスはユーザが入力するものではなく、自ユーザーのデータディレクトリ配下の固定の場所であるため、ここでは単純なlstat()で十分である
+        return ::lstat(encodedPath.constData(), &st) == 0 && S_ISDIR(st.st_mode)
+               && st.st_uid == ::geteuid();
     }
 }
 
@@ -41,7 +50,7 @@ namespace {
  * @brief スナップショット番号をファイルに保存
  *
  * 指定された用途(purpose)に対応するスナップショット番号をファイルに保存する
- * ファイルパスは /var/lib/qsnapper/pre_snapshot_<purpose>.id となる
+ * ファイルパスは <ユーザー単位のデータディレクトリ>/pre_snapshot_<purpose>.id となる
  * ディレクトリが存在しない場合は自動的に作成される
  *
  * @param purpose スナップショットの用途識別子
@@ -58,8 +67,8 @@ bool FsSnapshotStore::save(const QString &purpose, int snapshotNumber)
 
     QString filePath = snapshotFilePath(purpose);
 
-    if (!ensureSnapshotDirectory()) {
-        qWarning() << "Failed to create or validate directory:" << SNAPSHOT_DIR;
+    if (!ensureSnapshotDirectory(snapshotDirectory())) {
+        qWarning() << "Failed to create or validate directory:" << snapshotDirectory();
         return false;
     }
 
@@ -153,10 +162,22 @@ bool FsSnapshotStore::clean(const QString &purpose)
 }
 
 /**
+ * @brief スナップショットファイル保存ディレクトリを取得
+ *
+ * ユーザー単位のデータディレクトリ (例: ~/.local/share/Presire/qSnapper) を返す
+ *
+ * @return 保存先ディレクトリ。取得できない場合は空文字列
+ */
+QString FsSnapshotStore::snapshotDirectory()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+}
+
+/**
  * @brief スナップショットファイルの完全パスを生成
  *
  * 用途識別子からスナップショット番号を保存するファイルの完全パスを生成する
- * パスは /var/lib/qsnapper/pre_snapshot_<purpose>.id の形式となる
+ * パスは <ユーザー単位のデータディレクトリ>/pre_snapshot_<purpose>.id の形式となる
  *
  * @param purpose スナップショットの用途識別子
  *
@@ -164,5 +185,5 @@ bool FsSnapshotStore::clean(const QString &purpose)
  */
 QString FsSnapshotStore::snapshotFilePath(const QString &purpose)
 {
-    return SNAPSHOT_DIR + "/" + SNAPSHOT_FILE_PREFIX + purpose + SNAPSHOT_FILE_SUFFIX;
+    return snapshotDirectory() + "/" + SNAPSHOT_FILE_PREFIX + purpose + SNAPSHOT_FILE_SUFFIX;
 }

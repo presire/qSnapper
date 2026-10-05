@@ -1,9 +1,3 @@
-#include <QProcess>
-#include <QFile>
-#include <QSaveFile>
-#include <QTextStream>
-#include <QDir>
-#include <QRegularExpression>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
@@ -206,15 +200,15 @@ void SnapperService::setCurrentConfig(const QString &name)
  * @brief Snapperを設定
  *
  * Snapperの初期設定を実行する
+ * config値の書き込みとクォータ設定は、polkitで認可される特権サービス側のメソッドで行う
+ * インストール時の処理 (installation-helper --step 4、/etc/sysconfig/yast2の更新) はroot権限が必要なため、非特権のGUIからは行わない
  * 設定完了後、configuredChangedシグナルを発行する
  */
 void SnapperService::configureSnapper()
 {
     m_configuredChecked = false;
 
-    installationHelperStep4();
     writeSnapperConfig();
-    updateEtcSysconfigYast2();
     setupSnapperQuota();
 
     emit configuredChanged(isConfigured());
@@ -505,15 +499,18 @@ FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
         return nullptr;
     }
 
-    // スナップショットリストを再取得して最新のスナップショットを返す
-    QList<FsSnapshot*> snapshots = all();
-    if (!snapshots.isEmpty()) {
-        FsSnapshot *newSnapshot = snapshots.last();
-        emit snapshotCreated(newSnapshot);
-        return newSnapshot;
+    // 一覧の末尾ではなく、サーバーが応答で返した番号で作成されたスナップショットを特定する
+    // (並行して作成された別のスナップショットとの取り違えを防ぐ)
+    const int createdNumber = qsnapper::csv::parseCreatedSnapshotNumber(reply.value());
+    FsSnapshot *newSnapshot = createdNumber > 0 ? find(createdNumber) : nullptr;
+    if (!newSnapshot) {
+        qCWarning(snapperLog) << "Created snapshot could not be identified from the reply";
+        emit snapshotCreationFailed(tr("The snapshot was created, but it could not be identified."));
+        return nullptr;
     }
 
-    return nullptr;
+    emit snapshotCreated(newSnapshot);
+    return newSnapshot;
 }
 
 /**
@@ -587,20 +584,6 @@ bool SnapperService::nonSwitchedInstallation() const
 }
 
 /**
- * @brief インストールヘルパーステップ4を実行
- *
- * Snapperのインストールヘルパースクリプトのステップ4を実行しす
- */
-void SnapperService::installationHelperStep4()
-{
-    QStringList args;
-    args << "--step" << "4";
-
-    bool success = false;
-    executeCommand("/usr/lib/snapper/installation-helper", args, success);
-}
-
-/**
  * @brief Snapper設定を書き込む
  *
  * Snapperの各種設定パラメータを設定する
@@ -626,49 +609,6 @@ void SnapperService::writeSnapperConfig()
                                                     QVariant::fromValue(settings));
     if (!reply.isValid() || !reply.value()) {
         qCWarning(snapperLog) << "WriteSnapperConfig failed:" << reply.error().message();
-    }
-}
-
-/**
- * @brief /etc/sysconfig/yast2を更新
- *
- * /etc/sysconfig/yast2ファイル内のUSE_SNAPPER設定を"yes"に更新する
- * 設定が存在しない場合は新規追加する
- */
-void SnapperService::updateEtcSysconfigYast2()
-{
-    QString sysconfigPath = QStringLiteral("/etc/sysconfig/yast2");
-    QFile file(sysconfigPath);
-
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        qCWarning(snapperLog) << "Could not open" << sysconfigPath << "for reading";
-        return;
-    }
-
-    QTextStream in(&file);
-    QString content = in.readAll();
-    file.close();
-
-    QRegularExpression regex("^USE_SNAPPER=.*$", QRegularExpression::MultilineOption);
-    if (content.contains(regex)) {
-        content.replace(regex, "USE_SNAPPER=\"yes\"");
-    }
-    else {
-        content.append("\nUSE_SNAPPER=\"yes\"\n");
-    }
-
-    QSaveFile saveFile(sysconfigPath);
-    if (!saveFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        qCWarning(snapperLog) << "Could not open" << sysconfigPath << "for writing";
-        return;
-    }
-
-    QTextStream out(&saveFile);
-    out << content;
-    out.flush();
-
-    if (!saveFile.commit()) {
-        qCWarning(snapperLog) << "Could not atomically update" << sysconfigPath;
     }
 }
 
@@ -766,47 +706,4 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
     }
 
     return snapshots;
-}
-
-/**
- * @brief コマンドを実行
- *
- * 指定されたプログラムを引数付きで実行し、出力を取得する
- * xx秒のタイムアウトが設定されている
- *
- * @param program 実行するプログラムのパス
- * @param arguments プログラムに渡す引数のリスト
- * @param success 実行成功フラグ (出力パラメータ)
- * @return プログラムの標準出力
- */
-QString SnapperService::executeCommand(const QString &program,
-                                       const QStringList &arguments,
-                                       bool &success)
-{
-    QProcess process;
-    process.start(program, arguments);
-
-    if (!process.waitForStarted()) {
-        qCWarning(snapperLog) << "Failed to start process:" << program;
-        success = false;
-        return QString();
-    }
-
-    if (!process.waitForFinished(0)) {
-        qCWarning(snapperLog) << "Process timeout:" << program;
-        process.kill();
-        success = false;
-        return QString();
-    }
-
-    success = (process.exitCode() == 0);
-    QString output = QString::fromUtf8(process.readAllStandardOutput());
-
-    if (!success) {
-        QString errorOutput = QString::fromUtf8(process.readAllStandardError());
-        qCWarning(snapperLog) << "Command failed:" << program << arguments
-                              << "Error:" << errorOutput;
-    }
-
-    return output;
 }

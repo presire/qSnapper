@@ -130,7 +130,7 @@ QString createFrozenPlan(RestoreManifestRegistry &registry,
 {
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
-        owner, QStringLiteral("root"), 42, 0,
+        owner, 1000, QStringLiteral("root"), 42, 0,
         RestoreMode::YastCompatible, &error);
     if (id.isEmpty()
             || !registry.stageEntries(id, owner, paths, changeTypes, &error)

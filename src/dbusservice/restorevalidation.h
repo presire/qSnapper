@@ -131,6 +131,73 @@ bool validateFrozenEntriesAgainstAuthoritative(
     const QHash<QString, QString> &expectedTypes,
     ManifestError *err);
 
+/**
+ * @brief config相対の復元対象名がスナップショット管理領域 (.snapshots) を指すか判定する
+ *
+ * 文字列の前方一致ではなく、空成分を除いた先頭成分で判定する
+ * これにより"//.snapshots/..."のような空成分を挟んだ表記による迂回を防ぐ
+ *
+ * @param configRelativeName libsnapper File::getName()由来のconfig相対名
+ * @return 先頭成分が".snapshots"の場合true
+ */
+bool isSnapshotMetadataRestoreName(const QString &configRelativeName);
+
+/**
+ * @brief configのSUBVOLUMEを空成分を除いた絶対パスへ正規化する
+ * @param subvolume configのSUBVOLUME
+ * @param rootPathOut 正規化結果 (rootサブボリュームなら"/")
+ * @return 絶対パスで、"." / ".."成分・制御文字を含まない場合true
+ */
+bool normalizeRestoreSubvolume(const QString &subvolume, QString *rootPathOut);
+
+/**
+ * @brief config相対の復元対象名とconfigのSUBVOLUMEから、live側の宛先を組み立てる
+ *
+ * GetFileChanges*が返し、クライアントがStageする名前はconfig相対名 (例: SUBVOLUME=/homeでは"/alice/file") である
+ * live側の宛先は"<SUBVOLUME>/<name>"であり、"/"基準で解決してはならない
+ *
+ * subvolume / 名前のいずれも、空成分を除いて正規化する
+ * "." / ".."成分、制御文字、空の名前、".snapshots"配下の名前は拒否する
+ *
+ * @param subvolume configのSUBVOLUME (絶対パス)
+ * @param configRelativeName config相対の復元対象名 (絶対パス表記)
+ * @param rootPathOut 正規化したSUBVOLUME (*BeneathRoot系helperのrootPathに渡す)
+ * @param destinationOut live側の宛先絶対パス (rootPathOut配下)
+ * @param relativeOut rootPathOut (およびスナップショット dir) からの相対パス
+ * @return 組み立てに成功した場合true
+ */
+bool buildRestoreDestination(const QString &subvolume,
+                             const QString &configRelativeName,
+                             QString *rootPathOut,
+                             QString *destinationOut,
+                             QString *relativeOut);
+
+/**
+ * @brief 復元後にrootサブボリュームをrwへ戻す安全ネットの実行条件
+ */
+struct RootReadWriteSafetyNetState {
+    bool executionStarted = false;          // 認可済みで実行を開始した計画か
+    bool targetsRootSubvolume = false;      // 対象configのSUBVOLUMEが"/"か
+    bool preRestoreStateKnown = false;      // 復元前のread-only状態をcommit時に記録できたか
+    bool preRestoreReadOnly = true;         // 復元前のrootサブボリュームがread-onlyだったか
+};
+
+/**
+ * @brief 復元後にrootサブボリュームをrwへ戻してよいか判定する
+ *
+ * 次の全てを満たす場合のみtrueを返す
+ *   - 認可済みで実際に実行を開始した計画である
+ *   - 対象configのSUBVOLUMEが"/"である
+ *   - commit時に記録した復元前の状態がrwであり、復元後にread-onlyになっている
+ * 1つでも判定できない場合はfalse (特権操作を行わない) とする
+ *
+ * @param state commit時に記録した状態
+ * @param readOnlyAfterRestore 復元後に観測したrootサブボリュームのread-only状態
+ * @return rwへ戻すべき場合true
+ */
+bool shouldRestoreRootReadWrite(const RootReadWriteSafetyNetState &state,
+                                bool readOnlyAfterRestore);
+
 } // namespace qsnapper::restore
 
 #endif // QSNAPPER_RESTOREVALIDATION_H

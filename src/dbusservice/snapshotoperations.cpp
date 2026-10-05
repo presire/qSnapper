@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QFile>
+#include <QHash>
 #include <QDebug>
 #include <QPointer>
 
@@ -24,6 +25,7 @@
 #include <btrfsutil.h>
 #include <algorithm>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/sendfile.h>
 #include <linux/fs.h>
 #include <fcntl.h>
@@ -156,33 +158,19 @@ namespace {
 // "diff -u"コマンドの置き換え
 // ============================================================================
 
-namespace {
-
-    // 新規inodeへ差し替える復元経路で、snapshot側のSELinux labelを引き継ぐ
-    // SELinux無効環境やlabel非対応FSではENODATA / ENOTSUPになるため、成否は非致命として扱う
-    void copySecurityContextBestEffort(int sourceFd, int destinationFd)
-    {
-        static constexpr const char *kSelinuxXattr = "security.selinux";
-
-        const ssize_t length = ::fgetxattr(sourceFd, kSelinuxXattr, nullptr, 0);
-        if (length <= 0) {
-            return;
-        }
-
-        QByteArray context(static_cast<qsizetype>(length), '\0');
-        const ssize_t read = ::fgetxattr(sourceFd, kSelinuxXattr, context.data(),
-                                         static_cast<size_t>(context.size()));
-        if (read <= 0) {
-            return;
-        }
-
-        context.truncate(static_cast<qsizetype>(read));
-        if (::fsetxattr(destinationFd, kSelinuxXattr, context.constData(),
-                        static_cast<size_t>(context.size()), 0) < 0) {
-            qWarning() << "copySecurityContextBestEffort: fsetxattr failed (non-fatal):"
-                       << strerror(errno);
-        }
+bool qsnapper::restore::isPinnedRestoreSourceReadOnly(int snapshotDirFd, const std::string &fstype)
+{
+    if (fstype == "btrfs") {
+        bool readOnly = false;
+        return btrfs_util_get_subvolume_read_only_fd(snapshotDirFd, &readOnly) == BTRFS_UTIL_OK
+               && readOnly;
     }
+
+    struct statvfs fsInfo = {};
+    return ::fstatvfs(snapshotDirFd, &fsInfo) == 0 && (fsInfo.f_flag & ST_RDONLY) != 0;
+}
+
+namespace {
 
     QString siblingTemporaryPath(const QString &path, const QString &tag, int attempt)
     {
@@ -212,39 +200,6 @@ namespace {
                 + suffix;
     }
 
-    // live path上の退避リネームも、parent dirfdを固定したrenameat()に寄せる
-    // これにより、intermediate parentのsymlink差し替えに依存しない
-    bool movePathAsideNoFollow(const QString &path, QString *movedPath)
-    {
-        if (movedPath) {
-            movedPath->clear();
-        }
-
-        for (int attempt = 0; attempt < 16; ++attempt) {
-            const QString candidate = siblingTemporaryPath(path, QStringLiteral("qsnapper-old"), attempt);
-
-            if (qsnapper::security::safeRenamePathNoFollow(path, candidate)) {
-                if (movedPath) {
-                    *movedPath = candidate;
-                }
-                return true;
-            }
-
-            if (errno == ENOENT) {
-                return true;
-            }
-
-            if (errno == EEXIST || errno == ENOTEMPTY) {
-                continue;
-            }
-
-            return false;
-        }
-
-        errno = EEXIST;
-        return false;
-    }
-
     QString ownerName(uid_t uid)
     {
         if (passwd *pwd = ::getpwuid(uid)) {
@@ -266,92 +221,203 @@ namespace {
         return QString("%1").arg(static_cast<unsigned int>(mode & 07777), 4, 8, QChar('0'));
     }
 
-    QString readTextFileNoFollow(const QString &path)
-    {
-        const int fd = qsnapper::security::safeOpenRegularFileRead(path);
-        if (fd < 0) {
-            return {};
-        }
+} // anonymous namespace
 
-        QFile file;
-        if (!file.open(fd, QIODevice::ReadOnly | QIODevice::Text, QFileDevice::AutoCloseHandle)) {
-            ::close(fd);
-            return {};
-        }
+namespace qsnapper::diff {
 
-        return QString::fromUtf8(file.readAll());
-    }
+    namespace {
 
-    struct DiffOp {
-        enum Type { Equal, Delete, Insert };
-        Type type;
-        int aIdx, bIdx;  // 0-based index into old/new lines (-1 if N/A)
-    };
+        /**
+         * @brief Myers diffの編集操作
+         */
+        struct DiffOp {
+            enum Type { Equal, Delete, Insert };
+            Type type;
+            int aIdx, bIdx;  // 0-based index into old/new lines (-1 if N/A)
+        };
 
-    /**
-    * Myers diffアルゴリズムで2つの文字列リスト間の最短編集スクリプトを計算する
-    *
-    * @param a 旧ファイルの行リスト
-    * @param b 新ファイルの行リスト
-    * @return 編集操作のリスト (正順)
-    */
-    static QVector<DiffOp> computeMyersDiff(const QStringList &a, const QStringList &b)
-    {
-        const int N = a.size(), M = b.size();
+        /**
+         * @brief diff入力の読み込み結果
+         */
+        enum class DiffInputStatus {
+            Ok,             // 読み込み成功
+            NotRegular,     // ディレクトリやsymlink (差分の対象外)
+            SpecialFile,    // FIFO・デバイス・ソケット (開かない)
+            TooLarge,       // サイズまたは行数が上限を超える
+            Binary,         // 先頭にNULを含む
+            Unreadable      // 読み込めない
+        };
 
-        if (N == 0 && M == 0) return {};
-        if (N == 0) {
-            QVector<DiffOp> r;
-            r.reserve(M);
-            for (int i = 0; i < M; i++)
-                r.append({DiffOp::Insert, -1, i});
-            return r;
-        }
-        if (M == 0) {
-            QVector<DiffOp> r;
-            r.reserve(N);
-            for (int i = 0; i < N; i++)
-                r.append({DiffOp::Delete, i, -1});
-            return r;
-        }
-
-        const int MAX = N + M, OFF = MAX;
-
-        // V[k + OFF] = 対角線k上の最遠到達x座標
-        QVector<int> V(2 * MAX + 1, 0);
-
-        // 各dステップのVスナップショット (バックトラック用)
-        QVector<QVector<int>> trace;
-        trace.reserve(qMin(MAX, N + M));
-
-        for (int d = 0; d <= MAX; d++) {
-            trace.append(V);  // dステップ開始前 (= d-1ステップ終了後) のスナップショット
-            for (int k = -d; k <= d; k += 2) {
-                int x = (k == -d || (k != d && V[OFF + k - 1] < V[OFF + k + 1]))
-                        ? V[OFF + k + 1] : V[OFF + k - 1] + 1;
-                int y = x - k;
-                while (x < N && y < M && a[x] == b[y]) {
-                    x++; y++;
-                }
-                V[OFF + k] = x;
-                if (x >= N && y >= M) goto done;
-            }
-        }
-
-    done:
-        // バックトラックで編集スクリプトを逆順に構築
+        /**
+         * @brief diff入力のファイルを上限付きで読み込む
+         *
+         * 開く前にlstatで種別とサイズを確認し、FIFOやデバイスは開かない
+         * 読み込み中にファイルが伸びても、上限 + 1バイトまでしか読まない
+         *
+         * @param path 対象パス
+         * @param limits 資源上限
+         * @param contentOut 読み込んだ内容 ('\r'は除去済み)
+         * @return 読み込み結果
+         */
+        DiffInputStatus readDiffInput(const QString &path, const UnifiedDiffLimits &limits,
+                                      QByteArray *contentOut)
         {
+            struct stat st;
+            if (!qsnapper::security::safeLstat(path, &st)) {
+                return DiffInputStatus::Unreadable;
+            }
+            if (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)
+                    || S_ISSOCK(st.st_mode)) {
+                return DiffInputStatus::SpecialFile;
+            }
+            if (!S_ISREG(st.st_mode)) {
+                return DiffInputStatus::NotRegular;
+            }
+            if (st.st_size > limits.maxFileBytes) {
+                return DiffInputStatus::TooLarge;
+            }
+
+            const int fd = qsnapper::security::safeOpenRegularFileRead(path);
+            if (fd < 0) {
+                return DiffInputStatus::Unreadable;
+            }
+
+            QByteArray data;
+            const qint64 readLimit = limits.maxFileBytes + 1;
+            data.resize(static_cast<qsizetype>(qMin<qint64>(qMax<qint64>(st.st_size, 0) + 1, readLimit)));
+            qint64 total = 0;
+            bool readFailed = false;
+            while (total < readLimit) {
+                if (total == data.size()) {
+                    data.resize(static_cast<qsizetype>(qMin<qint64>(qMax<qint64>(total * 2, 4096), readLimit)));
+                }
+                const ssize_t n = ::read(fd, data.data() + total, static_cast<size_t>(data.size() - total));
+                if (n < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    readFailed = true;
+                    break;
+                }
+                if (n == 0) {
+                    break;
+                }
+                total += n;
+            }
+            ::close(fd);
+
+            if (readFailed) {
+                return DiffInputStatus::Unreadable;
+            }
+            if (total > limits.maxFileBytes) {
+                return DiffInputStatus::TooLarge;
+            }
+            data.truncate(static_cast<qsizetype>(total));
+
+            const qsizetype probeLength = static_cast<qsizetype>(qMin<qint64>(total, limits.binaryProbeBytes));
+            if (QByteArrayView(data.constData(), probeLength).contains('\0')) {
+                return DiffInputStatus::Binary;
+            }
+            if (data.count('\n') + 1 > limits.maxLinesPerFile) {
+                return DiffInputStatus::TooLarge;
+            }
+
+            // QIODevice::Textでの読み込みと同じく'\r'を除去する
+            data.replace("\r", "");
+            *contentOut = data;
+            return DiffInputStatus::Ok;
+        }
+
+        /**
+         * Myers diffアルゴリズムで2つの行ID列間の最短編集スクリプトを計算する
+         *
+         * 各dステップ開始時のVのうち、バックトラックで参照する範囲 [-d, d] だけをtraceに保存する (合計 (D + 1)^2 要素)
+         * V配列とtraceの合計サイズ、および探索ステップ数が上限を超えた場合は計算を打ち切る
+         *
+         * @param a 旧ファイルの行ID列
+         * @param b 新ファイルの行ID列
+         * @param limits 資源上限
+         * @param opsOut 編集操作のリスト (正順)
+         * @return 上限内で計算できた場合true
+         */
+        bool computeMyersDiff(const QVector<int> &a, const QVector<int> &b,
+                              const UnifiedDiffLimits &limits, QVector<DiffOp> *opsOut)
+        {
+            const qsizetype N = a.size(), M = b.size();
+            QVector<DiffOp> &result = *opsOut;
+            result.clear();
+
+            if (N == 0 && M == 0) return true;
+            if (N == 0) {
+                result.reserve(M);
+                for (qsizetype i = 0; i < M; i++)
+                    result.append({DiffOp::Insert, -1, static_cast<int>(i)});
+                return true;
+            }
+            if (M == 0) {
+                result.reserve(N);
+                for (qsizetype i = 0; i < N; i++)
+                    result.append({DiffOp::Delete, static_cast<int>(i), -1});
+                return true;
+            }
+
+            const qsizetype MAX = N + M, OFF = MAX;
+            const qint64 vBytes = static_cast<qint64>(2 * MAX + 1) * static_cast<qint64>(sizeof(int));
+            if (vBytes > limits.maxTraceBytes) {
+                return false;
+            }
+
+            // V[k + OFF] = 対角線k上の最遠到達x座標
+            QVector<int> V(2 * MAX + 1, 0);
+
+            // dステップ開始前 (= d-1ステップ終了後) のV[-d..d] (offset d*d、長さ2d+1)
+            QVector<int> trace;
+            qint64 steps = 0;
+            qsizetype finalD = -1;
+
+            for (qsizetype d = 0; d <= MAX && finalD < 0; d++) {
+                const qint64 traceBytes = static_cast<qint64>(trace.size() + 2 * d + 1)
+                                          * static_cast<qint64>(sizeof(int));
+                if (vBytes + traceBytes > limits.maxTraceBytes) {
+                    return false;
+                }
+                for (qsizetype k = -d; k <= d; k++) {
+                    trace.append(V[OFF + k]);
+                }
+
+                for (qsizetype k = -d; k <= d; k += 2) {
+                    if (++steps > limits.maxSteps) {
+                        return false;
+                    }
+                    qsizetype x = (k == -d || (k != d && V[OFF + k - 1] < V[OFF + k + 1]))
+                                  ? V[OFF + k + 1] : V[OFF + k - 1] + 1;
+                    qsizetype y = x - k;
+                    while (x < N && y < M && a[x] == b[y]) {
+                        x++; y++;
+                        if (++steps > limits.maxSteps) {
+                            return false;
+                        }
+                    }
+                    V[OFF + k] = static_cast<int>(x);
+                    if (x >= N && y >= M) {
+                        finalD = d;
+                        break;
+                    }
+                }
+            }
+
+            // バックトラックで編集スクリプトを逆順に構築
             QVector<DiffOp::Type> revTypes;
             revTypes.reserve(N + M);
-            int x = N, y = M;
+            qsizetype x = N, y = M;
 
-            for (int d = trace.size() - 1; d > 0; d--) {
-                const QVector<int> &vp = trace[d];  // d-1ステップ終了後のV
-                int k = x - y;
-                bool down = (k == -d) || (k != d && vp[OFF + k - 1] < vp[OFF + k + 1]);
-                int pk = down ? k + 1 : k - 1;
-                int px = vp[OFF + pk], py = px - pk;
-                int mx = down ? px : px + 1, my = mx - k;
+            for (qsizetype d = finalD; d > 0; d--) {
+                const int *vp = trace.constData() + d * d + d;  // vp[k] = d-1ステップ終了後のV[k]
+                const qsizetype k = x - y;
+                const bool down = (k == -d) || (k != d && vp[k - 1] < vp[k + 1]);
+                const qsizetype pk = down ? k + 1 : k - 1;
+                const qsizetype px = vp[pk], py = px - pk;
+                const qsizetype mx = down ? px : px + 1, my = mx - k;
 
                 // 対角線上の等号行 (snake) を逆順に記録
                 while (x > mx && y > my) {
@@ -374,7 +440,6 @@ namespace {
             std::reverse(revTypes.begin(), revTypes.end());
 
             // 操作タイプからインデックス付きDiffOpに変換
-            QVector<DiffOp> result;
             result.reserve(revTypes.size());
             int ai = 0, bi = 0;
             for (auto t : revTypes) {
@@ -387,109 +452,148 @@ namespace {
                         result.append({DiffOp::Insert, -1, bi}); bi++; break;
                 }
             }
-            return result;
+            return true;
         }
+
+        /**
+         * @brief 内容を行に分割する (末尾の改行で生じる空要素は除去する)
+         * @param content ファイル内容
+         * @return 行のリスト
+         */
+        QStringList splitDiffLines(const QByteArray &content)
+        {
+            QStringList lines = QString::fromUtf8(content).split('\n');
+            if (!lines.isEmpty() && lines.last().isEmpty()) {
+                lines.removeLast();
+            }
+            return lines;
+        }
+
     }
 
-    /**
-    * 2つのファイルを読み込み、unified diff形式の文字列を生成する
-    * "diff -u"コマンドと互換性のあるフォーマットで、QMLのformatDiffHtml()でパース可能
-    *
-    * @param oldPath 旧ファイルパス (--- ヘッダに使用)
-    * @param newPath 新ファイルパス (+++ ヘッダに使用)
-    * @return unified diff文字列、差分がない場合は空文字列
-    */
-    static QString generateUnifiedDiff(const QString &oldPath, const QString &newPath)
+    UnifiedDiffResult generateUnifiedDiff(const QString &oldPath, const QString &newPath,
+                                          const UnifiedDiffLimits &limits)
     {
-        const QString oldContent = readTextFileNoFollow(oldPath);
-        const QString newContent = readTextFileNoFollow(newPath);
-        if (oldContent.isNull() || newContent.isNull())
-            return {};
+        try {
+            QByteArray oldContent;
+            QByteArray newContent;
+            const DiffInputStatus oldStatus = readDiffInput(oldPath, limits, &oldContent);
+            const DiffInputStatus newStatus = readDiffInput(newPath, limits, &newContent);
 
-        QStringList a = oldContent.split('\n');
-        QStringList b = newContent.split('\n');
-
-        // ファイル末尾の改行で生じる空要素を除去
-        if (!a.isEmpty() && a.last().isEmpty()) a.removeLast();
-        if (!b.isEmpty() && b.last().isEmpty()) b.removeLast();
-
-        QVector<DiffOp> ops = computeMyersDiff(a, b);
-
-        // 変更がない場合は空文字列を返す (diff -u の差分なしと同じ挙動)
-        bool hasChanges = false;
-        for (const auto &op : ops) {
-            if (op.type != DiffOp::Equal) { hasChanges = true; break; }
-        }
-        if (!hasChanges) return {};
-
-        // 変更位置を特定
-        const int context = 3;
-        QVector<int> changes;
-        for (int i = 0; i < ops.size(); i++) {
-            if (ops[i].type != DiffOp::Equal) changes.append(i);
-        }
-
-        // hunkにグループ化 (距離が2*context以内の変更をマージ)
-        struct Hunk { int start, end; };
-        QVector<Hunk> hunks;
-        int hs = changes[0], he = changes[0];
-        for (int i = 1; i < changes.size(); i++) {
-            if (changes[i] - he <= 2 * context)
-                he = changes[i];
-            else {
-                hunks.append({hs, he});
-                hs = he = changes[i];
+            const auto either = [&](DiffInputStatus status) {
+                return oldStatus == status || newStatus == status;
+            };
+            if (either(DiffInputStatus::SpecialFile)) {
+                return {QString(), QStringLiteral("special_file")};
             }
-        }
-        hunks.append({hs, he});
-
-        // unified diff形式で出力
-        QString out;
-        out += "--- " + oldPath + "\n";
-        out += "+++ " + newPath + "\n";
-
-        for (const auto &h : hunks) {
-            int s = qMax(0, h.start - context);
-            int e = qMin(ops.size() - 1, h.end + context);
-
-            // hunk前の行数をカウント (行番号計算用)
-            int aBefore = 0, bBefore = 0;
-            for (int i = 0; i < s; i++) {
-                if (ops[i].type != DiffOp::Insert) aBefore++;
-                if (ops[i].type != DiffOp::Delete) bBefore++;
+            if (either(DiffInputStatus::TooLarge)) {
+                return {QString(), QStringLiteral("too_large")};
+            }
+            if (either(DiffInputStatus::Binary)) {
+                return {QString(), QStringLiteral("binary")};
+            }
+            if (oldStatus != DiffInputStatus::Ok || newStatus != DiffInputStatus::Ok) {
+                return {};
             }
 
-            // hunk内の行数をカウント
-            int aCount = 0, bCount = 0;
-            for (int i = s; i <= e; i++) {
-                if (ops[i].type != DiffOp::Insert) aCount++;
-                if (ops[i].type != DiffOp::Delete) bCount++;
+            const QStringList a = splitDiffLines(oldContent);
+            const QStringList b = splitDiffLines(newContent);
+
+            // 行を整数IDへ置き換え、Myers diffの比較を整数比較にする
+            QHash<QString, int> lineIds;
+            const auto toIds = [&lineIds](const QStringList &lines) {
+                QVector<int> ids;
+                ids.reserve(lines.size());
+                for (const QString &line : lines) {
+                    auto it = lineIds.constFind(line);
+                    if (it == lineIds.cend()) {
+                        it = lineIds.insert(line, static_cast<int>(lineIds.size()));
+                    }
+                    ids.append(it.value());
+                }
+                return ids;
+            };
+            const QVector<int> aIds = toIds(a);
+            const QVector<int> bIds = toIds(b);
+
+            QVector<DiffOp> ops;
+            if (!computeMyersDiff(aIds, bIds, limits, &ops)) {
+                return {QString(), QStringLiteral("too_many_changes")};
             }
 
-            // 行番号は1ベース、空hunkの場合は0
-            out += QString("@@ -%1,%2 +%3,%4 @@\n")
-                .arg(aCount == 0 ? 0 : aBefore + 1).arg(aCount)
-                .arg(bCount == 0 ? 0 : bBefore + 1).arg(bCount);
+            // 変更がない場合は空文字列を返す (diff -u の差分なしと同じ挙動)
+            const int context = 3;
+            QVector<int> changes;
+            for (int i = 0; i < ops.size(); i++) {
+                if (ops[i].type != DiffOp::Equal) changes.append(i);
+            }
+            if (changes.isEmpty()) return {};
 
-            for (int i = s; i <= e; i++) {
-                switch (ops[i].type) {
-                    case DiffOp::Equal:
-                        out += " " + a[ops[i].aIdx] + "\n";
-                        break;
-                    case DiffOp::Delete:
-                        out += "-" + a[ops[i].aIdx] + "\n";
-                        break;
-                    case DiffOp::Insert:
-                        out += "+" + b[ops[i].bIdx] + "\n";
-                        break;
+            // hunkにグループ化 (距離が2*context以内の変更をマージ)
+            struct Hunk { int start, end; };
+            QVector<Hunk> hunks;
+            int hs = changes[0], he = changes[0];
+            for (int i = 1; i < changes.size(); i++) {
+                if (changes[i] - he <= 2 * context)
+                    he = changes[i];
+                else {
+                    hunks.append({hs, he});
+                    hs = he = changes[i];
                 }
             }
-        }
+            hunks.append({hs, he});
 
-        return out;
+            // unified diff形式で出力
+            QString out;
+            out += "--- " + oldPath + "\n";
+            out += "+++ " + newPath + "\n";
+
+            for (const auto &h : hunks) {
+                int s = qMax(0, h.start - context);
+                int e = qMin(static_cast<int>(ops.size()) - 1, h.end + context);
+
+                // hunk前の行数をカウント (行番号計算用)
+                int aBefore = 0, bBefore = 0;
+                for (int i = 0; i < s; i++) {
+                    if (ops[i].type != DiffOp::Insert) aBefore++;
+                    if (ops[i].type != DiffOp::Delete) bBefore++;
+                }
+
+                // hunk内の行数をカウント
+                int aCount = 0, bCount = 0;
+                for (int i = s; i <= e; i++) {
+                    if (ops[i].type != DiffOp::Insert) aCount++;
+                    if (ops[i].type != DiffOp::Delete) bCount++;
+                }
+
+                // 行番号は1ベース、空hunkの場合は0
+                out += QString("@@ -%1,%2 +%3,%4 @@\n")
+                    .arg(aCount == 0 ? 0 : aBefore + 1).arg(aCount)
+                    .arg(bCount == 0 ? 0 : bBefore + 1).arg(bCount);
+
+                for (int i = s; i <= e; i++) {
+                    switch (ops[i].type) {
+                        case DiffOp::Equal:
+                            out += " " + a[ops[i].aIdx] + "\n";
+                            break;
+                        case DiffOp::Delete:
+                            out += "-" + a[ops[i].aIdx] + "\n";
+                            break;
+                        case DiffOp::Insert:
+                            out += "+" + b[ops[i].bIdx] + "\n";
+                            break;
+                    }
+                }
+            }
+
+            return {out, QString()};
+        }
+        catch (const std::bad_alloc &) {
+            return {QString(), QStringLiteral("too_large")};
+        }
     }
 
-} // anonymous namespace
+}
 
 /**
  * @brief SnapshotOperationsクラスのコンストラクタ
@@ -534,6 +638,19 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
         [this](std::function<void()> chunk) {
             QTimer::singleShot(0, this, [chunk]() { chunk(); });
         });
+
+    m_rootReadOnlyProbe = [](bool *readOnly) {
+        return btrfs_util_get_subvolume_read_only("/", readOnly) == BTRFS_UTIL_OK;
+    };
+    m_rootReadWriteRestorer = []() {
+        const auto result = btrfs_util_set_subvolume_read_only("/", false);
+        if (result != BTRFS_UTIL_OK) {
+            qCritical() << "Staged restore: Failed to restore root subvolume rw state:"
+                        << result;
+            return false;
+        }
+        return true;
+    };
 
     m_ownerWatcher = new QDBusServiceWatcher(
         QString(), QDBusConnection::systemBus(),
@@ -751,19 +868,43 @@ void SnapshotOperations::cleanupRestoreExecution(const QString &manifestId)
 }
 
 /**
- * @brief 復元後にroot subvolumeがread-onlyならrwへ戻す安全ネットを実行する
+ * @brief rootサブボリュームのread-only状態の取得とrw化の処理をテスト用に差し替える
+ * @param readOnlyProbe read-only状態を取得する関数 (取得できた場合true)
+ * @param readWriteRestorer rwへ戻す関数 (成功した場合true)
  */
-void SnapshotOperations::restoreRootReadWriteSafetyNet()
+void SnapshotOperations::setRootSubvolumeAccessForTesting(
+    std::function<bool(bool *)> readOnlyProbe,
+    std::function<bool()> readWriteRestorer)
 {
-    bool isReadOnly = false;
-    if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK
-            && isReadOnly) {
-        qWarning() << "Staged restore: Root subvolume became read-only after restore, restoring rw";
-        const auto result = btrfs_util_set_subvolume_read_only("/", false);
-        if (result != BTRFS_UTIL_OK) {
-            qCritical() << "Staged restore: Failed to restore root subvolume rw state:"
-                        << result;
-        }
+    m_rootReadOnlyProbe = std::move(readOnlyProbe);
+    m_rootReadWriteRestorer = std::move(readWriteRestorer);
+}
+
+/**
+ * @brief 実行を開始した復元計画に限り、rootサブボリュームをrwへ戻す安全ネットを実行する
+ * @param state commit時に記録した安全ネットの判定材料
+ */
+void SnapshotOperations::runRootReadWriteSafetyNet(
+    const qsnapper::restore::RootReadWriteSafetyNetState &state)
+{
+    // 復元後にread-onlyだったと仮定しても条件を満たさない計画では、状態の取得すら行わない
+    // 未認可のBegin -> Cancelなどから特権操作へ到達させないため
+    if (!qsnapper::restore::shouldRestoreRootReadWrite(state, true)) {
+        return;
+    }
+
+    bool readOnly = false;
+    if (!m_rootReadOnlyProbe || !m_rootReadOnlyProbe(&readOnly)) {
+        qWarning() << "Staged restore: Failed to read root subvolume read-only state";
+        return;
+    }
+    if (!qsnapper::restore::shouldRestoreRootReadWrite(state, readOnly)) {
+        return;
+    }
+
+    qWarning() << "Staged restore: Root subvolume became read-only after restore, restoring rw";
+    if (m_rootReadWriteRestorer) {
+        m_rootReadWriteRestorer();
     }
 }
 
@@ -778,10 +919,11 @@ void SnapshotOperations::finishRestorePlan(
     qsnapper::restore::ManifestState terminal,
     const QString &messageText)
 {
-    restoreRootReadWriteSafetyNet();
-
+    // 実行contextは認可済みcommitでのみ作られるため、未認可で終端した計画では安全ネットもunmountも走らない
     const auto execution = m_restoreExecutions.find(manifestId);
     if (execution != m_restoreExecutions.end()) {
+        runRootReadWriteSafetyNet(execution->rootReadWriteState);
+
         // cleanupRestoreExecutionと同じ順序規約: dirfdを先に閉じる
         if (execution->snapshotDirFd >= 0) {
             ::close(execution->snapshotDirFd);
@@ -1765,6 +1907,13 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
         return false;
     }
 
+    // 0は現在のシステム (current) を表し、ロールバック先にはできない (snapper CLIと同じ)
+    if (number <= 0) {
+        replyError(QDBusError::InvalidArgs,
+                   QStringLiteral("Invalid snapshot number"));
+        return false;
+    }
+
     return authorizeThen<bool>(
         QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
         [this, config = *cfg, number]() {
@@ -1785,6 +1934,20 @@ bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, i
         snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
+            return false;
+        }
+
+        // snapper CLI (cmd-rollback) と同じく、SUBVOLUMEが "/" のbtrfs設定以外では拒否する
+        // 他の設定でdefault subvolumeを切り替えると、rootファイルシステムの起動対象を壊すため
+        QString normalizedSubvolume;
+        std::string fstype;
+        snapper->getConfigInfo().get_value("FSTYPE", fstype);
+        if (!qsnapper::restore::normalizeRestoreSubvolume(
+                QString::fromStdString(snapper->subvolumeDir()), &normalizedSubvolume)
+                || normalizedSubvolume != QStringLiteral("/")
+                || fstype != "btrfs") {
+            replyError(QDBusError::InvalidArgs,
+                       QStringLiteral("Rollback is only supported for the root btrfs config"));
             return false;
         }
 
@@ -2175,7 +2338,9 @@ QString SnapshotOperations::getFileDiffBetweenAuthorized(
             });
         const snapper::Files &files = comparison->getFiles();
 
-        auto fileIt = files.findAbsolutePath(filePath.toStdString());
+        // filePathはGetFileChanges*が返したconfig相対名である
+        // findAbsolutePath()はSUBVOLUME付きの絶対パスを要求し非root configで一致しないため、config相対名で引く
+        auto fileIt = files.find(filePath.toStdString());
         if (fileIt == files.end()) {
             return QString();
         }
@@ -2218,7 +2383,11 @@ QString SnapshotOperations::getFileDiffBetweenAuthorized(
 
         QString diffPart;
         if (hasInfo1 && hasInfo2) {
-            diffPart = generateUnifiedDiff(path1, path2);
+            const qsnapper::diff::UnifiedDiffResult diff = qsnapper::diff::generateUnifiedDiff(path1, path2);
+            diffPart = diff.text;
+            if (!diff.omittedReason.isEmpty()) {
+                detailsPart += "diffOmitted=" + diff.omittedReason + "\n";
+            }
         }
 
         return detailsPart + "---DIFF_SEPARATOR---\n" + diffPart;
@@ -2227,6 +2396,11 @@ QString SnapshotOperations::getFileDiffBetweenAuthorized(
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file diff between snapshots:" << e.what();
         replyError(QDBusError::Failed, QString("Failed to get file diff: %1").arg(e.what()));
+        return QString();
+    }
+    catch (const std::exception &) {
+        qWarning() << "Failed to get file diff between snapshots: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Failed to get file diff"));
         return QString();
     }
 }
@@ -2300,7 +2474,9 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
             });
         const snapper::Files &files = comparison->getFiles();
 
-        auto fileIt = files.findAbsolutePath(filePath.toStdString());
+        // filePathはGetFileChanges*が返したconfig相対名である
+        // findAbsolutePath()はSUBVOLUME付きの絶対パスを要求し非root configで一致しないため、config相対名で引く
+        auto fileIt = files.find(filePath.toStdString());
         if (fileIt == files.end()) {
             return QString();
         }
@@ -2344,7 +2520,12 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
         // Diff部の取得
         QString diffPart;
         if (hasSnapshotInfo && hasCurrentInfo) {
-            diffPart = generateUnifiedDiff(snapshotPath, currentPath);
+            const qsnapper::diff::UnifiedDiffResult diff =
+                qsnapper::diff::generateUnifiedDiff(snapshotPath, currentPath);
+            diffPart = diff.text;
+            if (!diff.omittedReason.isEmpty()) {
+                detailsPart += "diffOmitted=" + diff.omittedReason + "\n";
+            }
         }
 
         return detailsPart + "---DIFF_SEPARATOR---\n" + diffPart;
@@ -2353,6 +2534,11 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to get file diff and details:" << e.what();
         replyError(QDBusError::Failed, QString("Failed to get file diff and details: %1").arg(e.what()));
+        return QString();
+    }
+    catch (const std::exception &) {
+        qWarning() << "Failed to get file diff and details: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Failed to get file diff and details"));
         return QString();
     }
 }
@@ -2413,12 +2599,32 @@ QString SnapshotOperations::BeginRestorePlan(const QString &configName,
         return {};
     }
 
+    // 計画の予算はUID単位でも数えるため、呼び出し元のUIDをバスに問い合わせる
+    // 取得できない呼び出し元には計画を作らせない
+    uint ownerUid = 0;
+    if (calledFromDBus()) {
+        const QDBusConnectionInterface *bus = connection().interface();
+        const QDBusReply<uint> uidReply =
+            bus ? bus->serviceUid(owner) : QDBusReply<uint>();
+        if (!uidReply.isValid()) {
+            replyError(QDBusError::AccessDenied,
+                           QStringLiteral("Restore plan caller is unavailable"));
+            return {};
+        }
+        ownerUid = uidReply.value();
+    }
+    else {
+        // D-Busを介さない直接呼び出し (単体テスト) は、自プロセスの実効UIDとして数える
+        ownerUid = static_cast<uint>(::geteuid());
+    }
+
     purgeExpiredRestorePlans();
 
     qsnapper::restore::ManifestError error =
         qsnapper::restore::ManifestError::None;
     const QString manifestId = m_restoreRegistry.createStaging(
-        owner, *cfg, snapshotNumber, counterpartSnapshotNumber, mode, &error);
+        owner, ownerUid, *cfg, snapshotNumber, counterpartSnapshotNumber, mode,
+        &error);
     if (manifestId.isEmpty()) {
         sendManifestError(error);
         return {};
@@ -2481,14 +2687,15 @@ bool SnapshotOperations::StageRestoreEntries(
                 || changeType == QStringLiteral("deleted")
                 || changeType == QStringLiteral("modified")
                 || changeType == QStringLiteral("typechanged");
+        // pathはconfig相対名であるため、SUBVOLUMEに依存しない"/"を仮の基準として形式だけを検証する
+        // /.snapshotsの判定は正規化後の先頭成分で行う ("//.snapshots/..."等の迂回を防ぐ)
+        QString rootPath;
+        QString destinationPath;
         QString relativePath;
-
-        if (!path.startsWith(QLatin1Char('/'))
-                || path == QStringLiteral("/.snapshots")
-                || path.startsWith(QStringLiteral("/.snapshots/"))
-                || !validChangeType
-                || !qsnapper::security::splitDestinationBeneathRoot(
-                    QStringLiteral("/"), path, &relativePath)) {
+        if (!validChangeType
+                || qsnapper::restore::isSnapshotMetadataRestoreName(path)
+                || !qsnapper::restore::buildRestoreDestination(
+                    QStringLiteral("/"), path, &rootPath, &destinationPath, &relativePath)) {
             replyError(QDBusError::InvalidArgs,
                            QStringLiteral("Invalid restore entry"));
             return false;
@@ -2704,6 +2911,33 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             return false;
         }
 
+        // 復元先の基準となるconfigのSUBVOLUMEを固定する
+        // 計画に載る名前はconfig相対名であり、宛先は"<SUBVOLUME>/<名前>"として実行時に組み立てる
+        execution.subvolume = QString::fromStdString(snapper->subvolumeDir());
+        QString normalizedSubvolume;
+        if (!qsnapper::restore::normalizeRestoreSubvolume(execution.subvolume,
+                                                          &normalizedSubvolume)) {
+            qWarning() << "Staged restore: Config subvolume is not usable as a restore root";
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Restore destination is unavailable"),
+                &error);
+            replyError(QDBusError::Failed,
+                            QStringLiteral("Failed to prepare restore plan"));
+            return false;
+        }
+
+        // root安全ネットの判定材料として、復元前のrootサブボリュームの状態を記録する
+        // 元からread-onlyのroot (read-only snapshotからの起動など) を、復元後にrwへ変えないため
+        execution.rootReadWriteState.targetsRootSubvolume =
+            normalizedSubvolume == QStringLiteral("/");
+        if (execution.rootReadWriteState.targetsRootSubvolume && m_rootReadOnlyProbe) {
+            bool readOnly = true;
+            execution.rootReadWriteState.preRestoreStateKnown =
+                m_rootReadOnlyProbe(&readOnly);
+            execution.rootReadWriteState.preRestoreReadOnly = readOnly;
+        }
+
         source->mountFilesystemSnapshot(true);
         execution.mounted = true;
         const QString snapshotDir =
@@ -2730,6 +2964,24 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             qWarning() << "Staged restore: Failed to stat pinned snapshot dir:"
                        << strerror(errno);
             failRestorePlanPreflight(manifestId, owner, &error);
+            return false;
+        }
+
+        // dirfdのpinで固定されるのはinodeだけで、内容は固定されない
+        // 書き込み可能な復元元 (rollbackが作るwritable copyなど) では、認可の後に内容を差し替えられるため拒否する
+        // libsnapperのメタデータと、pin済みfdに対するファイルシステムの状態の両方が読み取り専用であることを要求する
+        std::string fstype;
+        snapper->getConfigInfo().get_value("FSTYPE", fstype);
+        if (!source->isReadOnly()
+                || !qsnapper::restore::isPinnedRestoreSourceReadOnly(snapshotDirFd, fstype)) {
+            qWarning() << "Staged restore: Restore source snapshot is not read-only";
+            cleanupRestoreExecution(manifestId);
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Restore source snapshot is not read-only"),
+                &error);
+            replyError(QDBusError::Failed,
+                       QStringLiteral("Restore source snapshot is not read-only"));
             return false;
         }
 
@@ -2797,6 +3049,12 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         return false;
     }
 
+    // 安全ネットは実行を開始した計画にだけ適用する
+    // start()が失敗した場合はcleanupRestoreExecutionで実行contextごと破棄されるため、この印は残らない
+    const auto startedExecution = m_restoreExecutions.find(manifestId);
+    if (startedExecution != m_restoreExecutions.end()) {
+        startedExecution->rootReadWriteState.executionStarted = true;
+    }
     if (!m_restoreExecutor.start(manifestId, owner, &error)) {
         cleanupRestoreExecution(manifestId);
         qsnapper::restore::ManifestError failureError =
@@ -3005,566 +3263,15 @@ bool SnapshotOperations::CancelRestorePlan(const QString &manifestId)
 }
 
 /**
- * @brief ファイルをスナップショットから復元する (YaST互換経路)
- *
- * 内部で restoreFilesImpl を呼び出すだけのラッパー
- * reflinkは使用せず、typechangedの事前削除も行わない
- *
- * @param configName      Snapper設定名
- * @param snapshotNumber  復元元スナップショット番号
- * @param filePaths       復元対象絶対パス
- * @param changeTypes     各ファイルの変更種別
- * @return 全ファイル成功時 true
- */
-bool SnapshotOperations::RestoreFiles(const QString &configName, int snapshotNumber,
-                                      const QStringList &filePaths, const QStringList &changeTypes)
-{
-    return restoreFilesImpl(configName, snapshotNumber, filePaths, changeTypes,
-                            /*useReflink=*/false,
-                            /*removeOnTypechanged=*/false,
-                            "RestoreFiles");
-}
-
-/**
- * @brief ファイルをスナップショットから復元する (高速経路)
- *
- * 内部でrestoreFilesImplを呼び出すだけのラッパー
- * btrfs reflink (FICLONE) を優先し、typechanged時は既存ファイルを削除してから上書きする
- *
- * @param configName      Snapper設定名
- * @param snapshotNumber  復元元スナップショット番号
- * @param filePaths       復元対象絶対パス
- * @param changeTypes     各ファイルの変更種別
- * @return 全ファイル成功時 true
- */
-bool SnapshotOperations::RestoreFilesDirect(const QString &configName, int snapshotNumber,
-                                            const QStringList &filePaths, const QStringList &changeTypes)
-{
-    return restoreFilesImpl(configName, snapshotNumber, filePaths, changeTypes,
-                            /*useReflink=*/true,
-                            /*removeOnTypechanged=*/true,
-                            "RestoreFilesDirect");
-}
-
-/**
- * @brief RestoreFiles / RestoreFilesDirect共通実装
- *
- * 主な差分:
- *   - useReflink:          通常ファイルコピー時にFICLONE (btrfs CoW)を試行するか
- *   - removeOnTypechanged: typechanged時に既存ファイルを先にrmするか (ディレクトリ --> ファイル変化対策)
- *
- * セキュリティ要件:
- *   - configNameは本関数冒頭で resolveConfigOrFail() により正規化・検証すること
- *   - filePathsの各要素は絶対パスで、かつ snapshotDir配下を指すこと
- *     (snapshotFilePath = snapshotDir + filePathがsnapshotDir内に収まることをisPathWithinSnapshotRootで検証)
- *   - "/.snapshots/" 直下への書き込み (systemFilePath側) は書き込み対象として棄却する
- *   - シンボリックリンク解決は copySymlink / copyRegularFileのレイヤーで行う
- */
-bool SnapshotOperations::restoreFilesImpl(const QString &configName, int snapshotNumber,
-                                          const QStringList &filePaths,
-                                          const QStringList &changeTypes,
-                                          bool useReflink, bool removeOnTypechanged,
-                                          const char *logTag)
-{
-    resetIdleTimer();
-
-    const auto cfg = resolveConfigOrFail(configName);
-    if (!cfg) {
-        return false;
-    }
-
-    // 入力検証は認可より前に行う
-    // polkitプロンプトを出してから"No files specified"で蹴るUXを避けるとともに、攻撃者が不正な入力でpolkitを浪費するのを防ぐ
-    if (filePaths.isEmpty()) {
-        replyError(QDBusError::InvalidArgs, "No files specified for restore");
-        return false;
-    }
-
-    if (filePaths.size() != changeTypes.size()) {
-        replyError(QDBusError::InvalidArgs, "filePaths and changeTypes must have the same size");
-        return false;
-    }
-
-    return authorizeThen<bool>(
-        QStringLiteral("com.presire.qsnapper.rollback-snapshot"),
-        [this, config = *cfg, snapshotNumber, filePaths, changeTypes, useReflink,
-         removeOnTypechanged, logTag]() {
-            return restoreFilesAuthorized(config, snapshotNumber, filePaths,
-                                          changeTypes, useReflink,
-                                          removeOnTypechanged, logTag);
-        });
-}
-
-/**
- * @brief 認可済みのrestoreFilesImpl本体
- *
- * configName / filePaths / changeTypesの検証はrestoreFilesImpl側で認可前に完了している
- *
- * @param configName 検証済みSnapper設定名
- * @return 全ファイル成功時true
- */
-bool SnapshotOperations::restoreFilesAuthorized(const QString &configName,
-                                                int snapshotNumber,
-                                                const QStringList &filePaths,
-                                                const QStringList &changeTypes,
-                                                bool useReflink,
-                                                bool removeOnTypechanged,
-                                                const char *logTag)
-{
-    qInfo() << logTag << ": Starting restore for" << filePaths.size()
-            << "files from snapshot" << snapshotNumber
-            << "(useReflink=" << useReflink
-            << ", removeOnTypechanged=" << removeOnTypechanged << ")";
-
-    try {
-        snapper::Snapper *snapper = getSnapper(configName);
-        if (!snapper) {
-            replyError(QDBusError::Failed, "Failed to initialize Snapper");
-            return false;
-        }
-
-        snapper::Snapshots::const_iterator snapshot1 = snapper->getSnapshots().find(snapshotNumber);
-        if (snapshot1 == snapper->getSnapshots().end()) {
-            replyError(QDBusError::Failed, "Snapshot not found");
-            return false;
-        }
-
-        // 復元操作は現在システム状態を変化させるためComparisonキャッシュを無効化
-        m_comparisonCache.clear();
-
-        // スナップショットをマウント
-        snapshot1->mountFilesystemSnapshot(true);
-
-        // スナップショットディレクトリのパスを取得
-        QString snapshotDir = QString::fromStdString(snapshot1->snapshotDir());
-
-        qInfo() << logTag << ": Snapshot mounted at" << snapshotDir;
-
-        bool allSuccess = true;
-        int total = filePaths.size();
-        int successCount = 0;
-        int skippedCount = 0;
-
-        for (int i = 0; i < total; ++i) {
-            const QString &filePath = filePaths[i];
-            const QString &changeType = changeTypes[i];
-            const bool validChangeType = changeType == QStringLiteral("created")
-                    || changeType == QStringLiteral("deleted")
-                    || changeType == QStringLiteral("modified")
-                    || changeType == QStringLiteral("typechanged");
-
-            // 入力検証 (進捗emitより前に行い、未検証パスをD-Busシグナルへ漏出させない)
-            // (1) 絶対パスでなければ拒否
-            if (!filePath.startsWith(QLatin1Char('/'))) {
-                qWarning() << logTag << ": Rejecting non-absolute path:" << filePath;
-                skippedCount++;
-                continue;
-            }
-
-            // (2) 書き込み先として、/.snapshotsとその配下は禁止 (スナップショット木の破壊防止)
-            if (filePath == QStringLiteral("/.snapshots")
-                    || filePath.startsWith(QStringLiteral("/.snapshots/"))) {
-                qWarning() << logTag << ": Skipping dangerous destination path:" << filePath;
-                skippedCount++;
-                continue;
-            }
-
-            // (3) 変更種別は既知のallowlistのみ許可
-            if (!validChangeType) {
-                qWarning() << logTag << ": Rejecting unknown change type:" << changeType;
-                skippedCount++;
-                continue;
-            }
-
-            // (4) snapshotDir + filePathがsnapshotDir配下に収まっていること
-            //     (".."を含むfilePathによるsnapshotツリー外参照を防ぐ)
-            const QString snapshotFilePath = snapshotDir + filePath;
-            if (!qsnapper::security::isPathWithinSnapshotRoot(snapshotFilePath, snapshotDir)) {
-                qWarning() << logTag << ": Rejecting path escaping snapshot root:" << filePath;
-                skippedCount++;
-                continue;
-            }
-
-            // 検証通過後にのみ進捗を通知 (D-Busシグナルが運ぶのは受理済みパスのみ)
-            emit restoreProgress(i + 1, total, QFileInfo(filePath).fileName());
-
-            // システム上のファイルパス (ルートからの絶対パス)
-            const QString systemFilePath = filePath;
-
-            bool fileSuccess = false;
-
-            if (changeType == "created") {
-                // スナップショット時点では存在しなかったファイル --> 削除
-                //
-                // staged restoreのapplyRestoreEntry()と同じ実行段ガードを適用する
-                // 旧APIもクライアント申告のentryを無検証で信頼するため、シリアライズ経路への注入等で偽装されたentryがここまで到達し得る
-                // 破壊の直前に「復元元snapshotに存在しないこと」を確認し、確認できなければ削除しない
-                QString relativePath;
-                if (!qsnapper::security::splitDestinationBeneathRoot(QStringLiteral("/"), systemFilePath, &relativePath)) {
-                    qWarning() << logTag << ": Rejecting malformed created path:" << filePath;
-                    skippedCount++;
-                    continue;
-                }
-
-                // 復元元snapshotはこのループ中に同期実行され、event loopへ制御を返さないため、
-                // mount済みsnapshotDirのpathから開いたfdは認可時のsnapshotと同一である
-                const int snapshotDirFd = ::open(snapshotDir.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-                if (snapshotDirFd < 0) {
-                    qWarning() << logTag << ": Failed to pin restore source snapshot:"
-                               << strerror(errno);
-                    allSuccess = false;
-                    continue;
-                }
-
-                const bool confirmedAbsent = qsnapper::security::isConfirmedAbsentAt(snapshotDirFd, relativePath);
-                ::close(snapshotDirFd);
-                if (!confirmedAbsent) {
-                    qWarning() << logTag << ": Refusing to remove a path that is not confirmed"
-                               << "absent from the restore source";
-                    skippedCount++;
-                    continue;
-                }
-
-                fileSuccess = qsnapper::security::safeRemoveAll(systemFilePath);
-                if (!fileSuccess) {
-                    qWarning() << logTag << ": Failed to remove" << systemFilePath
-                               << strerror(errno);
-                }
-            }
-            else {
-                // deleted / modified / typechanged --> スナップショットからコピー
-
-                // 親ディレクトリを確認・作成
-                QString parentDir = systemFilePath.left(systemFilePath.lastIndexOf('/'));
-                if (!parentDir.isEmpty() && !qsnapper::security::safeMkpath(parentDir)) {
-                    qWarning() << logTag << ": Failed to safely create parent directory"
-                               << parentDir << strerror(errno);
-                    allSuccess = false;
-                    continue;
-                }
-
-                struct stat snapshotFileInfo;
-                const bool hasSnapshotFileInfo = qsnapper::security::safeLstat(snapshotFilePath, &snapshotFileInfo);
-
-                // live側を破壊する前に復元元の可用性と種別を確定させる
-                // 先に退避・削除してから "Source not restorable" で失敗すると、復元元が存在しないままlive側のデータだけが失われる
-                const bool sourceIsLink = hasSnapshotFileInfo && S_ISLNK(snapshotFileInfo.st_mode);
-                const bool sourceIsDirectory = hasSnapshotFileInfo && S_ISDIR(snapshotFileInfo.st_mode);
-                const bool sourceIsRegular = hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
-                if (!sourceIsLink && !sourceIsDirectory && !sourceIsRegular) {
-                    qWarning() << logTag << ": Source not restorable from snapshot:" << snapshotFilePath;
-                    allSuccess = false;
-                    continue;
-                }
-
-                QString detachedPath;
-                if (removeOnTypechanged && changeType == "typechanged") {
-                    if (!movePathAsideNoFollow(systemFilePath, &detachedPath)) {
-                        qWarning() << logTag << ": Failed to move existing path aside before restore"
-                                   << systemFilePath << strerror(errno);
-                        allSuccess = false;
-                        continue;
-                    }
-                }
-
-                if (sourceIsLink) {
-                    // シンボリックリンクの場合
-                    fileSuccess = copySymlink(snapshotFilePath, systemFilePath);
-                    if (!fileSuccess) {
-                        qWarning() << logTag << ": Failed to copy symlink" << snapshotFilePath
-                                   << "to" << systemFilePath;
-                    }
-                }
-                else if (sourceIsDirectory) {
-            // ディレクトリの場合: safeMkpath + safeOpenDirectoryで取得したdirFdに対してfchown/fchmod
-            if (!qsnapper::security::safeMkpath(systemFilePath)) {
-                        qWarning() << logTag << ": Failed to safely create directory"
-                                   << systemFilePath;
-                        fileSuccess = false;
-                    }
-                    else {
-                        const int dirFd = qsnapper::security::safeOpenDirectory(systemFilePath);
-                        if (dirFd < 0) {
-                            qWarning() << logTag << ": Failed to open directory safely"
-                                       << systemFilePath << strerror(errno);
-                            fileSuccess = false;
-                        }
-                        else {
-                            // パーミッションをコピー (snapshotからlstatしたstatを、live dirのfdに対してfchown/fchmod)
-                            struct stat st;
-                            if (qsnapper::security::safeLstat(snapshotFilePath, &st)) {
-                                const bool mustPreserveMetadata = (::geteuid() == 0);
-                                bool metadataOk = true;
-                                if (::fchown(dirFd, st.st_uid, st.st_gid) < 0) {
-                                    qWarning() << logTag << ": Failed to preserve directory owner"
-                                               << systemFilePath << strerror(errno);
-                                    metadataOk = !mustPreserveMetadata;
-                                }
-                                if (::fchmod(dirFd, st.st_mode & 07777) < 0) {
-                                    qWarning() << logTag << ": Failed to preserve directory mode"
-                                               << systemFilePath << strerror(errno);
-                                    metadataOk = metadataOk && !mustPreserveMetadata;
-                                }
-                                ::close(dirFd);
-                                fileSuccess = metadataOk;
-                            }
-                            else {
-                                ::close(dirFd);
-                                fileSuccess = false;
-                            }
-                        }
-                    }
-                }
-                else {
-                    // 通常ファイルの場合 (useReflink=trueならFICLONEを先行試行)
-                    fileSuccess = copyRegularFile(snapshotFilePath, systemFilePath, useReflink);
-                    if (!fileSuccess) {
-                        qWarning() << logTag << ": Failed to copy" << snapshotFilePath
-                                   << "to" << systemFilePath;
-                    }
-                }
-
-                // 退避物の破棄は復元成功後にのみ行う
-                // 失敗時は元の位置へ戻し、復元できなかったlive側のデータを消さない
-                // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
-                if (!detachedPath.isEmpty()) {
-                    if (fileSuccess) {
-                        if (!qsnapper::security::safeRemoveAll(detachedPath)) {
-                            qWarning() << logTag << ": Failed to remove detached path after restore"
-                                       << detachedPath;
-                        }
-                    }
-                    else if (!qsnapper::security::safeRenamePathNoFollow(detachedPath, systemFilePath)) {
-                        qCritical() << logTag << ": Failed to reattach live path after a failed restore."
-                                    << "Previous content is preserved at:" << detachedPath;
-                    }
-                }
-            }
-
-            if (fileSuccess) {
-                successCount++;
-            }
-            else {
-                allSuccess = false;
-            }
-        }
-
-        // 安全ネット: 復元操作によりルートサブボリュームがread-onlyになっていないか確認・復旧
-        {
-            bool isReadOnly = false;
-            if (btrfs_util_get_subvolume_read_only("/", &isReadOnly) == BTRFS_UTIL_OK && isReadOnly) {
-                qWarning() << logTag << ": Root subvolume became read-only after restore, restoring rw";
-                const auto rwResult = btrfs_util_set_subvolume_read_only("/", false);
-                if (rwResult != BTRFS_UTIL_OK) {
-                    qCritical() << logTag << ": Failed to restore root subvolume rw state:" << rwResult;
-                    allSuccess = false;
-                }
-            }
-        }
-
-        // スナップショットをアンマウント
-        try {
-            snapshot1->umountFilesystemSnapshot(true);
-        }
-        catch (...) {
-            qWarning() << logTag << ": Failed to unmount snapshot";
-        }
-
-        if (skippedCount > 0) {
-            qWarning() << logTag << ": Skipped" << skippedCount << "dangerous paths";
-        }
-        qInfo() << logTag << ": Completed. Successful:" << successCount
-                << "Failed:" << (total - successCount - skippedCount);
-
-        if (!allSuccess) {
-            QString errorMsg = QString("Failed to restore %1 out of %2 files")
-                    .arg(total - successCount).arg(total);
-            replyError(QDBusError::Failed, errorMsg);
-        }
-
-        return allSuccess;
-    }
-    catch (const snapper::Exception &e) {
-        qWarning() << logTag << " failed:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to restore files: %1").arg(e.what()));
-        return false;
-    }
-    catch (const std::exception &e) {
-        qWarning() << logTag << " unexpected error:" << e.what();
-        replyError(QDBusError::Failed, QString("Unexpected error: %1").arg(e.what()));
-        return false;
-    }
-}
-
-/**
-    * @brief 通常ファイルをコピー (safeOpenRegularFile* + sendfile + fd-based 所有者/権限/タイムスタンプ保持)
- *
- * tryReflink=trueの場合、まずioctl(FICLONE)を試行し、
- * btrfs CoW (reflink)が使用可能であれば高速コピー、失敗時はsendfileにフォールバック
- *
- * "cp -d --preserve=all --no-preserve=xattr"と同等の動作
- */
-bool SnapshotOperations::copyRegularFile(const QString &src, const QString &dst, bool tryReflink)
-{
-    int srcFd = qsnapper::security::safeOpenRegularFileRead(src);
-    if (srcFd < 0) {
-        qWarning() << "copyRegularFile: Failed to open source:" << src << strerror(errno);
-        return false;
-    }
-
-    struct stat srcStat;
-    if (fstat(srcFd, &srcStat) < 0) {
-        qWarning() << "copyRegularFile: Failed to stat source:" << src << strerror(errno);
-        close(srcFd);
-        return false;
-    }
-
-    int dstFd = qsnapper::security::safeOpenRegularFileWrite(dst, srcStat.st_mode & 07777);
-    if (dstFd < 0) {
-        qWarning() << "copyRegularFile: Failed to open destination:" << dst << strerror(errno);
-        close(srcFd);
-        return false;
-    }
-
-    bool copied = false;
-
-    // Step 1: reflink (btrfs CoW) を試行
-    if (tryReflink) {
-        if (ioctl(dstFd, FICLONE, srcFd) == 0) {
-            copied = true;
-        }
-        // FICLONE失敗時はsendfileにフォールバック
-    }
-
-    // Step 2: sendfileでデータコピー
-    if (!copied) {
-        off_t offset = 0;
-        ssize_t remaining = srcStat.st_size;
-        while (remaining > 0) {
-            ssize_t written = sendfile(dstFd, srcFd, &offset, remaining);
-            if (written < 0) {
-                qWarning() << "copyRegularFile: sendfile failed:" << strerror(errno);
-                close(dstFd);
-                close(srcFd);
-                return false;
-            }
-            if (written == 0) {
-                qWarning() << "copyRegularFile: sendfile reached EOF before expected byte count";
-                close(dstFd);
-                close(srcFd);
-                return false;
-            }
-            remaining -= written;
-        }
-    }
-
-    // 所有者を保持 (cp --preserve=all)
-    const bool mustPreserveMetadata = (::geteuid() == 0);
-    if (fchown(dstFd, srcStat.st_uid, srcStat.st_gid) < 0) {
-        qWarning() << "copyRegularFile: fchown failed" << strerror(errno);
-        if (mustPreserveMetadata) {
-            close(dstFd);
-            close(srcFd);
-            return false;
-        }
-    }
-
-    // タイムスタンプを保持
-    struct timespec ts[2];
-    ts[0] = srcStat.st_atim;
-    ts[1] = srcStat.st_mtim;
-    if (futimens(dstFd, ts) < 0) {
-        qWarning() << "copyRegularFile: futimens failed" << strerror(errno);
-        if (mustPreserveMetadata) {
-            close(dstFd);
-            close(srcFd);
-            return false;
-        }
-    }
-
-    close(dstFd);
-    close(srcFd);
-    return true;
-}
-
-/**
-* @brief シンボリックリンクをコピー (readlinkat → symlinkat → fchownat(AT_SYMLINK_NOFOLLOW) + utimensat(AT_SYMLINK_NOFOLLOW))
- *
- * copySymlinkは、リンク先自体を保持しつつ、名前の変更やメタデータの更新を信頼できる親ディレクトリファイルへの参照に固定するため、
- * 中間にある親ディレクトリでのライブパスシンボリックリンクの置換によって、最終的な操作がリダイレクトされることはない
- *
- * "cp -d --preserve=all --no-preserve=xattr"のシンボリックリンク版
- */
-bool SnapshotOperations::copySymlink(const QString &src, const QString &dst)
-{
-    QByteArray linkTarget;
-    if (!qsnapper::security::safeReadLinkNoFollow(src, &linkTarget)) {
-        qWarning() << "copySymlink: readlink failed:" << src << strerror(errno);
-        return false;
-    }
-
-    QString temporaryPath;
-    bool createdTemporaryLink = false;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-link"), attempt);
-        if (qsnapper::security::safeCreateSymlinkNoFollow(linkTarget, temporaryPath)) {
-            createdTemporaryLink = true;
-            break;
-        }
-
-        if (errno != EEXIST) {
-            qWarning() << "copySymlink: symlink(temp) failed:" << temporaryPath << strerror(errno);
-            return false;
-        }
-    }
-
-    if (!createdTemporaryLink) {
-        qWarning() << "copySymlink: failed to allocate temporary link path:" << dst;
-        return false;
-    }
-
-    if (!qsnapper::security::safeRenamePathNoFollow(temporaryPath, dst)) {
-        const int renameErrno = errno;
-        qsnapper::security::safeRemoveAll(temporaryPath);
-        qWarning() << "copySymlink: rename failed:" << dst << strerror(renameErrno);
-        return false;
-    }
-
-    struct stat srcStat;
-    if (qsnapper::security::safeLstat(src, &srcStat)) {
-        struct timespec ts[2];
-        ts[0] = srcStat.st_atim;
-        ts[1] = srcStat.st_mtim;
-
-        bool ownerUpdated = false;
-        bool timesUpdated = false;
-        if (!qsnapper::security::safeSetSymlinkMetadataNoFollow(dst,
-                                                                srcStat.st_uid,
-                                                                srcStat.st_gid,
-                                                                ts,
-                                                                &ownerUpdated,
-                                                                &timesUpdated)) {
-            if (!ownerUpdated) {
-                qWarning() << "copySymlink: fchownat failed (non-fatal):" << dst << strerror(errno);
-            }
-
-            if (!timesUpdated) {
-                qWarning() << "copySymlink: utimensat failed (non-fatal):" << dst << strerror(errno);
-            }
-        }
-    }
-
-    return true;
-}
-
-/**
  * @brief live pathをroot配下で再解決して一時的な兄弟pathへ退避する
+ * @param rootPath 名前解決の基準とする絶対path (configのSUBVOLUME)
  * @param path 退避対象の絶対path
  * @param movedPath 実際の退避先
  *                  対象不存在時は空文字列
  * @return 退避または対象不存在時true
  */
-bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
+bool SnapshotOperations::movePathAsideBeneathRoot(const QString &rootPath,
+                                                  const QString &path,
                                                   QString *movedPath)
 {
     if (movedPath) {
@@ -3574,7 +3281,7 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &path,
     for (int attempt = 0; attempt < 16; ++attempt) {
         const QString candidate = siblingTemporaryPath(
             path, QStringLiteral("qsnapper-old"), attempt);
-        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(QStringLiteral("/"), path, candidate)) {
+        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(rootPath, path, candidate)) {
             if (movedPath) {
                 *movedPath = candidate;
             }
@@ -3620,18 +3327,21 @@ bool SnapshotOperations::applyRestoreEntry(
             || entry.changeType == QStringLiteral("deleted")
             || entry.changeType == QStringLiteral("modified")
             || entry.changeType == QStringLiteral("typechanged");
+    // entry.pathはconfig相対名である
+    // live側の宛先はcommit時に固定したSUBVOLUME配下に組み立て、以降の全てのlive操作はrootPathを基準に解決する
+    // relativePathはrootPathからの相対であり、同時にpin済みスナップショット dirfdからの相対でもある
+    QString rootPath;
+    QString destinationPath;
     QString relativePath;
-    if (!entry.path.startsWith(QLatin1Char('/'))
-            || entry.path == QStringLiteral("/.snapshots")
-            || entry.path.startsWith(QStringLiteral("/.snapshots/"))
-            || !validChangeType
-            || !qsnapper::security::splitDestinationBeneathRoot(
-                QStringLiteral("/"), entry.path, &relativePath)) {
+    if (!validChangeType
+            || qsnapper::restore::isSnapshotMetadataRestoreName(entry.path)
+            || !qsnapper::restore::buildRestoreDestination(
+                context.subvolume, entry.path, &rootPath, &destinationPath, &relativePath)) {
         qWarning() << "Staged restore: Frozen entry failed execution-time validation";
         return false;
     }
 
-    const QString snapshotFilePath = context.snapshotDir + entry.path;
+    const QString snapshotFilePath = context.snapshotDir + QLatin1Char('/') + relativePath;
     if (!qsnapper::security::isPathWithinSnapshotRoot(
             snapshotFilePath, context.snapshotDir)) {
         qWarning() << "Staged restore: Source escaped snapshot root";
@@ -3644,7 +3354,7 @@ bool SnapshotOperations::applyRestoreEntry(
         // サーバはクライアントが申告したentryを再計算しないため、シリアライズ経路への注入等で偽装されたentryがここまで到達し得る
         // 破壊の直前に前提そのものを確認する
         //
-        // 検証は認可時にpinしたsnapshotDirFd相対で行い、本関数の冒頭でsplitDestinationBeneathRootがentry.pathから導出したrelativePathをそのまま使用する
+        // 検証は認可時にpinしたsnapshotDirFd相対で行い、本関数の冒頭でbuildRestoreDestinationがentry.pathから導出したrelativePathをそのまま使用する
         // 復元元snapshotはread-onlyかつfdでpin済みであり、検証対象と削除対象は同一のentry.pathに由来するため、検証後に別の値を取り直す余地はない
         if (!qsnapper::security::isConfirmedAbsentAt(context.snapshotDirFd, relativePath)) {
             qWarning() << "Staged restore: Refused to delete a path that is not confirmed"
@@ -3652,7 +3362,7 @@ bool SnapshotOperations::applyRestoreEntry(
             return false;
         }
 
-        const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"), entry.path);
+        const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(rootPath, destinationPath);
         if (!removed) {
             qWarning() << "Staged restore: Failed to remove live path:"
                        << strerror(errno);
@@ -3660,10 +3370,10 @@ bool SnapshotOperations::applyRestoreEntry(
         return removed;
     }
 
-    const int slashIndex = entry.path.lastIndexOf(QLatin1Char('/'));
+    const int slashIndex = destinationPath.lastIndexOf(QLatin1Char('/'));
     const QString parentPath = slashIndex <= 0 ? QStringLiteral("/")
-                                               : entry.path.left(slashIndex);
-    if (parentPath != QStringLiteral("/") && !qsnapper::security::safeCreateDirectoryBeneathRoot(QStringLiteral("/"), parentPath, 0755)) {
+                                               : destinationPath.left(slashIndex);
+    if (parentPath != rootPath && !qsnapper::security::safeCreateDirectoryBeneathRoot(rootPath, parentPath, 0755)) {
         qWarning() << "Staged restore: Failed to create live parent directory:"
                    << strerror(errno);
         return false;
@@ -3690,7 +3400,7 @@ bool SnapshotOperations::applyRestoreEntry(
 
     QString detachedPath;
     if (context.removeOnTypechanged && entry.changeType == QStringLiteral("typechanged")) {
-        if (!movePathAsideBeneathRoot(entry.path, &detachedPath)) {
+        if (!movePathAsideBeneathRoot(rootPath, destinationPath, &detachedPath)) {
             qWarning() << "Staged restore: Failed to move live path aside:"
                        << strerror(errno);
             return false;
@@ -3699,40 +3409,13 @@ bool SnapshotOperations::applyRestoreEntry(
 
     bool applied = false;
     if (sourceIsLink) {
-        applied = copySymlinkBeneathRoot(context.snapshotDirFd, relativePath, entry.path);
+        applied = copySymlinkBeneathRoot(context.snapshotDirFd, relativePath, rootPath, destinationPath);
     }
     else if (sourceIsDirectory) {
-        if (!qsnapper::security::safeCreateDirectoryBeneathRoot(QStringLiteral("/"), entry.path, 0755)) {
-            qWarning() << "Staged restore: Failed to create live directory:"
-                       << strerror(errno);
-        }
-        else {
-            const int directoryFd =
-                qsnapper::security::safeOpenDirectoryBeneathRoot(QStringLiteral("/"), relativePath, /*createMissing=*/false, 0755);
-            if (directoryFd < 0) {
-                qWarning() << "Staged restore: Failed to open live directory:"
-                           << strerror(errno);
-            }
-            else {
-                const bool mustPreserveMetadata = (::geteuid() == 0);
-                bool metadataOk = true;
-                if (::fchown(directoryFd, snapshotFileInfo.st_uid, snapshotFileInfo.st_gid) < 0) {
-                    qWarning() << "Staged restore: Failed to preserve directory owner:"
-                               << strerror(errno);
-                    metadataOk = !mustPreserveMetadata;
-                }
-                if (::fchmod(directoryFd, snapshotFileInfo.st_mode & 07777) < 0) {
-                    qWarning() << "Staged restore: Failed to preserve directory mode:"
-                               << strerror(errno);
-                    metadataOk = metadataOk && !mustPreserveMetadata;
-                }
-                ::close(directoryFd);
-                applied = metadataOk;
-            }
-        }
+        applied = applyDirectoryBeneathRoot(context.snapshotDirFd, relativePath, rootPath, destinationPath);
     }
     else {
-        applied = copyRegularFileBeneathRoot(context.snapshotDirFd, relativePath, entry.path, context.useReflink);
+        applied = copyRegularFileBeneathRoot(context.snapshotDirFd, relativePath, rootPath, destinationPath, context.useReflink);
     }
 
     // 退避物の破棄は復元成功後にのみ行う
@@ -3740,12 +3423,12 @@ bool SnapshotOperations::applyRestoreEntry(
     // 戻すことすらできない場合も退避物は削除せず、復旧できるようpathを記録する
     if (!detachedPath.isEmpty()) {
         if (applied) {
-            if (!qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"), detachedPath)) {
+            if (!qsnapper::security::safeRemoveAllBeneathRoot(rootPath, detachedPath)) {
                 qWarning() << "Staged restore: Failed to remove detached live path:"
                            << strerror(errno);
             }
         }
-        else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(QStringLiteral("/"), detachedPath, entry.path)) {
+        else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(rootPath, detachedPath, destinationPath)) {
             qCritical() << "Staged restore: Failed to reattach live path after a failed"
                         << "restore. Previous content is preserved at:" << detachedPath;
         }
@@ -3755,20 +3438,89 @@ bool SnapshotOperations::applyRestoreEntry(
 }
 
 /**
- * @brief live宛先をroot配下で再解決して通常ファイルをコピーする
+ * @brief live宛先の親ディレクトリを1回だけ解決し、ディレクトリを作成してmetadataを適用する
  *
- * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や稼働中のサービス) がETXTBSYで拒否されるため、
- * 同一ディレクトリの一時ファイルへ書き出してから、renameat()で差し替える (copySymlinkBeneathRootと同じ手法)
- * metadataは差し替え前に一時ファイルへ適用するため、live側から不完全な状態は観測されない
+ * 作成 (mkdirat) と、metadataを適用するためのopenを同じ親dirfd上で行い、名前を再解決しない
+ * 既存のディレクトリはそのまま使い、所有者・mode・ACL (access / default)・xattrをsnapshot側に合わせる
  *
  * @param sourceDirFd pin済みのsnapshot dirfd
  * @param sourceRelativePath snapshotDirからの相対source path
+ * @param rootPath 名前解決の基準とする絶対path (configのSUBVOLUME)
+ * @param dst live filesystem上の絶対path
+ * @return ディレクトリと必須metadataを適用できた場合true
+ */
+bool SnapshotOperations::applyDirectoryBeneathRoot(int sourceDirFd,
+                                                   const QString &sourceRelativePath,
+                                                   const QString &rootPath,
+                                                   const QString &dst)
+{
+    const int srcFd = qsnapper::security::safeOpenDirectoryReadAt(sourceDirFd, sourceRelativePath);
+    if (srcFd < 0) {
+        qWarning() << "applyDirectoryBeneathRoot: Failed to open source directory:"
+                   << strerror(errno);
+        return false;
+    }
+
+    QByteArray leafName;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    if (parentFd < 0) {
+        qWarning() << "applyDirectoryBeneathRoot: Failed to open destination parent:"
+                   << strerror(errno);
+        ::close(srcFd);
+        return false;
+    }
+
+    // 作成時は権限を絞り (0700)、所有者とmodeは後からfd経由で設定する
+    int directoryFd = -1;
+    if (::mkdirat(parentFd, leafName.constData(), 0700) == 0 || errno == EEXIST) {
+        directoryFd = ::openat(parentFd, leafName.constData(),
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    const int openErrno = errno;
+    ::close(parentFd);
+    if (directoryFd < 0) {
+        qWarning() << "applyDirectoryBeneathRoot: Failed to create or open live directory:"
+                   << strerror(openErrno);
+        ::close(srcFd);
+        return false;
+    }
+
+    const qsnapper::security::RestoredMetadataResult metadata =
+        qsnapper::security::applyRestoredMetadata(srcFd, directoryFd, /*isDirectory=*/true);
+    ::close(directoryFd);
+    ::close(srcFd);
+
+    if (metadata.optionalFailures > 0) {
+        qWarning() << "applyDirectoryBeneathRoot:" << metadata.optionalFailures
+                   << "extended attribute(s) could not be copied (non-fatal)";
+    }
+    if (metadata.mandatoryFailed) {
+        qWarning() << "applyDirectoryBeneathRoot: Failed to preserve owner, mode or ACL:"
+                   << strerror(metadata.mandatoryErrno);
+        return ::geteuid() != 0;
+    }
+
+    return true;
+}
+
+/**
+ * @brief live宛先の親ディレクトリを1回だけ解決し、通常ファイルをコピーして差し替える
+ *
+ * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や稼働中のサービス) がETXTBSYで拒否され、既存inodeのhardlinkや緩いmodeも引き継いでしまう
+ * そのため、同じ親dirfd上の一時ファイルへ書き出し、data → 所有者 → mode → ACL → xattr → capability → 時刻をfd経由で適用してから、renameat()で差し替える
+ * 一時ファイルの作成からrenameまで名前を再解決しないため、書き込み可能な親ディレクトリを制御する攻撃者が途中で一時名や親を差し替えても、
+ * 別objectをrenameしたり、攻撃者のobjectへmetadataを適用したりしない (差し替えはrenameの前後で検出して失敗にする)
+ *
+ * @param sourceDirFd pin済みのsnapshot dirfd
+ * @param sourceRelativePath snapshotDirからの相対source path
+ * @param rootPath 名前解決の基準とする絶対path (configのSUBVOLUME)
  * @param dst live filesystem上の絶対path
  * @param tryReflink FICLONEを先行試行するか
  * @return dataと必須metadataを適用して差し替えできた場合true
  */
 bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
                                                     const QString &sourceRelativePath,
+                                                    const QString &rootPath,
                                                     const QString &dst,
                                                     bool tryReflink)
 {
@@ -3776,115 +3528,40 @@ bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
         sourceDirFd, sourceRelativePath);
     if (srcFd < 0) {
         qWarning() << "copyRegularFileBeneathRoot: Failed to open source:"
-                   << sourceRelativePath << strerror(errno);
+                   << strerror(errno);
         return false;
     }
 
-    struct stat srcStat;
-    if (::fstat(srcFd, &srcStat) < 0) {
-        qWarning() << "copyRegularFileBeneathRoot: Failed to stat source:"
+    QByteArray leafName;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    if (parentFd < 0) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to open destination parent:"
                    << strerror(errno);
         ::close(srcFd);
         return false;
     }
 
-    QString temporaryPath;
-    int dstFd = -1;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        temporaryPath = siblingTemporaryPath(dst, QStringLiteral("qsnapper-copy"), attempt);
-        dstFd = qsnapper::security::safeCreateRegularFileExclusiveBeneathRoot(QStringLiteral("/"), temporaryPath, srcStat.st_mode & 07777);
-        if (dstFd >= 0) {
-            break;
-        }
-
-        if (errno != EEXIST) {
-            qWarning() << "copyRegularFileBeneathRoot: Failed to create temporary file:"
-                       << strerror(errno);
-            ::close(srcFd);
-            return false;
-        }
-    }
-
-    if (dstFd < 0) {
-        qWarning() << "copyRegularFileBeneathRoot: Failed to allocate temporary file path";
-        ::close(srcFd);
-        return false;
-    }
-
-    // 差し替え前に失敗した場合、live側へ中途半端な一時ファイルを残さない
-    const auto abortCopy = [&]() {
-        ::close(dstFd);
-        ::close(srcFd);
-        qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"),
-                                                     temporaryPath);
-        return false;
-    };
-
-    bool copied = false;
-    if (tryReflink && ::ioctl(dstFd, FICLONE, srcFd) == 0) {
-        copied = true;
-    }
-
-    if (!copied) {
-        off_t offset = 0;
-        ssize_t remaining = srcStat.st_size;
-        while (remaining > 0) {
-            const ssize_t written = ::sendfile(dstFd, srcFd, &offset,
-                                               remaining);
-            if (written < 0) {
-                qWarning() << "copyRegularFileBeneathRoot: sendfile failed:"
-                           << strerror(errno);
-                return abortCopy();
-            }
-            if (written == 0) {
-                qWarning() << "copyRegularFileBeneathRoot: sendfile reached EOF before expected byte count";
-                return abortCopy();
-            }
-            remaining -= written;
-        }
-    }
-
-    // O_CREAT時のmodeはumaskで削られるため、snapshot側のmodeを明示的に適用する
-    if (::fchmod(dstFd, srcStat.st_mode & 07777) < 0) {
-        qWarning() << "copyRegularFileBeneathRoot: fchmod failed"
-                   << strerror(errno);
-        return abortCopy();
-    }
-
+    // rootで動作する本番環境では、所有者・mode・ACL・capability・時刻を保てない復元は失敗扱いにする
     const bool mustPreserveMetadata = (::geteuid() == 0);
-    if (::fchown(dstFd, srcStat.st_uid, srcStat.st_gid) < 0) {
-        qWarning() << "copyRegularFileBeneathRoot: fchown failed"
-                   << strerror(errno);
-        if (mustPreserveMetadata) {
-            return abortCopy();
-        }
-    }
-
-    // 新規inodeへ差し替えるため、live側の既存labelは引き継がれない
-    // snapshot側のlabelを明示的にコピーする
-    copySecurityContextBestEffort(srcFd, dstFd);
-
-    struct timespec times[2];
-    times[0] = srcStat.st_atim;
-    times[1] = srcStat.st_mtim;
-    if (::futimens(dstFd, times) < 0) {
-        qWarning() << "copyRegularFileBeneathRoot: futimens failed"
-                   << strerror(errno);
-        if (mustPreserveMetadata) {
-            return abortCopy();
-        }
-    }
-
-    ::close(dstFd);
+    qsnapper::security::RestoredMetadataResult metadata;
+    const bool replaced = qsnapper::security::replaceRegularFileAt(
+        parentFd, leafName, srcFd, tryReflink, mustPreserveMetadata, &metadata);
+    const int replaceErrno = errno;
+    ::close(parentFd);
     ::close(srcFd);
 
-    if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
-            QStringLiteral("/"), temporaryPath, dst)) {
-        const int renameErrno = errno;
-        qsnapper::security::safeRemoveAllBeneathRoot(QStringLiteral("/"),
-                                                     temporaryPath);
-        qWarning() << "copyRegularFileBeneathRoot: rename failed:"
-                   << strerror(renameErrno);
+    if (metadata.mandatoryFailed) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to preserve owner, mode, ACL or capability:"
+                   << strerror(metadata.mandatoryErrno);
+    }
+    if (metadata.optionalFailures > 0) {
+        qWarning() << "copyRegularFileBeneathRoot:" << metadata.optionalFailures
+                   << "extended attribute(s) could not be copied (non-fatal)";
+    }
+    if (!replaced) {
+        qWarning() << "copyRegularFileBeneathRoot: Failed to replace destination:"
+                   << strerror(replaceErrno);
+        errno = replaceErrno;
         return false;
     }
 
@@ -3892,75 +3569,53 @@ bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
 }
 
 /**
- * @brief live宛先をroot配下で再解決してsymlinkをコピーする
- * @param src snapshot内の読み取り元path
+ * @brief live宛先の親ディレクトリを1回だけ解決し、symlinkをコピーして差し替える
+ *
+ * 一時symlinkを同じ親dirfd上に作成し、所有者と時刻をfd経由で設定してから、renameat()で差し替える
+ * 所有者と時刻の適用失敗は従来どおり非致命とする
+ *
+ * @param sourceDirFd pin済みのsnapshot dirfd
+ * @param sourceRelativePath snapshotDirからの相対source path
+ * @param rootPath 名前解決の基準とする絶対path (configのSUBVOLUME)
  * @param dst live filesystem上の絶対path
- * @return symlinkを作成できた場合true
+ * @return symlinkを作成して差し替えできた場合true
  */
 bool SnapshotOperations::copySymlinkBeneathRoot(int sourceDirFd,
                                                 const QString &sourceRelativePath,
+                                                const QString &rootPath,
                                                 const QString &dst)
 {
     QByteArray linkTarget;
-    if (!qsnapper::security::safeReadLinkNoFollowAt(sourceDirFd, sourceRelativePath,
-                                                    &linkTarget)) {
-        qWarning() << "copySymlinkBeneathRoot: readlink failed:"
-                   << sourceRelativePath << strerror(errno);
-        return false;
-    }
-
-    QString temporaryPath;
-    bool createdTemporaryLink = false;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        temporaryPath = siblingTemporaryPath(
-            dst, QStringLiteral("qsnapper-link"), attempt);
-        if (qsnapper::security::safeCreateSymlinkNoFollowBeneathRoot(
-                QStringLiteral("/"), linkTarget, temporaryPath)) {
-            createdTemporaryLink = true;
-            break;
-        }
-        if (errno != EEXIST) {
-            qWarning() << "copySymlinkBeneathRoot: symlink(temp) failed:"
-                       << strerror(errno);
-            return false;
-        }
-    }
-
-    if (!createdTemporaryLink) {
-        qWarning() << "copySymlinkBeneathRoot: Failed to allocate temporary link path";
-        return false;
-    }
-
-    if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(
-            QStringLiteral("/"), temporaryPath, dst)) {
-        const int renameErrno = errno;
-        qsnapper::security::safeRemoveAllBeneathRoot(
-            QStringLiteral("/"), temporaryPath);
-        qWarning() << "copySymlinkBeneathRoot: rename failed:"
-                   << strerror(renameErrno);
-        return false;
-    }
-
     struct stat srcStat;
-    if (qsnapper::security::safeLstatAt(sourceDirFd, sourceRelativePath, &srcStat)) {
-        struct timespec times[2];
-        times[0] = srcStat.st_atim;
-        times[1] = srcStat.st_mtim;
+    if (!qsnapper::security::safeReadLinkNoFollowAt(sourceDirFd, sourceRelativePath, &linkTarget)
+            || !qsnapper::security::safeLstatAt(sourceDirFd, sourceRelativePath, &srcStat)) {
+        qWarning() << "copySymlinkBeneathRoot: Failed to read source link:"
+                   << strerror(errno);
+        return false;
+    }
 
-        bool ownerUpdated = false;
-        bool timesUpdated = false;
-        if (!qsnapper::security::safeSetSymlinkMetadataNoFollowBeneathRoot(
-                QStringLiteral("/"), dst, srcStat.st_uid, srcStat.st_gid,
-                times, &ownerUpdated, &timesUpdated)) {
-            if (!ownerUpdated) {
-                qWarning() << "copySymlinkBeneathRoot: fchownat failed (non-fatal):"
-                           << strerror(errno);
-            }
-            if (!timesUpdated) {
-                qWarning() << "copySymlinkBeneathRoot: utimensat failed (non-fatal):"
-                           << strerror(errno);
-            }
-        }
+    QByteArray leafName;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    if (parentFd < 0) {
+        qWarning() << "copySymlinkBeneathRoot: Failed to open destination parent:"
+                   << strerror(errno);
+        return false;
+    }
+
+    bool metadataApplied = false;
+    const bool replaced = qsnapper::security::replaceSymlinkAt(
+        parentFd, leafName, linkTarget, srcStat, &metadataApplied);
+    const int replaceErrno = errno;
+    ::close(parentFd);
+
+    if (!replaced) {
+        qWarning() << "copySymlinkBeneathRoot: Failed to replace destination:"
+                   << strerror(replaceErrno);
+        errno = replaceErrno;
+        return false;
+    }
+    if (!metadataApplied) {
+        qWarning() << "copySymlinkBeneathRoot: Failed to preserve link owner or times (non-fatal)";
     }
 
     return true;

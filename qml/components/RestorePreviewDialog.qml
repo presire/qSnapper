@@ -165,7 +165,13 @@ BorderedDialog {
             rightPane.fileLoading = false
             rightPane.fileDetails = details
 
-            if (diff === "") {
+            // サービスが差分の生成を省略した場合は、その理由を表示する
+            var omittedReason = details["diffOmitted"] || ""
+            if (omittedReason !== "") {
+                diffTextArea.textFormat = TextEdit.PlainText
+                diffTextArea.text = rightPane.diffOmittedMessage(omittedReason)
+            }
+            else if (diff === "") {
                 diffTextArea.textFormat = TextEdit.PlainText
                 diffTextArea.text = ""
             }
@@ -490,6 +496,22 @@ BorderedDialog {
                 property int selectedChangeType: -1
                 property string selectedStatusFlags: ""
                 property var fileDetails: ({})
+
+                // 差分を省略した理由 (details部のdiffOmitted) を表示用の文言に変換
+                function diffOmittedMessage(reason) {
+                    switch (reason) {
+                        case "binary":
+                            return qsTr("The differences are not shown because the file is binary.")
+                        case "too_large":
+                            return qsTr("The differences are not shown because the file is too large.")
+                        case "too_many_changes":
+                            return qsTr("The differences are not shown because there are too many changes.")
+                        case "special_file":
+                            return qsTr("The differences are not shown because the file is not a regular file.")
+                        default:
+                            return qsTr("The differences are not shown.")
+                    }
+                }
 
                 // HTMLエスケープ
                 function escapeHtml(text) {

@@ -20,7 +20,7 @@ security_poc/
 ├── README.md                             (この文書)
 ├── common.sh                             (共通ヘルパ: VM検証、ベースライン比較、snapshot ID取得)
 ├── poc_polkit_race.py                    (C-1: issue 1, UnixProcessSubject race)
-├── poc_restore_traversal.sh              (C-5: issue 5a, RestoreFiles任意ファイル上書き)
+├── poc_restore_traversal.sh              (C-5: issue 5a, 復元経路の任意ファイル上書き。StageRestoreEntriesで検証)
 ├── poc_quit_dos.sh                       (C-6: issue 5b, Quit()無認証DoS)
 ├── poc_change_record_injection.sh        (C-8: 改行注入によるパス偽装 --> 任意ファイル削除)
 ├── poc_change_record_injection.cpp       (同PoCの実行体。実ソースをリンクする)

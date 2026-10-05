@@ -303,6 +303,9 @@ private:
     void finishRestorePlanWithError(const QString &message);    // エラーで復元計画を終了する
 
     // 復元計画コールバック
+    bool startRestorePlan(int sourceSnapshotNumber,                                     // 復元対象を検証してstaged restore計画を開始する
+                          const QStringList &checkedPaths,
+                          const QStringList &checkedChangeTypes);
     void onPlanBeginFinished(bool ok, const QString &manifestId, const QString &error); // 計画開始完了時の処理
     void onPlanStageFinished(bool ok, const QString &error);                            // チャンクステージング完了時の処理
     void onPlanCommitFinished(bool ok, const QString &error);                           // 計画コミット完了時の処理
@@ -490,7 +493,6 @@ signals:
 
 private slots:
     // D-Bus復元通知の処理
-    void onRestoreProgress(int current, int total, const QString &filePath);                                        // 従来復元の進捗通知を処理する
     void onRestorePlanProgress(const QString &manifestId, int current, int total, const QString &filePath);         // 復元計画の進捗通知を処理する
     void onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message);    // 復元計画の完了通知を処理する
 

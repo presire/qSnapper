@@ -266,6 +266,7 @@ private slots:
     void syntheticParentWithEmptyStatusFlagsNeverReachesThePlan();
     void restoreFromMismatchedSnapshotIsRejectedInVsCurrentMode();
     void singleFileRestoreFromMismatchedSnapshotIsRejected();
+    void singleFileRestoreUsesStagedPlan();
     void failedComparisonReplacementClearsRestorableEntries();
     void staleComparisonLoadResponseIsIgnored();
     void staleFileDiffResponseIsIgnored();
@@ -1206,6 +1207,48 @@ void TestFileChangeModel::singleFileRestoreFromMismatchedSnapshotIsRejected()
     QCOMPARE(errorSpy.count(), 1);
     QCOMPARE(completedSpy.count(), 1);
     QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+}
+
+/**
+ * @brief 単一ファイル復元もstaged restore (Begin / Stage / Commit) で実行される
+ *
+ * 廃止したlegacyのRestoreFiles / RestoreFilesDirectを呼ばず、選択項目の復元と同じ計画経路を通ることを確認する
+ */
+void TestFileChangeModel::singleFileRestoreUsesStagedPlan()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+
+    prepareComparisonRestore(&model, &fake, 100, 101,
+                             QStringLiteral("t.... /etc/installed.conf\n"), QStringList());
+
+    QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
+
+    model.restoreSingleFileFrom(QStringLiteral("/etc/installed.conf"), 100);
+    fake.completeAllPendingOk();
+
+    QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Begin), 1);
+    QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Stage), 1);
+    QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Commit), 1);
+
+    const FakeRestorePlanTransport::Call &begin = fake.calls.first();
+    QCOMPARE(begin.configName, QStringLiteral("root"));
+    QCOMPARE(begin.snapshotNumber, 100);
+    QCOMPARE(begin.counterpartNumber, 101);
+    QCOMPARE(begin.restoreMode, QStringLiteral("direct"));
+
+    for (const FakeRestorePlanTransport::Call &call : std::as_const(fake.calls)) {
+        if (call.kind == FakeRestorePlanTransport::Call::Stage) {
+            QCOMPARE(call.paths, QStringList{QStringLiteral("/etc/installed.conf")});
+            QCOMPARE(call.changeTypes, QStringList{QStringLiteral("typechanged")});
+        }
+    }
+
+    // 完了はサーバ側の終端シグナルで判定する
+    QCOMPARE(completedSpy.count(), 0);
+    fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("completed"), QString());
+    QCOMPARE(completedSpy.count(), 1);
+    QCOMPARE(completedSpy.at(0).at(0).toBool(), true);
 }
 
 void TestFileChangeModel::failedComparisonReplacementClearsRestorableEntries()

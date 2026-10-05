@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
 @file check_restore_authorization_boundaries.py
-@brief Structural proof that the legacy and staged restore authorization
-       boundaries in src/dbusservice/snapshotoperations.cpp are unchanged.
+@brief Structural proof that the staged restore authorization boundary in
+       src/dbusservice/snapshotoperations.cpp is unchanged and that the
+       removed legacy restore path has not been reintroduced.
 
 Why this exists
 ----------------
-qSnapper has two restore call paths that must never silently converge or
-diverge in their PolicyKit authorization behaviour:
+qSnapper restores files only through the staged path. The former LEGACY
+per-call path (RestoreFiles / RestoreFilesDirect over restoreFilesImpl /
+restoreFilesAuthorized) overwrote live inodes in place, trusted the
+client-declared change type and had no exclusion against staged execution,
+so it was removed. It must not come back:
 
-  - The LEGACY per-call path (RestoreFiles / RestoreFilesDirect, both thin
-    wrappers over restoreFilesImpl) authorizes on EVERY call, unconditionally,
-    independent of any staged-restore plan state.
   - The STAGED single-authorization path (BeginRestorePlan /
     StageRestoreEntries / CommitRestorePlan / ContinueRestorePlan /
     GetRestorePlanStatus / CancelRestorePlan) authorizes EXACTLY ONCE, inside
@@ -63,11 +64,16 @@ import os
 import re
 import sys
 
-# Function names on the legacy per-call authorization path.
-LEGACY_ENTRY_POINTS = ("RestoreFiles", "RestoreFilesDirect")
-LEGACY_IMPL = "restoreFilesImpl"
-# The part of the legacy path that runs after the authorization gate.
-LEGACY_AUTHORIZED_IMPL = "restoreFilesAuthorized"
+# Function names of the removed legacy per-call restore path. None of them
+# may be defined again.
+REMOVED_LEGACY_FUNCTIONS = (
+    "RestoreFiles",
+    "RestoreFilesDirect",
+    "restoreFilesImpl",
+    "restoreFilesAuthorized",
+    "copyRegularFile",
+    "copySymlink",
+)
 
 # Function names on the staged single-authorization path.
 STAGE_PRE_FREEZE = ("BeginRestorePlan", "StageRestoreEntries")
@@ -78,16 +84,6 @@ STAGE_POST_COMMIT_CONTROL = (
     "CancelRestorePlan",
 )
 STAGED_CONTROL_METHODS = STAGE_PRE_FREEZE + STAGE_POST_COMMIT_CONTROL
-
-# Identifiers that would indicate restoreFilesImpl started depending on the
-# staged-restore plan state machine (it must not: it is the fully
-# independent legacy path).
-STAGED_PLAN_IDENTIFIERS = (
-    "m_restoreRegistry",
-    "m_restoreExecutor",
-    "m_restorePlanOwners",
-    "manifestId",
-)
 
 # Baseline set of SnapshotOperations methods that legitimately authorize
 # today. A NEW name appearing here that is not in this set is treated as an
@@ -108,7 +104,6 @@ EXPECTED_AUTHORIZING_METHODS = frozenset({
     "GetFileDiffBetween",
     "GetFileDiffAndDetails",
     STAGE_COMMIT,
-    LEGACY_IMPL,
 })
 
 FUNCTION_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+)\s*\(")
@@ -394,59 +389,15 @@ def main() -> int:
         _, brace_open, brace_close = functions[name]
         return call_offsets_in_span(call_offsets, brace_open, brace_close)
 
-    # --- 1: RestoreFiles / RestoreFilesDirect delegate to restoreFilesImpl ---
-    for name in LEGACY_ENTRY_POINTS:
-        body = require_function(name)
-        if body is None:
-            continue
-        delegates = f"{LEGACY_IMPL}(" in body
-        status = "OK" if delegates else "FAIL"
-        print(f"[1] {name}: {status} (delegates to {LEGACY_IMPL})")
-        if not delegates:
-            failures.append(f"{name} does not call {LEGACY_IMPL}(")
-
-    # --- 2: restoreFilesImpl authorizes exactly once, unconditionally,
-    # independent of staged-plan state ---
-    impl_body = require_function(LEGACY_IMPL)
-    if impl_body is not None:
-        _, impl_brace_open, _ = functions[LEGACY_IMPL]
-        impl_calls = calls_in_function(LEGACY_IMPL)
-        call_count = len(impl_calls)
-        print(f"[2] {LEGACY_IMPL}: {AUTH_CALL_LABEL} call count = {call_count}")
-        if call_count != 1:
-            failures.append(
-                f"{LEGACY_IMPL} must call {AUTH_CALL_LABEL} exactly once, "
-                f"found {call_count}"
-            )
-        else:
-            absolute_offset = impl_calls[0]
-            depth = depth_at_offset(text, impl_brace_open, absolute_offset)
-            print(f"[2] {LEGACY_IMPL}: {AUTH_CALL_LABEL} brace depth at call "
-                  f"site = {depth} (line {line_of(text, absolute_offset)})")
-            if depth != 1:
-                failures.append(
-                    f"{LEGACY_IMPL}'s {AUTH_CALL_LABEL} call is nested at "
-                    f"brace depth {depth} (expected 1 == unconditional on the "
-                    f"function's main path, not guarded by an extra if/for/"
-                    f"while/try block)"
-                )
-        # The legacy path's work moved behind the authorization gate into
-        # restoreFilesAuthorized, so both halves must stay free of staged-plan
-        # state for the independence property to still mean anything.
-        for legacy_part in (LEGACY_IMPL, LEGACY_AUTHORIZED_IMPL):
-            part_body = require_function(legacy_part)
-            if part_body is None:
-                continue
-            staged_refs = [ident for ident in STAGED_PLAN_IDENTIFIERS
-                           if ident in part_body]
-            print(f"[2] {legacy_part}: staged-plan identifiers referenced = "
-                  f"{staged_refs if staged_refs else 'none'}")
-            if staged_refs:
-                failures.append(
-                    f"{legacy_part} references staged-restore-plan identifiers "
-                    f"{staged_refs} -- the legacy per-call authorization must "
-                    f"stay independent of manifest/plan state"
-                )
+    # --- 1: the removed legacy restore path is not defined again ---
+    reintroduced = [name for name in REMOVED_LEGACY_FUNCTIONS if name in functions]
+    print(f"[1] removed legacy restore functions defined = "
+          f"{reintroduced if reintroduced else 'none'}")
+    if reintroduced:
+        failures.append(
+            f"removed legacy restore functions were reintroduced: {reintroduced}"
+            f" -- restore must go through the staged single-authorization path"
+        )
 
     # --- 3: BeginRestorePlan / StageRestoreEntries authorize zero times ---
     for name in STAGE_PRE_FREEZE:

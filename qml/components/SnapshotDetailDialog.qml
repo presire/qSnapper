@@ -29,7 +29,7 @@ BorderedDialog {
     // 個別ファイル/ディレクトリ復元用
     RestorePreviewDialog {
         id: restorePreviewDialog
-        configName: "root"  // 通常はrootファイルシステムの設定を使用
+        configName: SnapperService.currentConfig  // 選択中の設定 (復元元と復元先の両方の基準になる)
         // Pre/Postペアの場合はPre/Post両方の番号を設定
         preSnapshotNumber: (postSnapshot && postSnapshot.number) ? snapshot.number : 0
         postSnapshotNumber: (postSnapshot && postSnapshot.number) ? postSnapshot.number : 0
@@ -216,10 +216,12 @@ BorderedDialog {
             }
 
             // システムロールバックボタン
+            // ロールバックはrootファイルシステムの設定でのみ可能 (サービス側でもSUBVOLUMEとFSTYPEで拒否する)
             Button {
                 text: qsTr("System Rollback")
                 icon.name: "view-refresh"
                 icon.color: ThemeManager.isDark ? "#FFFFFF" : palette.buttonText
+                enabled: SnapperService.currentConfig === "root"
                 onClicked: confirmDialog.open()
             }
 

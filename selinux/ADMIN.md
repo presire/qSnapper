@@ -181,6 +181,7 @@ This is a design decision to avoid conflicts with openSUSE's existing file conte
    - `CAP_SETUID`: UID changes
    - `CAP_SETGID`: GID changes
    - `CAP_SYS_RESOURCE`: Resource limit override (`setrlimit`)
+   - `CAP_SETFCAP`: Restoring file capabilities (`security.capability`)
 
 2. **D-Bus Communication**
    - System bus connection (service: `send_msg` + `acquire_svc` for service name registration)

@@ -178,6 +178,7 @@ User action (GUI)
    - `CAP_SETUID`: UID変更
    - `CAP_SETGID`: GID変更
    - `CAP_SYS_RESOURCE`: リソース制限超過(`setrlimit`)
+   - `CAP_SETFCAP`: file capability(`security.capability`)の復元
 
 2. **D-Bus通信**
    - システムバス接続(サービス: `send_msg` + `acquire_svc`でサービス名を登録)

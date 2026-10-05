@@ -63,20 +63,6 @@
       <arg name="filePath" type="s" direction="in"/>
       <arg name="result" type="s" direction="out"/>
     </method>
-    <method name="RestoreFiles">
-      <arg name="configName" type="s" direction="in"/>
-      <arg name="snapshotNumber" type="i" direction="in"/>
-      <arg name="filePaths" type="as" direction="in"/>
-      <arg name="changeTypes" type="as" direction="in"/>
-      <arg name="success" type="b" direction="out"/>
-    </method>
-    <method name="RestoreFilesDirect">
-      <arg name="configName" type="s" direction="in"/>
-      <arg name="snapshotNumber" type="i" direction="in"/>
-      <arg name="filePaths" type="as" direction="in"/>
-      <arg name="changeTypes" type="as" direction="in"/>
-      <arg name="success" type="b" direction="out"/>
-    </method>
     <!--
       Staged restore (single-authorization path).
       Pre-freeze methods (BeginRestorePlan, StageRestoreEntries) only collect
@@ -140,11 +126,6 @@
       <arg name="configName" type="s" direction="in"/>
       <arg name="success" type="b" direction="out"/>
     </method>
-    <signal name="restoreProgress">
-      <arg name="current" type="i"/>
-      <arg name="total" type="i"/>
-      <arg name="filePath" type="s"/>
-    </signal>
     <signal name="restorePlanProgress">
       <arg name="manifestId" type="s"/>
       <arg name="current" type="i"/>

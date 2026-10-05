@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QByteArray>
+#include <functional>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -25,61 +26,15 @@ namespace qsnapper::security {
     int safeOpenDirectory(const QString &path);
 
     /**
-     * @brief 通常ファイルを安全に新規/上書きオープンする
-     *
-     * 親ディレクトリをO_NOFOLLOWで開いた後、leafを openat() で開き、fstat() でregular fileであることを再確認する
-     *
-     * @return 成功時: file descriptor、失敗時: -1
-     */
-    int safeOpenRegularFileWrite(const QString &path, mode_t mode);
-
-    /**
      * @brief 通常ファイルを安全に読み取りオープンする
      *
-     * 親ディレクトリをO_NOFOLLOWで開いた後、leafを openat() で開き、fstat() でregular fileであることを再確認する
+     * 親ディレクトリをO_NOFOLLOWで開いた後、fstatat()でleafがregular fileであることを確認してから
+     * O_NONBLOCK | O_NOCTTYでopenat()し、fstat() でregular fileであることを再確認する
+     * FIFOやデバイスは開かないため、呼び出し側が永久にブロックすることはない
      *
      * @return 成功時: file descriptor、失敗時: -1
      */
     int safeOpenRegularFileRead(const QString &path);
-
-    /**
-     * @brief シンボリックリンクを辿らずにパスを再帰削除する
-     *
-     * fstatat(..., AT_SYMLINK_NOFOLLOW) / unlinkat() を使い、tree walk中にリンク先へ逸脱しない
-     */
-    bool safeRemoveAll(const QString &path);
-
-    /**
-     * @brief 親dirfdを固定した renameat() でパスを移動/改名する
-     *
-     * source / destination の親ディレクトリをO_NOFOLLOWで開いた上で renameat() を実行する
-     * 中間親ディレクトリのsymlink置換を避けるために使う
-     */
-    bool safeRenamePathNoFollow(const QString &sourcePath, const QString &destinationPath);
-
-    /**
-     * @brief 親dirfdを固定した readlinkat() でsymlink targetを取得する
-     *
-     * @return 成功時: true (targetOutにsymlink targetの生バイト列を格納する)
-     */
-    bool safeReadLinkNoFollow(const QString &path, QByteArray *targetOut);
-
-    /**
-     * @brief 親dirfdを固定した symlinkat() でsymlinkを作成する
-     */
-    bool safeCreateSymlinkNoFollow(const QByteArray &target, const QString &path);
-
-    /**
-     * @brief 親dirfdを固定した AT_SYMLINK_NOFOLLOW 操作でsymlinkメタデータを更新する
-     *
-     * owner/group更新とタイムスタンプ更新の両方を試み、個別結果を返す
-     */
-    bool safeSetSymlinkMetadataNoFollow(const QString &path,
-                                        uid_t owner,
-                                        gid_t group,
-                                        const struct timespec times[2],
-                                        bool *ownerUpdated,
-                                        bool *timesUpdated);
 
     /**
      * @brief read-onlyなメタデータ取得用のlstat()ラッパー
@@ -144,8 +99,8 @@ namespace qsnapper::security {
      * @brief 指定dirfd相対で通常ファイルを安全に読み取りオープンする
      *
      * 親成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) でin-root解決し
-     * (カーネル5.6未満は同等のフォールバックを使用)、leafを openat(..., O_NOFOLLOW) で開き、
-     * fstat()でregular fileであることを再確認する
+     * (カーネル5.6未満は同等のフォールバックを使用)、leafがregular fileであることをfstatat()で確認してから
+     * openat(..., O_NOFOLLOW | O_NONBLOCK | O_NOCTTY) で開き、fstat()でregular fileであることを再確認する
      * 中間成分が絶対symlinkでもdirfdの外へ解決されることはなく、snapshot内の同一位置へ収まる
      * leaf自体はsymlink非追従のため、leafがsymlinkならELOOPで拒否される
      * 相対パス検証は、safeLstatAtと共通
@@ -193,6 +148,17 @@ namespace qsnapper::security {
         int openParentDirectoryInRootForTesting(int dirFd, const QString &relativePath,
                                                 QByteArray *leafNameOut,
                                                 bool forceNoOpenat2);
+
+        /**
+         * @brief replaceRegularFileAt / replaceSymlinkAtが一時objectをrenameする直前に呼ぶフックを設定する
+         *
+         * 一時名や親ディレクトリの差し替え (TOCTOU) を決定的に再現するためのテスト専用入口
+         * 空のstd::functionを渡すと解除する
+         *
+         * @param hook 親dirfdと一時leaf名を受け取るフック
+         */
+        void setBeforeReplaceRenameHookForTesting(
+                std::function<void(int parentFd, const QByteArray &temporaryName)> hook);
     }
 
     /**
@@ -301,6 +267,8 @@ namespace qsnapper::security {
      *
      * componentwiseなO_NOFOLLOW走査で親まで辿り、leaf配下をfstatat(AT_SYMLINK_NOFOLLOW) / unlinkat()で削除する
      * 既に存在しない場合は成功扱いとする (safeRemoveAllと同じ契約)
+     * mount境界 (別mountのroot、または親と異なるst_dev。btrfsのネストしたsubvolumeを含む) を検出した時点で降下を止め、errno=EXDEVで失敗する
+     * 境界の内側は削除しない
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 削除対象の絶対パス (rootPath配下であること)
@@ -341,6 +309,98 @@ namespace qsnapper::security {
                                                    uid_t owner, gid_t group,
                                                    const struct timespec times[2],
                                                    bool *ownerUpdated, bool *timesUpdated);
+
+    /**
+     * @brief dirFdを基点に、相対パス上の既存ディレクトリを読み取り用に開く
+     *
+     * 中間成分の解決はsafeOpenRegularFileReadAtと同じ (dirFdの外へ解決しない)
+     * leafはO_NOFOLLOW | O_DIRECTORYで開くため、symlinkや非ディレクトリは拒否する
+     *
+     * @param dirFd 基点ディレクトリfd (pin済みのsnapshot dirfdなど)
+     * @param relativePath dirFdからの相対パス
+     * @return 成功時: ディレクトリfd (呼び出し側でclose)、失敗時: -1 (errno設定)
+     */
+    int safeOpenDirectoryReadAt(int dirFd, const QString &relativePath);
+
+    /**
+     * @brief rootPath配下の宛先について、親ディレクトリを1回だけ解決して開く
+     *
+     * 一時objectの作成からrenameat()まで同じ親dirfdを使い続けるための入口
+     * 解決方法は他の*BeneathRoot helperと同じ (componentwiseなO_NOFOLLOW走査、中間ディレクトリは作成しない)
+     *
+     * @param rootPath 基点ルートディレクトリ
+     * @param destinationPath 宛先の絶対パス (rootPath配下であること)
+     * @param leafNameOut 最終成分名の返却先
+     * @return 成功時: 親ディレクトリfd (呼び出し側でclose)、失敗時: -1 (errno設定)
+     */
+    int openDestinationParentBeneathRoot(const QString &rootPath, const QString &destinationPath,
+                                         QByteArray *leafNameOut);
+
+    /**
+     * @brief applyRestoredMetadataの結果
+     *
+     * 必須metadata (所有者、mode、POSIX ACL、file capability) と、best-effortのxattrを区別して返す
+     */
+    struct RestoredMetadataResult {
+        bool mandatoryFailed = false;   // 必須metadataのいずれかを適用できなかった
+        int mandatoryErrno = 0;         // 最初に失敗した必須metadataのerrno
+        int optionalFailures = 0;       // コピーできなかったbest-effortのxattrの件数
+    };
+
+    /**
+     * @brief 復元元のmetadataを、fd経由で復元先へ適用する
+     *
+     * 適用順序は次のとおり (名前の再解決は行わない):
+     * 1. fchown() : 所有者変更はS_ISUID / S_ISGIDとsecurity.capabilityを落とすため、最初に行う
+     * 2. fchmod() : S_ISUID / S_ISGIDを含むmodeを設定する
+     * 3. system.posix_acl_access (ディレクトリはsystem.posix_acl_defaultも) :
+     *    復元元にあれば設定し、無ければ復元先から削除する (親のdefault ACLから継承したentryを残さない)
+     * 4. その他のxattr (security.selinux、user.*など) : best-effortでコピーし、失敗件数のみを返す
+     * 5. security.capability (通常ファイルのみ) : 所有者とmodeの変更後に設定する
+     *
+     * @param sourceFd 復元元のfd
+     * @param destinationFd 復元先のfd
+     * @param isDirectory ディレクトリとして扱う場合true (default ACLを同期し、capabilityは扱わない)
+     * @return 適用結果
+     */
+    RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory);
+
+    /**
+     * @brief 親dirfdを保持したまま、通常ファイルを一時名へ書き出して差し替える
+     *
+     * 親dirfd上にO_CREAT | O_EXCL | O_NOFOLLOWで一時ファイル (mode 0600) を作成し、data → metadata → 時刻をfd経由で適用してから、同じ親dirfd同士でrenameat()する
+     * rename直前に一時名が自分の作成したinodeを指すこと、rename直後に宛先が同じinodeであることを確認し、一致しなければ失敗する (errno=ESTALE)
+     * 失敗時は、一時名が自分のinodeを指している場合に限り削除する
+     *
+     * @param destinationParentFd openDestinationParentBeneathRootで開いた親dirfd
+     * @param leafName 宛先の最終成分名
+     * @param sourceFd 復元元の通常ファイルfd
+     * @param tryReflink FICLONEを先に試す場合true
+     * @param mustPreserveMetadata 必須metadataや時刻を適用できない場合に失敗させる場合true
+     * @param metadataOut metadataの適用結果の返却先 (省略可)
+     * @return 差し替えに成功した場合true (失敗時はerrno設定)
+     */
+    bool replaceRegularFileAt(int destinationParentFd, const QByteArray &leafName, int sourceFd,
+                              bool tryReflink, bool mustPreserveMetadata,
+                              RestoredMetadataResult *metadataOut = nullptr);
+
+    /**
+     * @brief 親dirfdを保持したまま、symlinkを一時名で作成して差し替える
+     *
+     * 作成した一時symlinkをO_PATH | O_NOFOLLOWで開き、自分が作成したもの (symlink、所有者がeuid、targetが一致) であることを確認してから、
+     * 所有者と時刻をAT_EMPTY_PATHでfd経由に設定する
+     * renameat()の前後の検証と失敗時の後始末はreplaceRegularFileAtと同じ
+     *
+     * @param destinationParentFd openDestinationParentBeneathRootで開いた親dirfd
+     * @param leafName 宛先の最終成分名
+     * @param linkTarget 作成するsymlinkのtarget
+     * @param sourceStat 復元元symlinkのstat (所有者と時刻に使う)
+     * @param metadataApplied 所有者と時刻を両方適用できたかの返却先 (省略可)
+     * @return 差し替えに成功した場合true (失敗時はerrno設定)
+     */
+    bool replaceSymlinkAt(int destinationParentFd, const QByteArray &leafName,
+                          const QByteArray &linkTarget, const struct stat &sourceStat,
+                          bool *metadataApplied = nullptr);
 } // namespace qsnapper::security
 
 #endif // QSNAPPER_FILESYSTEMHELPERS_H

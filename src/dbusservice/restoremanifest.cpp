@@ -249,7 +249,8 @@ void RestoreManifestRegistry::setClock(std::function<qint64()> clock)
 
 void RestoreManifestRegistry::setCapacityOverridesForTesting(
     int maxEntriesPerManifest, qint64 maxPathBytesPerManifest,
-    qint64 maxEntriesGlobal, qint64 maxPathBytesGlobal)
+    qint64 maxEntriesGlobal, qint64 maxPathBytesGlobal,
+    qint64 maxEntriesPerUid, qint64 maxPathBytesPerUid)
 {
     m_maxEntriesPerManifest = std::clamp(maxEntriesPerManifest, 1,
                                          kMaxEntriesPerManifest);
@@ -260,16 +261,22 @@ void RestoreManifestRegistry::setCapacityOverridesForTesting(
                                     kMaxEntriesGlobal);
     m_maxPathBytesGlobal = std::clamp(maxPathBytesGlobal, qint64(0),
                                       kMaxPathBytesGlobal);
+    m_maxEntriesPerUid = std::clamp(maxEntriesPerUid, qint64(1),
+                                    kMaxEntriesPerUid);
+    m_maxPathBytesPerUid = std::clamp(maxPathBytesPerUid, qint64(0),
+                                      kMaxPathBytesPerUid);
 }
 
 QString RestoreManifestRegistry::createStaging(const QString &owner,
+                                               uint ownerUid,
                                                const QString &configName,
                                                int snapshotNumber,
                                                int counterpartSnapshotNumber,
                                                RestoreMode mode,
                                                ManifestError *err)
 {
-    if (countForOwner(owner) >= kMaxManifestsPerOwner) {
+    if (countForOwner(owner) >= kMaxManifestsPerOwner
+            || countForUid(ownerUid) >= kMaxManifestsPerUid) {
         setError(err, ManifestError::CapacityExceeded);
         return {};
     }
@@ -289,6 +296,7 @@ QString RestoreManifestRegistry::createStaging(const QString &owner,
     record.manifest = std::make_unique<RestoreManifest>(
         owner, configName, snapshotNumber, counterpartSnapshotNumber, mode,
         id, nowMs, kDefaultTtlMs);
+    record.ownerUid = ownerUid;
     m_manifests.emplace(id, std::move(record));
     setError(err, ManifestError::None);
     return id;
@@ -333,6 +341,17 @@ bool RestoreManifestRegistry::stageEntries(const QString &id,
             return false;
         }
         additionalPathBytes += pathBytes;
+    }
+
+    // UID単位の予算
+    // 同じユーザが複数のD-Bus接続 (unique nameごとに別owner) から計画を作っても、合算してここで縛る
+    qint64 uidEntries = 0;
+    qint64 uidPathBytes = 0;
+    usageForUid(record.ownerUid, &uidEntries, &uidPathBytes);
+    if (uidEntries + paths.size() > m_maxEntriesPerUid
+            || uidPathBytes + additionalPathBytes > m_maxPathBytesPerUid) {
+        setError(err, ManifestError::CapacityExceeded);
+        return false;
     }
 
     // グローバル予算
@@ -508,6 +527,32 @@ int RestoreManifestRegistry::countForOwner(const QString &owner) const
         }
     }
     return result;
+}
+
+int RestoreManifestRegistry::countForUid(uint ownerUid) const
+{
+    int result = 0;
+    for (const auto &item : m_manifests) {
+        if (item.second.ownerUid == ownerUid) {
+            ++result;
+        }
+    }
+    return result;
+}
+
+void RestoreManifestRegistry::usageForUid(uint ownerUid, qint64 *entriesOut,
+                                          qint64 *pathBytesOut) const
+{
+    qint64 entries = 0;
+    qint64 pathBytes = 0;
+    for (const auto &item : m_manifests) {
+        if (item.second.ownerUid == ownerUid) {
+            entries += item.second.manifest->totalEntries();
+            pathBytes += item.second.pathBytes;
+        }
+    }
+    *entriesOut = entries;
+    *pathBytesOut = pathBytes;
 }
 
 qint64 RestoreManifestRegistry::globalPathBytes() const

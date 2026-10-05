@@ -222,11 +222,18 @@ The interface provides the following methods:
 *GetFileDiffBetween*(_configName_, _number1_, _number2_, _filePath_)
 	Returns the unified diff for a file between two snapshots.
 
-*RestoreFiles*(_configName_, _snapshotNumber_, _filePaths_, _changeTypes_)
-	Restores files using the YaST-compatible copy method.
+*BeginRestorePlan*(_configName_, _snapshotNumber_, _counterpartSnapshotNumber_, _restoreMode_)
+	Starts a restore plan bound to the caller. _restoreMode_ is "yast" or
+	"direct" (Direct Copy with Btrfs reflink support).
 
-*RestoreFilesDirect*(_configName_, _snapshotNumber_, _filePaths_, _changeTypes_)
-	Restores files using the Direct Copy method with Btrfs reflink support.
+*StageRestoreEntries*(_manifestId_, _filePaths_, _changeTypes_)
+	Adds a bounded chunk of config-relative paths to a restore plan.
+
+*CommitRestorePlan*(_manifestId_)
+	Freezes the plan, authorizes it once and starts the restore.
+
+*ContinueRestorePlan*(_manifestId_), *GetRestorePlanStatus*(_manifestId_), *CancelRestorePlan*(_manifestId_)
+	Keep alive, query and cancel a restore plan.
 
 *IsConfigured*()
 	Returns whether at least one Snapper configuration exists.
@@ -237,9 +244,9 @@ The interface provides the following methods:
 *SetupQuota*(_configName_)
 	Enables Snapper quota management for the configuration.
 
-The helper also emits the *restoreProgress*(_current_, _total_, _filePath_)
-signal during file restoration, which the GUI displays in the real-time
-progress log.
+The helper also emits the *restorePlanProgress*(_manifestId_, _current_, _total_, _filePath_)
+and *restorePlanFinished*(_manifestId_, _terminalState_, _message_) signals
+during file restoration, which the GUI displays in the real-time progress log.
 
 # SECURITY
 

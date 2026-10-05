@@ -17,6 +17,7 @@
 
 #include <QCoreApplication>
 #include <QDBusConnection>
+#include <QDBusConnectionInterface>
 #include <QDBusContext>
 #include <QDBusError>
 #include <QDBusMessage>
@@ -223,13 +224,23 @@ public slots:
             return {};
         }
 
+        // snapshotoperations.cpp BeginRestorePlanと同じく、呼び出し元のUIDをバスに問い合わせる
+        const QDBusConnectionInterface *bus = connection().interface();
+        const QDBusReply<uint> uidReply =
+            bus ? bus->serviceUid(owner) : QDBusReply<uint>();
+        if (!uidReply.isValid()) {
+            sendErrorReply(QDBusError::AccessDenied,
+                           QStringLiteral("Restore plan caller is unavailable"));
+            return {};
+        }
+
         purgeExpiredRestorePlansForTest();
 
         qsnapper::restore::ManifestError error =
             qsnapper::restore::ManifestError::None;
         const QString manifestId = m_restoreRegistry.createStaging(
-            owner, *cfg, snapshotNumber, counterpartSnapshotNumber, mode,
-            &error);
+            owner, uidReply.value(), *cfg, snapshotNumber,
+            counterpartSnapshotNumber, mode, &error);
         if (manifestId.isEmpty()) {
             sendManifestError(error);
             return {};

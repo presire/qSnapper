@@ -31,6 +31,8 @@ private slots:
     void userdataCommaInKeySurvivesAsOneField();
     void userdataCommaInValueSurvivesAsOneField();
     void legacyUnquotedMatchesNaiveSplit();
+    void unclosedQuoteIsRejected_data();
+    void unclosedQuoteIsRejected();
     void controlCharactersStillRejected();
     void fullRecordRoundTrip();
     void createdSnapshotNumberIsTakenFromReply();
@@ -161,6 +163,30 @@ void TestCsvRecord::legacyUnquotedMatchesNaiveSplit()
     QCOMPARE(fields, strayQuote.split(','));
 }
 
+/**
+ * @brief 閉じていない引用符を含む入力のデータ
+ */
+void TestCsvRecord::unclosedQuoteIsRejected_data()
+{
+    QTest::addColumn<QString>("record");
+
+    QTest::newRow("only opening quote")    << QStringLiteral("\"");
+    QTest::newRow("single field")          << QStringLiteral("\"abc");
+    QTest::newRow("last field")            << QStringLiteral("a,\"b,c");
+    QTest::newRow("ends with escaped")     << QStringLiteral("\"a\"\"");
+    QTest::newRow("full snapshot record")  << QStringLiteral("42,single,,2024-06-30T12:34:56,0,number,\"install vim, git");
+}
+
+/**
+ * @brief 閉じていない引用符を含む行は、途中で切れた値として受け入れずに空のリストを返すことを確認する
+ */
+void TestCsvRecord::unclosedQuoteIsRejected()
+{
+    QFETCH(QString, record);
+
+    QVERIFY(splitRecord(record).isEmpty());
+}
+
 void TestCsvRecord::controlCharactersStillRejected()
 {
     // quoteは表示正しさのための層であり、制御文字のfail-closed拒否の代替ではない
@@ -247,6 +273,12 @@ void TestCsvRecord::malformedCreateReplyIsRejected()
     QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(header + QStringLiteral("0,single\n")), -1);
     QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
                  header + QStringLiteral("41,single\n42,single\n")), -1);
+
+    // 引用符が閉じていないレコード行・ヘッダ行
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
+                 header + QStringLiteral("42,single,-1,2026-10-05T12:00:00,0,,\"a, b\n")), -1);
+    QCOMPARE(qsnapper::csv::parseCreatedSnapshotNumber(
+                 QStringLiteral("number,\"type\n42,single\n")), -1);
 }
 
 QTEST_MAIN(TestCsvRecord)

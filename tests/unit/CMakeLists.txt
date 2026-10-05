@@ -232,9 +232,47 @@ target_link_libraries(tst_snapshotoperations PRIVATE
 set_target_properties(tst_snapshotoperations PROPERTIES AUTOMOC ON)
 add_test(NAME tst_snapshotoperations COMMAND tst_snapshotoperations)
 
+# --- tst_singleinstanceguard ---
+# GUIクライアントの二重起動防止 (src/singleinstanceguard.cpp) を、一時的なruntimeディレクトリで検証する
+find_package(Qt6 REQUIRED COMPONENTS Network)
+add_executable(tst_singleinstanceguard
+    tst_singleinstanceguard.cpp
+    ${CMAKE_SOURCE_DIR}/src/singleinstanceguard.cpp
+    ${CMAKE_SOURCE_DIR}/include/singleinstanceguard.h
+)
+target_include_directories(tst_singleinstanceguard PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_singleinstanceguard PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Test
+)
+set_target_properties(tst_singleinstanceguard PROPERTIES AUTOMOC ON)
+add_test(NAME tst_singleinstanceguard COMMAND tst_singleinstanceguard)
+
+# --- tst_externalurlopener ---
+# 外部ブラウザで開くURLの検証 (include/externalurlopener.h) を行う
+find_package(Qt6 REQUIRED COMPONENTS Gui DBus)
+add_executable(tst_externalurlopener
+    tst_externalurlopener.cpp
+    ${CMAKE_SOURCE_DIR}/include/externalurlopener.h
+)
+target_include_directories(tst_externalurlopener PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_externalurlopener PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::DBus
+    Qt6::Test
+)
+set_target_properties(tst_externalurlopener PROPERTIES AUTOMOC ON)
+add_test(NAME tst_externalurlopener COMMAND tst_externalurlopener)
+
 # ASan / UBSanを全テストに適用 (Debugビルド時に"-DQSNAPPER_TEST_SANITIZE=ON")
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_fssnapshotstore)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_fssnapshotstore tst_singleinstanceguard tst_externalurlopener)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

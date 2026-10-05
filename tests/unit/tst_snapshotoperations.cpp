@@ -34,7 +34,7 @@ private slots:
     void beginThenCancelDoesNotTouchRootSubvolume();
     void stagedPlanCancelDoesNotTouchRootSubvolume();
 
-    // --- 差分生成の資源上限 (M5) ---
+    // --- 差分生成の資源上限 ---
     void diffStillProducesUnifiedOutputForSmallChanges();
     void diffOmitsBinaryFiles();
     void diffOmitsTooLargeFiles();
@@ -43,10 +43,15 @@ private slots:
     void diffOmitsTooManyChanges();
     void diffWithDefaultLimitsReturnsQuicklyOnPathologicalInput();
 
-    // --- 書き込み可能な復元元の拒否 (M8) ---
+    // --- 書き込み可能な復元元の拒否 ---
     void writableDirectoryIsNotReadOnlyRestoreSource();
     void btrfsSubvolumeReadOnlyFlagIsRequired();
     void readOnlyMountIsAcceptedForNonBtrfs();
+
+    // --- 認可待ちの上限 ---
+    void pendingAuthorizationBudgetLimitsEachUid();
+    void pendingAuthorizationBudgetKeepsGlobalLimit();
+    void pendingAuthorizationBudgetReleasesSlots();
 
 private:
     /**
@@ -128,6 +133,16 @@ void TestSnapshotOperations::beginThenCancelDoesNotTouchRootSubvolume()
     QCOMPARE(finishedSpy.at(0).at(0).toString(), manifestId);
     QCOMPARE(m_readOnlyProbeCalls, 0);
     QCOMPARE(m_readWriteRestoreCalls, 0);
+
+    // system bus全体へ届く終了通知には、終端状態ごとの固定文言だけを載せる
+    QCOMPARE(finishedSpy.at(0).at(1).toString(), QStringLiteral("cancelled"));
+    QCOMPARE(finishedSpy.at(0).at(2).toString(), QStringLiteral("Restore cancelled"));
+
+    // 終了直後も、ownerはGetRestorePlanStatusで終端状態を取得できる
+    const QStringList status = operations.GetRestorePlanStatus(manifestId).split(QLatin1Char(','));
+    QVERIFY(status.size() >= 2);
+    QCOMPARE(status.at(0), manifestId);
+    QCOMPARE(status.at(1), QStringLiteral("cancelled"));
 }
 
 void TestSnapshotOperations::stagedPlanCancelDoesNotTouchRootSubvolume()
@@ -300,7 +315,7 @@ void TestSnapshotOperations::diffWithDefaultLimitsReturnsQuicklyOnPathologicalIn
 }
 
 // ============================================================================
-// 書き込み可能な復元元の拒否 (M8)
+// 書き込み可能な復元元の拒否
 // ============================================================================
 
 namespace {
@@ -424,6 +439,75 @@ void TestSnapshotOperations::readOnlyMountIsAcceptedForNonBtrfs()
         QSKIP("Unprivileged user and mount namespaces are unavailable");
     }
     QCOMPARE(WEXITSTATUS(status), 0);
+}
+
+// 認可待ちの上限
+
+/**
+ * @brief 1つのUIDが上限まで積んでも、別のUIDは枠を確保できることを確認する
+ */
+void TestSnapshotOperations::pendingAuthorizationBudgetLimitsEachUid()
+{
+    qsnapper::security::PendingAuthorizationBudget budget(4, 16);
+
+    for (int i = 0; i < 4; ++i) {
+        QVERIFY(budget.tryAcquire(1000));
+    }
+    QVERIFY(!budget.tryAcquire(1000));
+    QCOMPARE(budget.countFor(1000), 4);
+
+    QVERIFY(budget.tryAcquire(1001));
+    QCOMPARE(budget.countFor(1001), 1);
+    QCOMPARE(budget.total(), 5);
+}
+
+/**
+ * @brief UIDごとの枠に余裕があっても、全体の上限を超えては確保できないことを確認する
+ */
+void TestSnapshotOperations::pendingAuthorizationBudgetKeepsGlobalLimit()
+{
+    qsnapper::security::PendingAuthorizationBudget budget(4, 16);
+
+    for (uint uid = 1000; uid < 1004; ++uid) {
+        for (int i = 0; i < 4; ++i) {
+            QVERIFY(budget.tryAcquire(uid));
+        }
+    }
+    QCOMPARE(budget.total(), 16);
+    QVERIFY(!budget.tryAcquire(2000));
+    QCOMPARE(budget.countFor(2000), 0);
+    QCOMPARE(budget.total(), 16);
+}
+
+/**
+ * @brief 返却した枠が同じUIDと全体の両方へ戻り、未確保のUIDの返却は件数を変えないことを確認する
+ */
+void TestSnapshotOperations::pendingAuthorizationBudgetReleasesSlots()
+{
+    qsnapper::security::PendingAuthorizationBudget budget(2, 3);
+
+    QVERIFY(budget.tryAcquire(1000));
+    QVERIFY(budget.tryAcquire(1000));
+    QVERIFY(budget.tryAcquire(1001));
+    QVERIFY(!budget.tryAcquire(1000));
+    QVERIFY(!budget.tryAcquire(1002));
+
+    // 確保していないUIDの返却では、他のUIDの枠も全体の件数も変わらない
+    budget.release(1002);
+    QCOMPARE(budget.total(), 3);
+    QCOMPARE(budget.countFor(1000), 2);
+
+    budget.release(1000);
+    QCOMPARE(budget.countFor(1000), 1);
+    QCOMPARE(budget.total(), 2);
+    QVERIFY(budget.tryAcquire(1002));
+
+    budget.release(1000);
+    budget.release(1001);
+    budget.release(1002);
+    QCOMPARE(budget.total(), 0);
+    QCOMPARE(budget.countFor(1000), 0);
+    QVERIFY(budget.tryAcquire(1000));
 }
 
 QTEST_GUILESS_MAIN(TestSnapshotOperations)

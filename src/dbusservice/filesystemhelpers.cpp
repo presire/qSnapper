@@ -1,8 +1,11 @@
 #include <QByteArray>
+#include <QCryptographicHash>
+#include <QDebug>
 #include <QStringList>
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/ioctl.h>
@@ -14,6 +17,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <algorithm>
+#include <vector>
 #include "filesystemhelpers.h"
 
 namespace qsnapper::security {
@@ -1247,6 +1252,171 @@ namespace qsnapper::security {
         return true;
     }
 
+    namespace {
+        /**
+         * @brief 欠けている親ディレクトリを1階層だけ作成し、snapshot側の同じディレクトリのmetadataを適用する
+         *
+         * snapshot側の状態を先に確定させ、判定できない場合は何も作成しない
+         * 作成直後は0700・作成者所有とし、開き直したinodeの所有者とpermissionを確認してからmetadataを適用する
+         * 親ディレクトリが他ユーザーに差し替えられ得る場合はmetadataを適用せず、他ユーザーに書き込みを与えない0711で作成する
+         *
+         * @param dirFd 作成先の親ディレクトリfd
+         * @param name 作成する成分名
+         * @param sourceDirFd pin済みのsnapshot dirfd
+         * @param sourceRelativePath snapshot dirfdからの相対パス (作成する成分まで)
+         * @param mustPreserveMetadata 必須metadataを適用できない場合に失敗させる場合true (差し替え可能な親では適用せず0711で作成する)
+         * @return 成功時: 作成したディレクトリのfd (呼び出し側でclose)、失敗時: -1 (errno設定)
+         */
+        int createMissingParentFromSourceAt(int dirFd, const QByteArray &name, int sourceDirFd,
+                                            const QString &sourceRelativePath,
+                                            bool mustPreserveMetadata)
+        {
+            // snapshot側に同じディレクトリが無い場合 (存在しない・ディレクトリ以外) だけを「無し」と判定する
+            // それ以外のエラーはsnapshot側の状態を判定できないため、作成せずに失敗する
+            const UniqueFd sourceFd(safeOpenDirectoryReadAt(sourceDirFd, sourceRelativePath));
+            if (!sourceFd.isValid() && errno != ENOENT && errno != ENOTDIR && errno != ELOOP) {
+                return -1;
+            }
+
+            // 他ユーザーがエントリを差し替え得る親ディレクトリでは、作成したinodeへのmetadata適用を控える
+            // (差し替えられた別inodeへ所有者やmodeを適用してしまうため)
+            struct stat parentStat;
+            if (::fstat(dirFd, &parentStat) < 0) {
+                return -1;
+            }
+            const bool metadataSafe = parentDirectoryIsSafeForMetadata(parentStat);
+            const bool applySnapshotMetadata =
+                    sourceFd.isValid() && (!mustPreserveMetadata || metadataSafe);
+
+            // metadataを適用できない場合でも、復元先の子孫へ辿れるよう他ユーザーに書き込みを与えない0711で作成する
+            // (0700のままだと復元した内容へ辿れなくなる)
+            const bool needsTraversableFallback =
+                    sourceFd.isValid() && mustPreserveMetadata && !metadataSafe;
+            const mode_t creationMode = needsTraversableFallback ? 0711 : 0700;
+
+            if (::mkdirat(dirFd, name.constData(), creationMode) < 0) {
+                return -1;
+            }
+
+            UniqueFd createdFd(::openat(dirFd, name.constData(),
+                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            if (!createdFd.isValid()) {
+                return -1;
+            }
+
+            // mkdirat()とopenat()の間に差し替えられた場合、作成者所有のディレクトリにはならないため、
+            // 所有者とpermissionが想定と異なる場合は失敗する (差し替えの検出)
+            struct stat createdStat;
+            if (::fstat(createdFd.get(), &createdStat) < 0) {
+                return -1;
+            }
+            if (!S_ISDIR(createdStat.st_mode) || createdStat.st_uid != ::geteuid()
+                    || (createdStat.st_mode & 0022) != 0) {
+                errno = EEXIST;
+                return -1;
+            }
+
+            if (applySnapshotMetadata) {
+                const RestoredMetadataResult metadata =
+                        applyRestoredMetadata(sourceFd.get(), createdFd.get(), true);
+                if (metadata.mandatoryFailed && mustPreserveMetadata) {
+                    // 失敗したinodeを片付ける: 自分が作成したinodeのままであることを確認してから削除する
+                    const int failureErrno = metadata.mandatoryErrno;
+                    struct stat currentStat;
+                    if (::fstatat(dirFd, name.constData(), &currentStat, AT_SYMLINK_NOFOLLOW) == 0
+                            && currentStat.st_dev == createdStat.st_dev
+                            && currentStat.st_ino == createdStat.st_ino
+                            && S_ISDIR(currentStat.st_mode)) {
+                        ::unlinkat(dirFd, name.constData(), AT_REMOVEDIR);
+                    }
+                    errno = failureErrno;
+                    return -1;
+                }
+            }
+            else if (needsTraversableFallback) {
+                qWarning() << "Staged restore: parent directory is writable by other users;"
+                           << "snapshot metadata was not applied";
+            }
+
+            return ::dup(createdFd.get());
+        }
+    } // namespace
+
+    /**
+     * @brief 作成したディレクトリへsnapshotのmetadataを安全に適用できる親ディレクトリかを判定する
+     *
+     * sticky bitが無い状態でgroup/otherへ書き込みが許可されている場合と、root以外が所有する書き込み可能な
+     * ディレクトリでは、他ユーザーが作成直後のエントリを差し替え得るため、安全と判定しない
+     * sticky bit付きでrootが所有するディレクトリでは、root所有のエントリを他ユーザーは差し替えられない
+     *
+     * @param parentStat 親ディレクトリのstat
+     * @return 安全に適用できる場合: true
+     */
+    bool parentDirectoryIsSafeForMetadata(const struct stat &parentStat)
+    {
+        const mode_t mode = parentStat.st_mode;
+        const bool stickyProtected = (mode & S_ISVTX) != 0;
+
+        // sticky bitが無い状態でgroup/other書き込みがあれば、他ユーザーがエントリを差し替えられる
+        if (!stickyProtected && (mode & (S_IWGRP | S_IWOTH)) != 0) {
+            return false;
+        }
+
+        // root以外が所有し書き込み可能なディレクトリは、所有者が常にエントリを差し替えられる
+        if (parentStat.st_uid != 0 && (mode & S_IWUSR) != 0) {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool safeCreateParentDirectoriesFromSourceBeneathRoot(const QString &rootPath,
+                                                          const QString &parentPath,
+                                                          int sourceDirFd,
+                                                          bool mustPreserveMetadata)
+    {
+        if (sourceDirFd < 0) {
+            errno = EINVAL;
+            return false;
+        }
+
+        QStringList components;
+        if (!splitDestinationComponents(rootPath, parentPath, &components)) {
+            return false;
+        }
+
+        int dirFd = openRootPathDirectory(rootPath);
+        if (dirFd < 0) {
+            return false;
+        }
+
+        for (int i = 0; i < components.size(); ++i) {
+            const QByteArray name = components.at(i).toUtf8();
+
+            // 既存の成分は辿るだけで、所有者やmodeを変更しない
+            int nextFd = ::openat(dirFd, name.constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (nextFd < 0 && errno == ENOENT) {
+                const QString sourceRelativePath =
+                        components.mid(0, i + 1).join(QLatin1Char('/'));
+                nextFd = createMissingParentFromSourceAt(dirFd, name, sourceDirFd,
+                                                         sourceRelativePath,
+                                                         mustPreserveMetadata);
+            }
+
+            const int savedErrno = errno;
+            ::close(dirFd);
+            if (nextFd < 0) {
+                errno = savedErrno;
+                return false;
+            }
+            dirFd = nextFd;
+        }
+
+        ::close(dirFd);
+        return true;
+    }
+
     /**
      * @brief rootPath配下の通常ファイルを安全に新規/上書きオープンする
      *
@@ -1337,6 +1507,9 @@ namespace qsnapper::security {
      * source / destinationはそれぞれ独立してrootから再解決されるため、
      * 片方の親だけが差し替えられた場合でも、変異は必ずroot配下に収まるか失敗する
      *
+     * 退避先や戻し先に、解決からrenameまでの間に作られたエントリを上書きしないよう、RENAME_NOREPLACEを指定する
+     * 未対応 (EINVAL / ENOSYS) の場合にrenameat()へ切り替えると上書きの余地が戻るため、そのまま失敗として返す
+     *
      * @param rootPath 基点ルートディレクトリ
      * @param sourcePath 移動元の絶対パス (rootPath配下であること)
      * @param destinationPath 移動先の絶対パス (rootPath配下であること)
@@ -1369,8 +1542,9 @@ namespace qsnapper::security {
             return false;
         }
 
-        return ::renameat(sourceParentFd.get(), sourceLeaf.constData(),
-                          destinationParentFd.get(), destinationLeaf.constData()) == 0;
+        return ::renameat2(sourceParentFd.get(), sourceLeaf.constData(),
+                           destinationParentFd.get(), destinationLeaf.constData(),
+                           RENAME_NOREPLACE) == 0;
     }
 
     /**
@@ -1979,5 +2153,91 @@ namespace qsnapper::security {
         }
 
         return renameVerifiedAt(destinationParentFd, temporaryName, leafName, created);
+    }
+
+    QByteArray snapshotListFingerprint(const QString &snapshotsDirPath)
+    {
+        const int dirFd = ::open(snapshotsDirPath.toUtf8().constData(),
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dirFd < 0) {
+            return {};
+        }
+
+        DIR *dir = ::fdopendir(dirFd);
+        if (!dir) {
+            ::close(dirFd);
+            return {};
+        }
+
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        const auto addValue = [&hash](qint64 value) {
+            hash.addData(QByteArrayView(reinterpret_cast<const char *>(&value), sizeof(value)));
+        };
+        const auto addStat = [&addValue](const struct stat &st) {
+            addValue(static_cast<qint64>(st.st_dev));
+            addValue(static_cast<qint64>(st.st_ino));
+            addValue(static_cast<qint64>(st.st_size));
+            addValue(static_cast<qint64>(st.st_mtim.tv_sec));
+            addValue(static_cast<qint64>(st.st_mtim.tv_nsec));
+            addValue(static_cast<qint64>(st.st_ctim.tv_sec));
+            addValue(static_cast<qint64>(st.st_ctim.tv_nsec));
+        };
+
+        struct stat dirStat;
+        if (::fstat(dirFd, &dirStat) < 0) {
+            ::closedir(dir);
+            return {};
+        }
+        addStat(dirStat);
+
+        // libsnapperは数字だけの名前のエントリをスナップショットとして扱う
+        // 先頭に0が付いた名前 ("01"など) も含めるため、数値に変換せず名前のまま比較する
+        std::vector<QByteArray> names;
+        errno = 0;
+        while (const struct dirent *entry = ::readdir(dir)) {
+            const QByteArray name(entry->d_name);
+            const bool allDigits = !name.isEmpty()
+                    && std::all_of(name.cbegin(), name.cend(),
+                                   [](char c) { return c >= '0' && c <= '9'; });
+            if (allDigits) {
+                names.push_back(name);
+            }
+            errno = 0;
+        }
+        if (errno != 0) {
+            ::closedir(dir);
+            return {};
+        }
+        std::sort(names.begin(), names.end());
+
+        for (const QByteArray &name : names) {
+            // 名前の境界が曖昧にならないように長さも指紋へ含める
+            addValue(static_cast<qint64>(name.size()));
+            hash.addData(name);
+
+            struct stat entryStat;
+            if (::fstatat(dirFd, name.constData(), &entryStat, AT_SYMLINK_NOFOLLOW) < 0) {
+                ::closedir(dir);
+                return {};
+            }
+            addStat(entryStat);
+
+            // 作成途中でinfo.xmlがまだ無いエントリは、無いことを指紋に含める (後から作られると指紋が変わる)
+            struct stat infoStat;
+            const QByteArray infoPath = name + QByteArrayLiteral("/info.xml");
+            if (::fstatat(dirFd, infoPath.constData(), &infoStat, AT_SYMLINK_NOFOLLOW) == 0) {
+                addStat(infoStat);
+            }
+            else if (errno == ENOENT || errno == ENOTDIR) {
+                addValue(-1);
+            }
+            else {
+                ::closedir(dir);
+                return {};
+            }
+        }
+
+        ::closedir(dir);
+        return hash.result();
     }
 } // namespace qsnapper::security

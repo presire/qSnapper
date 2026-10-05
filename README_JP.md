@@ -384,58 +384,102 @@ make -j$(nproc)
 
 ```
 qSnapper/
-├── CMakeLists.txt             # ビルド設定
-├── src/                       # C++ソースファイル
-│   ├── main.cpp              # アプリケーションエントリポイント
-│   ├── fssnapshot.cpp        # スナップショットデータモデル
-│   ├── fssnapshotstore.cpp   # スナップショットデータストア
-│   ├── snapperservice.cpp    # Snapperサービスインターフェース
-│   ├── snapshotlistmodel.cpp # スナップショットリストモデル
-│   ├── snapshotgroupmodel.cpp # Pre/Postスナップショットグループ化モデル
-│   ├── filechangemodel.cpp   # ファイル変更ツリーモデル
-│   ├── thememanager.cpp      # テーマ管理 (ライト/ダークモード)
-│   └── dbusservice/          # D-Busサービス実装
-│       ├── main.cpp          # D-Busサービスエントリポイント
-│       └── snapshotoperations.cpp  # D-Busメソッド実装
-├── include/                  # ヘッダーファイル
-├── qml/                      # QMLユーザインターフェース
-│   ├── Main.qml             # メインウィンドウ (テーマサポート付き)
-│   ├── pages/               # ページコンポーネント
-│   │   └── SnapshotListPage.qml
-│   └── components/          # 再利用可能なコンポーネント
-│       ├── SnapshotItem.qml
-│       ├── SnapshotDetailDialog.qml
-│       ├── RestorePreviewDialog.qml
-│       ├── SnapshotTableHeader.qml
-│       ├── SnapshotTableRow.qml
-│       ├── AboutqSnapperDialog.qml
-│       └── AboutQtDialog.qml
-├── cmake/                   # CMakeモジュール
-│   └── packaging.cmake      # CPackパッケージング設定
-├── icons/                   # アプリケーションアイコン
-├── dbus/                    # D-Bus設定ファイル
-├── polkit/                  # PolicyKitポリシーファイル
-├── man/                     # manページソース (scdoc)
-│   └── qsnapper.1.scd      # qsnapper(1) manページソース
-├── selinux/                 # SELinuxポリシーモジュール
-│   ├── qsnapper.te          # Type Enforcementルール
-│   ├── qsnapper.if          # インターフェース定義
-│   └── qsnapper.fc.in       # ファイルコンテキスト定義
-├── Licenses/                # サードパーティライセンス
-│   ├── Qt.md
-│   ├── D-Bus.md
-│   ├── PolicyKit.md
-│   ├── Polkit-Qt.md
-│   └── Snapper.md
-└── translations/            # 翻訳ファイル
-    ├── qsnapper_ja.ts       # 日本語翻訳
-    └── qsnapper_de.ts       # ドイツ語翻訳
+├── CMakeLists.txt                                  # トップレベルのビルド設定 (GUI、D-Busサービス、テスト、パッケージング)
+├── qsnapper.desktop.in                             # デスクトップエントリのテンプレート
+├── LICENSE.md                                      # プロジェクトのライセンス
+├── README.md / README_JP.md                        # ドキュメント (英語 / 日本語)
+├── .github/workflows/                              # CIワークフロー
+│   └── release.yml                                 # CI: テスト、RPM/DEBビルド、バージョンタグでのリリース
+├── src/                                            # C++ソースファイル
+│   ├── main.cpp                                    # GUIアプリケーションのエントリポイント
+│   ├── snapperservice.cpp                          # D-Busサービスを呼び出すクライアント側のインターフェース
+│   ├── fssnapshot.cpp                              # スナップショットのデータモデル (1件分)
+│   ├── fssnapshotstore.cpp                         # Preスナップショット番号のユーザ単位の永続化
+│   ├── snapshotlistmodel.cpp                       # スナップショットのリストモデル
+│   ├── snapshotgroupmodel.cpp                      # Pre/Postスナップショットのグループ化モデル
+│   ├── filechangemodel.cpp                         # ファイル変更のツリーモデル (比較、差分、復元計画)
+│   ├── thememanager.cpp                            # テーマ管理 (ライト/ダークモード)
+│   ├── windowstatemanager.cpp                      # ウィンドウサイズと最大化状態の永続化
+│   ├── singleinstanceguard.cpp                     # 多重起動の防止 (ロックファイルとローカルソケット)
+│   └── dbusservice/                                # 特権D-Busサービス (rootで動作)
+│       ├── main.cpp                                # サービスのエントリポイント (オブジェクト登録、ログ、アイドル終了)
+│       ├── snapshotoperations.{cpp,h}              # D-Busメソッドの実装 (スナップショット操作、復元計画、polkit認可)
+│       ├── inputvalidator.{cpp,h}                  # D-Bus経由の信頼できない入力の検証
+│       ├── filesystemhelpers.{cpp,h}               # ルート配下での安全なファイル操作 (symlinkを辿らない)
+│       ├── restoremanifest.{cpp,h}                 # 復元計画の管理 (呼び出し元への束縛、上限、保持期間)
+│       ├── restoreplanexecutor.{cpp,h}             # 凍結済み復元計画の分割実行
+│       ├── restorevalidation.{cpp,h}               # 復元先の組み立てと復元エントリの検証
+│       └── comparisoncache.h                       # libsnapperの比較結果の1件キャッシュ
+├── include/                                        # GUIアプリケーションのヘッダーファイル
+│   ├── csvrecord.h                                 # CSVのクォートと解析 (サービスとクライアントで共用)
+│   ├── externalurlopener.h                         # http/httpsリンクをデスクトップポータル経由で開く
+│   ├── filechangemodel.h                           # ファイル変更モデルと復元計画の転送
+│   ├── fssnapshot.h                                # スナップショットのデータモデル
+│   ├── fssnapshotstore.h                           # Preスナップショット番号のストア
+│   ├── singleinstanceguard.h                       # 多重起動の防止
+│   ├── snapperservice.h                            # クライアント側のD-Busインターフェース
+│   ├── snapshotgroupmodel.h                        # Pre/Postのグループ化モデル
+│   ├── snapshotlistmodel.h                         # スナップショットのリストモデル
+│   ├── thememanager.h                              # テーママネージャ
+│   └── windowstatemanager.h                        # ウィンドウ状態の管理
+├── qml/                                            # QMLユーザインターフェース
+│   ├── Main.qml                                    # メインウィンドウ (テーマ対応)
+│   ├── pages/                                      # ページコンポーネント
+│   │   └── SnapshotListPage.qml                    # スナップショット一覧ページ
+│   └── components/                                 # 再利用可能なコンポーネント
+│       ├── AboutQtDialog.qml                       # Qtについてのダイアログ
+│       ├── AboutqSnapperDialog.qml                 # qSnapperについてのダイアログ
+│       ├── BorderedDialog.qml                      # テーマに追従する枠付きダイアログの基底型
+│       ├── CompareSnapshotsDialog.qml              # 任意の2スナップショット間のファイル差分
+│       ├── RestorePreviewDialog.qml                # 復元のプレビュー、オプション、進捗
+│       ├── SnapshotDetailDialog.qml                # スナップショットの詳細、ファイル復元、ロールバック
+│       ├── SnapshotEditDialog.qml                  # スナップショットのメタデータ編集
+│       ├── SnapshotItem.qml                        # スナップショット一覧の項目デリゲート
+│       ├── SnapshotTableHeader.qml                 # スナップショットテーブルのヘッダ行
+│       └── SnapshotTableRow.qml                    # スナップショットテーブルの行デリゲート
+├── dbus/                                           # D-Bus設定ファイル
+│   ├── com.presire.qsnapper.Operations.conf        # バスポリシー (許可するメソッド)
+│   ├── com.presire.qsnapper.Operations.service.in  # サービス起動定義のテンプレート
+│   └── com.presire.qsnapper.Operations.xml         # インターフェース定義 (introspection XML)
+├── polkit/                                         # PolicyKitポリシー
+│   └── com.presire.qsnapper.policy                 # 認可アクションの定義
+├── systemd/tmpfiles.d/                             # systemd tmpfiles設定
+│   └── qsnapper.conf                               # ログディレクトリ /var/log/qsnapper の作成 (0700)
+├── selinux/                                        # SELinuxポリシーモジュール
+│   ├── qsnapper.te                                 # Type Enforcementルール
+│   ├── qsnapper.if                                 # インターフェース定義
+│   ├── qsnapper.fc.in                              # ファイルコンテキストのテンプレート (CMakeが生成)
+│   ├── qsnapper.fc                                 # 単体のMakefileビルド用ファイルコンテキスト
+│   ├── CMakeLists.txt                              # ポリシーのビルド (CMake)
+│   ├── Makefile                                    # ポリシーのビルド (単体)
+│   ├── ADMIN.md / ADMIN_JP.md                      # 管理者ガイド (英語 / 日本語)
+│   ├── README.md / README_JP.md                    # ポリシーの概要 (英語 / 日本語)
+│   └── qsnapper-architecture.*                     # アーキテクチャ図 (.drawio / .png)
+├── cmake/                                          # CMakeの補助ファイルとパッケージング用スクリプト
+│   ├── packaging.cmake                             # CPackパッケージング設定 (RPM/DEB)
+│   ├── rpm-post-install.sh                         # RPMのインストール後処理 (SELinuxモジュールのロード、ログディレクトリ作成)
+│   └── rpm-pre-uninstall.sh                        # RPMのアンインストール前処理 (SELinuxモジュールの削除)
+├── man/                                            # manページのソース (scdoc)
+│   └── qsnapper.1.scd                              # qsnapper(1) manページ
+├── icons/                                          # アプリケーションとUIのアイコン
+├── translations/                                   # 翻訳ファイル
+│   ├── qsnapper_ja.ts                              # 日本語翻訳
+│   └── qsnapper_de.ts                              # ドイツ語翻訳
+├── tests/                                          # テスト (QSNAPPER_BUILD_TESTS=ONで有効)
+│   ├── unit/                                       # Qt Testの単体テスト (コンポーネントごとにtst_*.cpp)
+│   ├── integration/                                # D-Bus契約の検査と隔離D-Bus環境のテスト
+│   ├── security_poc/                               # 脆弱性のPoCスクリプト (専用VMでのみ実行)
+│   └── TESTREPORT_v1.3.3.md                        # テストレポートのテンプレート
+├── Licenses/                                       # サードパーティのライセンス
+│   ├── Qt.md, D-Bus.md, PolicyKit.md               # ライセンス本文 (Qt、D-Bus、PolicyKit)
+│   └── Polkit-Qt.md, Snapper.md, Btrfs-progs.md    # ライセンス本文 (Polkit-Qt、Snapper、Btrfs-progs)
+└── ScreenShot/                                     # READMEで使用するスクリーンショット
 ```
 
 ## コントリビューション
 
 コントリビューションを歓迎します！  
-イシューやプルリクエストを自由に提出してください。  
+Issueやプルリクエストを自由に提出してください。  
 
 ### ガイドライン
 

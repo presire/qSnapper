@@ -1,6 +1,6 @@
 # qSnapper SELinux Policy Module - 管理者ガイド
 
-このドキュメントは、qSnapperのSELinuxポリシーモジュールを運用・管理するシステム管理者向けの詳細情報を提供します。  
+このドキュメントは、qSnapperのSELinuxポリシーモジュールを運用・管理するシステム管理者向けの詳細情報を提供します。
 
 ## 目次
 
@@ -19,7 +19,7 @@
 
 ### 2プロセスモデル
 
-qSnapperは、権限分離の原則に基づいた2プロセスアーキテクチャを採用しています:  
+qSnapperは、権限分離の原則に基づいた2プロセスアーキテクチャを採用しています:
 
 ![2プロセスモデル](qsnapper-architecture.png)
 
@@ -34,9 +34,9 @@ qSnapperは、権限分離の原則に基づいた2プロセスアーキテク�
 
 ## セキュリティモデル
 
-### 強制アクセス制御(MAC)レイヤー
+### 強制アクセス制御 (MAC) レイヤー
 
-qSnapperのセキュリティは、以下の3層で構成されています:  
+qSnapperのセキュリティは、以下の3層で構成されています:
 
 ```
 Layer 3: SELinux MAC (this policy)
@@ -50,28 +50,32 @@ Layer 1: D-Bus security policy
 
 #### Layer 1: D-Bus Security Policy
 
-ファイル: `/usr/share/dbus-1/system.d/com.presire.qsnapper.Operations.conf`  
+ファイル: `/usr/share/dbus-1/system.d/com.presire.qsnapper.Operations.conf`
 
 - D-Busシステムバスへの接続許可
 - メソッド呼び出し許可の制御
 
 #### Layer 2: PolicyKit Authorization
 
-ファイル: `/usr/share/polkit-1/actions/com.presire.qsnapper.policy`  
+ファイル: `/usr/share/polkit-1/actions/com.presire.qsnapper.policy`
 
-アクションごとの認証要件:  
-- `com.presire.qsnapper.list-snapshots`: 認証不要(allow_active)
-- `com.presire.qsnapper.create-snapshot`: 認証必要
-- `com.presire.qsnapper.delete-snapshot`: 認証必要
-- `com.presire.qsnapper.rollback-snapshot`: 認証必要
-- `com.presire.qsnapper.get-file-changes`: 認証不要
-- `com.presire.qsnapper.restore-files`: 認証必要
+アクションごとの認証要件 (アクティブなセッション):
+- com.presire.qsnapper.list-snapshots: 認証不要 (ListConfigs, ListSnapshots)
+- com.presire.qsnapper.view-diff: 管理者認証 (GetFileChanges*, GetFileDiff*)
+- com.presire.qsnapper.create-snapshot: 管理者認証
+- com.presire.qsnapper.modify-snapshot: 管理者認証
+- com.presire.qsnapper.delete-snapshot: 管理者認証
+- com.presire.qsnapper.rollback-snapshot: 管理者認証 (RollbackSnapshot, CommitRestorePlan)
+- com.presire.qsnapper.configure: 管理者認証 (WriteSnapperConfig, SetupQuota)
+
+認証が必要なアクションは、アクティブなセッションではauth_admin_keep、
+それ以外ではauth_adminです。
 
 #### Layer 3: SELinux MAC (This Policy)
 
 - プロセスごとのドメイン分離
 - ファイル・ディレクトリアクセスの厳格な制御
-- ioctl操作の制限(Btrfs ioctl範囲のみ許可)
+- ioctl操作の制限 (Btrfs ioctl範囲のみ許可)
 
 ### 認証フロー
 
@@ -85,7 +89,7 @@ User action (GUI)
             → Operation execution
 ```
 
-**すべてのレイヤーをパスした場合のみ、操作が実行されます。**  
+**すべてのレイヤーをパスした場合のみ、操作が実行されます。**
 
 ---
 
@@ -93,113 +97,115 @@ User action (GUI)
 
 ### 型宣言
 
-ポリシーモジュール(`qsnapper.te`)で宣言される型:  
+ポリシーモジュール (`qsnapper.te`) で宣言される型:
 
 | 型名 | 属性 | 用途 |
 |---|---|---|
-| `qsnapper_t` | `domain` | GUIアプリケーションプロセスドメイン |
-| `qsnapper_exec_t` | `exec_type`, `file_type` | GUIアプリケーション実行ファイル |
-| `qsnapper_dbus_t` | `domain` | D-Busサービスプロセスドメイン |
-| `qsnapper_dbus_exec_t` | `exec_type`, `file_type` | D-Busサービス実行ファイル |
-| `qsnapper_tmp_t` | `file_type` | 一時ファイル(`/tmp`内に自動遷移) |
-| `qsnapper_tmpfs_t` | `file_type` | tmpfs共有メモリファイル |
+| qsnapper_t | domain | GUIアプリケーションプロセスドメイン |
+| qsnapper_exec_t | exec_type, file_type | GUIアプリケーション実行ファイル |
+| qsnapper_dbus_t | domain | D-Busサービスプロセスドメイン |
+| qsnapper_dbus_exec_t | exec_type, file_type | D-Busサービス実行ファイル |
+| qsnapper_tmp_t | file_type | 一時ファイル (`/tmp`内に自動遷移) |
+| qsnapper_tmpfs_t | file_type | tmpfs共有メモリファイル |
 
 ### ファイルコンテキスト
 
-ファイルコンテキスト定義(`qsnapper.fc.in`)は、2つの実行ファイルのみにカスタムラベルを付与します:  
+ファイルコンテキスト定義 (`qsnapper.fc.in`) は、
+2つの実行ファイルのみにカスタムラベルを付与します:
 
 ```
 /usr/bin/qsnapper                       -- system_u:object_r:qsnapper_exec_t:s0
 /usr/libexec/qsnapper-dbus-service      -- system_u:object_r:qsnapper_dbus_exec_t:s0
 ```
 
-**重要:**  
-システムディレクトリ(`/etc/snapper`, `/.snapshots`, `/var/lib/snapper`等)には独自のラベルを付与せず、  
-既存のシステムラベル(`etc_t`, `unlabeled_t`, `fs_t`, `var_lib_t`等)をそのまま使用します。  
-これはopenSUSEの既存ファイルコンテキストルールとの競合を回避するための設計判断です。  
+**重要:**
+システムディレクトリ (`/etc/snapper`, `/.snapshots`, `/var/lib/snapper`等) には独自のラベルを付与せず、  
+既存のシステムラベル (etc_t, unlabeled_t, fs_t, var_lib_t等) をそのまま使用します。  
 
-### qsnapper_t ドメイン(GUIアプリケーション)
+これは、openSUSEの既存ファイルコンテキストルールとの競合を回避するための設計判断です。  
+
+### qsnapper_tドメイン (GUIアプリケーション)
 
 #### 許可される操作
 
 1. **プロセス管理**
-   - 自己プロセスへのシグナル送信(`fork`, `signal`, `signull`, `sigkill`, `sigstop`, `sigchld`)
-   - プロセスグループ操作(`setpgid`, `getpgid`)
-   - スケジューラパラメータの取得・設定(`getsched`, `setsched`)
+   - 自己プロセスへのシグナル送信 (fork, signal, signull, sigkill, sigstop, sigchld)
+   - プロセスグループ操作 (setpgid, getpgid)
+   - スケジューラパラメータの取得・設定 (getsched, setsched)
    - FIFO、UNIXストリームソケット、UNIXデータグラムソケット
-   - 共有メモリ(SHM)操作
+   - 共有メモリ (SHM) 操作
    - セマフォ操作
 
 2. **GUI要件**
-   - Qt6 Quick/QML実行環境(`usr_t`経由でQtプラグイン、アイコン、テーマにアクセス)
-   - フォントファイルアクセス(`fonts_t`, `fonts_cache_t`)
-   - ローカライゼーションファイル読み取り(`locale_t`)
-   - GPU描画アクセラレーション(`dri_device_t`へのioctl含む)
-   - tmpfs共有メモリ(`tmpfs_t`でX11/Wayland連携)
-   - デバイスアクセス(`null_device_t`, `zero_device_t`, `random_device_t`, `urandom_device_t`)
+   - Qt6 Quick/QML実行環境 (usr_t経由でQtプラグイン、アイコン、テーマにアクセス)
+   - フォントファイルアクセス (fonts_t, fonts_cache_t)
+   - ローカライゼーションファイル読み取り (locale_t)
+   - GPU描画アクセラレーション (dri_device_tへのioctl含む)
+   - tmpfs共有メモリ (tmpfs_tでX11/Wayland連携)
+   - デバイスアクセス (null_device_t, zero_device_t, random_device_t, urandom_device_t)
 
 3. **D-Bus通信**
-   - システムバス接続(クライアント: `system_dbusd_t`への`send_msg`)
-   - `qsnapper_dbus_t`ドメインとのメッセージ送受信
+   - システムバス接続 (クライアント: system_dbusd_tへのsend_msg)
+   - qsnapper_dbus_tドメインとのメッセージ送受信
 
 4. **ファイルアクセス**
-   - `/etc`以下の設定ファイル読み取り(`etc_t` - `/etc/snapper`含む、読み取り専用)
-   - `/var/lib`以下のSnapperメタデータ読み取り(`var_lib_t` - 読み取り専用)
-   - スナップショットディレクトリブラウズ(`unlabeled_t`, `fs_t` - `/.snapshots`、読み取り専用)
-   - ユーザーホームディレクトリの設定管理(`user_home_t`, `user_home_dir_t` - `~/.config/Presire/`、読み書き)
-   - 一時ファイル作成(`tmp_t`, `qsnapper_tmp_t`)
-   - `/proc`, `/sys`ファイルシステムの読み取り(`proc_t`, `sysfs_t`)
-   - カーネルsysctl値の読み取り(`sysctl_t`, `sysctl_kernel_t`)
-   - 共有ライブラリのロード(`lib_t`, `ld_so_t`, `ld_so_cache_t`, `textrel_shlib_t`)
+   - `/etc`以下の設定ファイル読み取り (etc_t - `/etc/snapper`含む、読み取り専用)
+   - `/var/lib`以下のSnapperメタデータ読み取り (var_lib_t - 読み取り専用)
+   - スナップショットディレクトリブラウズ (unlabeled_t, fs_t - `/.snapshots`、読み取り専用)
+   - ユーザーホームディレクトリの設定管理 (user_home_t, user_home_dir_t - `~/.config/Presire/`、読み書き)
+   - 一時ファイル作成 (tmp_t, qsnapper_tmp_t)
+   - `/proc`, `/sys`ファイルシステムの読み取り (proc_t, sysfs_t)
+   - カーネルsysctl値の読み取り (sysctl_t, sysctl_kernel_t)
+   - 共有ライブラリのロード (lib_t, ld_so_t, ld_so_cache_t, textrel_shlib_t)
 
 5. **その他**
-   - syslogへのログ送信(`devlog_t`, `kernel_t`)
-   - ファイルディスクリプタ継承(`init_t`, `unconfined_t`から)
-   - 端末アクセス(`user_devpts_t`, `user_tty_device_t`)
+   - syslogへのログ送信 (devlog_t, kernel_t)
+   - ファイルディスクリプタ継承 (init_t, unconfined_tから)
+   - 端末アクセス (user_devpts_t, user_tty_device_t)
 
 #### 禁止される操作
 
 - スナップショットディレクトリへの書き込み
 - `/etc/snapper`設定ファイルへの書き込み
 - Btrfs ioctl操作
-- root権限(Linux capabilities)が必要な操作
+- root権限 (Linux capabilities) が必要な操作
 
-### qsnapper_dbus_t ドメイン(D-Busサービス)
+### qsnapper_dbus_tドメイン (D-Busサービス)
 
 #### 許可される操作
 
 1. **Linux Capabilities**
-   - `CAP_SYS_ADMIN`: Btrfsスナップショット操作
-   - `CAP_DAC_OVERRIDE`: 所有権チェックのバイパス
-   - `CAP_DAC_READ_SEARCH`: 読み取り権限チェックのバイパス
-   - `CAP_FOWNER`: ファイル所有権変更
-   - `CAP_CHOWN`: ファイル所有者変更
-   - `CAP_FSETID`: setuid/setgidビット設定
-   - `CAP_SETUID`: UID変更
-   - `CAP_SETGID`: GID変更
-   - `CAP_SYS_RESOURCE`: リソース制限超過(`setrlimit`)
-   - `CAP_SETFCAP`: file capability(`security.capability`)の復元
+   - CAP_SYS_ADMIN: Btrfsスナップショット操作
+   - CAP_DAC_OVERRIDE: 所有権チェックのバイパス
+   - CAP_DAC_READ_SEARCH: 読み取り権限チェックのバイパス
+   - CAP_FOWNER: ファイル所有権変更
+   - CAP_CHOWN: ファイル所有者変更
+   - CAP_FSETID: setuid/setgidビット設定
+   - CAP_SETUID: UID変更
+   - CAP_SETGID: GID変更
+   - CAP_SYS_RESOURCE: リソース制限超過 (setrlimit)
+   - CAP_SETFCAP: file capability (security.capability) の復元
 
 2. **D-Bus通信**
-   - システムバス接続(サービス: `send_msg` + `acquire_svc`でサービス名を登録)
-   - `qsnapper_t`ドメインとのメッセージ送受信
+   - システムバス接続 (サービス: send_msg + acquire_svcでサービス名を登録)
+   - qsnapper_tドメインとのメッセージ送受信
 
 3. **ファイルアクセス**
-   - `/etc`以下の設定ファイル読み書き(`etc_t` - `/etc/snapper`含む)
-   - `/var/lib`以下のSnapperメタデータ読み書き(`var_lib_t` - ディレクトリ作成・削除含む)
-   - スナップショットディレクトリ完全管理(`unlabeled_t`, `fs_t` - `/.snapshots`、作成・削除・マウント含む)
-   - ファイル復元: **ユーザーホームディレクトリのみ**(`user_home_t`, `user_home_dir_t`)
-   - ログファイル管理(`var_log_t` - 作成・書き込み・追記)
-   - ランタイムデータ(`var_run_t`)
-   - 一時ファイル作成(`tmp_t`, `qsnapper_tmp_t`)
-   - 共有ライブラリのロード(`lib_t`, `ld_so_t`, `ld_so_cache_t`, `textrel_shlib_t`)
-   - `/proc`, `/sys`ファイルシステムの読み取り(`proc_t`, `sysfs_t`)
-   - カーネルsysctl値の読み取り(`sysctl_t`, `sysctl_kernel_t`)
-   - ローカライゼーションファイル読み取り(`locale_t`)
-   - ネットワーク設定ファイル読み取り(`net_conf_t` - ホスト名解決)
+   - `/etc`以下の設定ファイル読み書き (etc_t - `/etc/snapper`含む)
+   - `/var/lib`以下のSnapperメタデータ読み書き (var_lib_t - ディレクトリ作成・削除含む)
+   - スナップショットディレクトリ完全管理 (unlabeled_t, fs_t - `/.snapshots`、作成・削除・マウント含む)
+   - ファイル復元: 選択したSnapper設定のサブボリューム内 (「ファイル復元の制限」を参照)
+   - ログファイル管理 (var_log_t - 作成・書き込み・追記)
+   - ランタイムデータ (var_run_t)
+   - 一時ファイル作成 (tmp_t, qsnapper_tmp_t)
+   - 共有ライブラリのロード (lib_t, ld_so_t, ld_so_cache_t, textrel_shlib_t)
+   - `/proc`, `/sys`ファイルシステムの読み取り (proc_t, sysfs_t)
+   - カーネルsysctl値の読み取り (sysctl_t, sysctl_kernel_t)
+   - ローカライゼーションファイル読み取り (locale_t)
+   - ネットワーク設定ファイル読み取り (net_conf_t - ホスト名解決)
 
 4. **Btrfs ioctl操作**
-   - `unlabeled_t:dir`および`fs_t:dir`に対するBtrfs ioctl(0x9400-0x94ff範囲)
+   - unlabeled_t:dirおよびfs_t:dirに対するBtrfs ioctl (0x9400-0x94ff範囲)
 
    ```selinux
    allowxperm qsnapper_dbus_t unlabeled_t:dir ioctl { 0x9400-0x94ff };
@@ -207,42 +213,46 @@ User action (GUI)
    ```
 
    この範囲には以下が含まれます:
-   - `BTRFS_IOC_SNAP_CREATE_V2`: スナップショット作成
-   - `BTRFS_IOC_SNAP_DESTROY`: スナップショット削除
-   - `BTRFS_IOC_DEFAULT_SUBVOL`: デフォルトサブボリューム設定
+   - BTRFS_IOC_SNAP_CREATE_V2: スナップショット作成
+   - BTRFS_IOC_SNAP_DESTROY: スナップショット削除
+   - BTRFS_IOC_DEFAULT_SUBVOL: デフォルトサブボリューム設定
    - その他Btrfs関連ioctl
 
 5. **外部コマンド実行**
-   - `bin_t`内の実行ファイル(`execute_no_trans`で同一ドメイン内で実行)
-   - シェル(`shell_exec_t`)
+   - bin_t内の実行ファイル (execute_no_transで同一ドメイン内で実行)
+   - シェル (shell_exec_t)
 
 6. **ブロックデバイスアクセス**
-   - 固定ディスクデバイス(`fixed_disk_device_t` - Btrfs操作用)
+   - 固定ディスクデバイス (fixed_disk_device_t - Btrfs操作用)
 
 7. **その他**
-   - syslogへのログ送信(`devlog_t`, `kernel_t`)
-   - ファイルディスクリプタ継承(`system_dbusd_t`から)
-   - Netlinkルートソケット(`netlink_route_socket`)
-   - `fs_t`に対するファイルシステム操作(`getattr`, `mount`, `unmount`)
+   - syslogへのログ送信 (devlog_t, kernel_t)
+   - ファイルディスクリプタ継承 (system_dbusd_tから)
+   - Netlinkルートソケット (netlink_route_socket)
+   - fs_tに対するファイルシステム操作 (getattr, mount, unmount)
 
 #### ファイル復元の制限
 
-ファイル復元操作は**ユーザーホームディレクトリのみ**に制限されています。
-この制限は`.te`ポリシーにハードコードされたセキュリティ制約です。
+ファイル復元は、ファイルのラベルでは制限していません。  
 
-```selinux
-# File restoration - LIMITED TO USER HOME DIRECTORIES ONLY
-allow qsnapper_dbus_t user_home_dir_t:dir { ... };
-allow qsnapper_dbus_t user_home_t:dir { ... };
-allow qsnapper_dbus_t user_home_t:file { ... };
-allow qsnapper_dbus_t user_home_t:lnk_file { ... };
-```
+復元先は選択したSnapper設定のサブボリューム内の任意のパス (root設定ではルートファイルシステム全体) になり得るため、  
+qsnapper_dbus_tにはほとんどのファイルタイプ (file_type) への書き込みを許可しています。  
+
+復元の制限は、D-Busサービス側で行います:  
+- GUIは復元計画を組み立てるだけです (BeginRestorePlan / StageRestoreEntries)。
+  ファイルを書き込むのはqsnapper_dbus_tだけで、
+  CommitRestorePlanがPolicyKit (com.presire.qsnapper.rollback-snapshot) で認可された後に限られます。
+- 復元計画は、それを作成したD-Bus接続に束縛されます。
+- 復元先は設定のSUBVOLUMEを基準に組み立て、
+  すべてのパスをその配下でsymlinkを辿らずに解決します。
+  再帰削除はマウント境界で止まります。
+- 復元元は読み取り専用のスナップショットでなければなりません。
 
 ### ドメイン遷移
 
-ポリシーは以下の2つのドメイン遷移を定義しています:
+ポリシーは以下の2つのドメイン遷移を定義しています:  
 
-1. **`unconfined_t` → `qsnapper_t`** (GUIアプリケーション起動)
+1. **unconfined_t → qsnapper_t** (GUIアプリケーション起動)  
 
    ```selinux
    allow unconfined_t qsnapper_exec_t:file { getattr open read execute map };
@@ -250,7 +260,7 @@ allow qsnapper_dbus_t user_home_t:lnk_file { ... };
    type_transition unconfined_t qsnapper_exec_t:process qsnapper_t;
    ```
 
-2. **`system_dbusd_t` → `qsnapper_dbus_t`** (D-Busによるサービス起動)
+2. **system_dbusd_t → qsnapper_dbus_t** (D-Busによるサービス起動)  
 
    ```selinux
    allow system_dbusd_t qsnapper_dbus_exec_t:file { getattr open read execute map };
@@ -260,7 +270,7 @@ allow qsnapper_dbus_t user_home_t:lnk_file { ... };
 
 ### ファイル型遷移
 
-`/tmp`内に作成されるファイルは自動的に`qsnapper_tmp_t`に遷移します:
+`/tmp`内に作成されるファイルは自動的にqsnapper_tmp_tに遷移します:  
 
 ```selinux
 type_transition qsnapper_t tmp_t:file qsnapper_tmp_t;
@@ -269,30 +279,36 @@ type_transition qsnapper_dbus_t tmp_t:file qsnapper_tmp_t;
 type_transition qsnapper_dbus_t tmp_t:dir qsnapper_tmp_t;
 ```
 
-### インターフェース定義(.if)
+### インターフェース定義 (.if)
 
-`qsnapper.if`は、他のSELinuxポリシーモジュールがqSnapperと連携するためのインターフェースを提供します。
-これらのインターフェースは外部モジュール用であり、qSnapperの`.te`ポリシー自体では使用されていません。
+`qsnapper.if`は、他のSELinuxポリシーモジュールがqSnapperと連携するためのインターフェースを提供します。  
+
+これらのインターフェースは外部モジュール用であり、qSnapperの`.te`ポリシー自体では使用されていません。  
 
 | インターフェース | 用途 |
 |---|---|
-| `qsnapper_domtrans` | 指定ドメインから`qsnapper_t`へのドメイン遷移を許可 |
-| `qsnapper_run` | ドメイン遷移の許可 + ロールへの`qsnapper_roles`属性付与 |
-| `qsnapper_dbus_chat` | 指定ドメインと`qsnapper_t`間のD-Busメッセージ送受信を許可 |
-| `qsnapper_read_config` | `qsnapper_conf_t`型の設定ファイル読み取りを許可 |
-| `qsnapper_manage_config` | `qsnapper_conf_t`型の設定ファイル管理を許可 |
-| `qsnapper_read_snapshots` | `qsnapper_snapshot_t`型のスナップショットファイル読み取りを許可 |
-| `qsnapper_manage_snapshots` | `qsnapper_snapshot_t`型のスナップショットファイル管理を許可 |
-| `qsnapper_dbus_domtrans` | 指定ドメインから`qsnapper_dbus_t`へのドメイン遷移を許可 |
-| `qsnapper_dbus_service_chat` | 指定ドメインと`qsnapper_dbus_t`間のD-Busメッセージ送受信を許可 |
-| `qsnapper_read_log` | `qsnapper_log_t`型のログファイル読み取りを許可 |
-| `qsnapper_append_log` | `qsnapper_log_t`型のログファイルへの追記を許可 |
-| `qsnapper_manage_log` | `qsnapper_log_t`型のログファイル管理を許可 |
-| `qsnapper_admin` | qSnapper環境全体の管理(全型への管理アクセス) |
+| qsnapper_domtrans | 指定ドメインからqsnapper_tへのドメイン遷移を許可 |
+| qsnapper_run | ドメイン遷移の許可 + ロールへのqsnapper_roles属性付与 |
+| qsnapper_dbus_chat | 指定ドメインとqsnapper_t間のD-Busメッセージ送受信を許可 |
+| qsnapper_read_config | qsnapper_conf_t型の設定ファイル読み取りを許可 |
+| qsnapper_manage_config | qsnapper_conf_t型の設定ファイル管理を許可 |
+| qsnapper_read_snapshots | qsnapper_snapshot_t型のスナップショットファイル読み取りを許可 |
+| qsnapper_manage_snapshots | qsnapper_snapshot_t型のスナップショットファイル管理を許可 |
+| qsnapper_dbus_domtrans | 指定ドメインからqsnapper_dbus_tへのドメイン遷移を許可 |
+| qsnapper_dbus_service_chat | 指定ドメインとqsnapper_dbus_t間のD-Busメッセージ送受信を許可 |
+| qsnapper_read_log | qsnapper_log_t型のログファイル読み取りを許可 |
+| qsnapper_append_log | qsnapper_log_t型のログファイルへの追記を許可 |
+| qsnapper_manage_log | qsnapper_log_t型のログファイル管理を許可 |
+| qsnapper_admin | qSnapper環境全体の管理 (全型への管理アクセス) |
 
-**注意:** `qsnapper_conf_t`, `qsnapper_snapshot_t`, `qsnapper_log_t`, `qsnapper_var_run_t`は`.if`のインターフェースで`gen_require`として参照されていますが、現在の`.te`ポリシーでは宣言されていません。
-これらの型は、将来的にカスタムラベリングが必要になった場合に外部モジュールで宣言して使用するために設計されています。
-現在のポリシーではシステム標準のラベル(`etc_t`, `unlabeled_t`, `fs_t`, `var_lib_t`, `var_log_t`)を使用しています。
+**注意:**  
+qsnapper_conf_t, qsnapper_snapshot_t, qsnapper_log_t, qsnapper_var_run_tは、  
+`.if`のインターフェースでgen_requireとして参照されています。  
+
+しかし、現在の`.te`ポリシーでは宣言されていません。  
+
+これらの型は、将来的にカスタムラベリングが必要になった場合に外部モジュールで宣言して使用するために設計されています。  
+現在のポリシーではシステム標準のラベル (etc_t, unlabeled_t, fs_t, var_lib_t, var_log_t) を使用しています。  
 
 ---
 
@@ -300,13 +316,15 @@ type_transition qsnapper_dbus_t tmp_t:dir qsnapper_tmp_t;
 
 ### ファイルコンテキストについての注意
 
-現在のポリシーは、スナップショットディレクトリ(`/.snapshots`)やSnapper設定(`/etc/snapper`)に対して  
-システム標準のラベル(`unlabeled_t`, `fs_t`, `etc_t`)を使用しています。  
-Btrfsサブボリュームは通常`unlabeled_t`または`fs_t`のラベルが自動的に付与されるため、カスタムスナップショット場所でも追加の設定なしで動作します。  
+現在のポリシーは、スナップショットディレクトリ (`/.snapshots`) やSnapper設定 (`/etc/snapper`) に対して  
+システム標準のラベル (unlabeled_t, fs_t, etc_t) を使用しています。  
+
+Btrfsサブボリュームは通常unlabeled_tまたはfs_tのラベルが自動的に付与されるため、  
+カスタムスナップショット場所でも追加の設定なしで動作します。  
 
 ### ポリシーモジュールの再コンパイル
 
-ソースコード(`.te`ファイル)を編集した場合:
+ソースコード (`.te`ファイル) を編集した場合:  
 
 ```bash
 cd /path/to/qSnapper/selinux
@@ -327,7 +345,7 @@ sudo semodule -i qsnapper.pp
 
 ## 監査とロギング
 
-### AVC(Access Vector Cache) denial監視
+### AVC (Access Vector Cache) denial監視
 
 #### リアルタイム監視
 
@@ -354,7 +372,7 @@ sudo ausearch -m avc -ts today | \
 
 ### 正常動作の監査ログ
 
-SELinuxは拒否だけでなく、許可された操作も記録できます(auditallow):
+SELinuxは拒否だけでなく、許可された操作も記録できます (auditallow):  
 
 ```bash
 # ポリシーに auditallow ルールを追加する場合の例:
@@ -368,7 +386,7 @@ sudo ausearch -m avc -c qsnapper-dbus-service | grep granted
 
 #### sealert (setroubleshoot)
 
-より人間が読みやすい形式でdenialを表示:
+より人間が読みやすい形式でdenialを表示:  
 
 ```bash
 # インストール(RHEL 9 / 10)
@@ -383,7 +401,7 @@ sudo sealert -a /var/log/audit/audit.log
 
 #### audit2allow
 
-denialから必要なポリシールールを推奨:
+denialから必要なポリシールールを推奨:  
 
 ```bash
 # 推奨ルールを表示
@@ -402,21 +420,21 @@ sudo semodule -i qsnapper-local.pp
 
 ### SELinux有効化のオーバーヘッド
 
-一般的なSELinuxのパフォーマンス影響:
+一般的なSELinuxのパフォーマンス影響:  
 
-- **ファイルアクセス**: 1-3%のオーバーヘッド(ラベルチェック)
-- **プロセス起動**: 2-5%のオーバーヘッド(ドメイン遷移)
-- **システムコール**: 1-2%のオーバーヘッド(アクセス決定)
+- **ファイルアクセス**: 1-3%のオーバーヘッド (ラベルチェック)
+- **プロセス起動**: 2-5%のオーバーヘッド (ドメイン遷移)
+- **システムコール**: 1-2%のオーバーヘッド (アクセス決定)
 
-qSnapperの場合、以下の操作で影響が現れる可能性があります:
+qSnapperの場合、以下の操作で影響が現れる可能性があります:  
 
-- **スナップショット一覧表示**: ファイルラベルチェックによる軽微な遅延(通常無視できる)
-- **ファイル比較**: ファイル読み取り権限チェック(数百ファイル以上で数%のオーバーヘッド)
-- **スナップショット作成**: Btrfs ioctl権限チェック(無視できる程度)
+- **スナップショット一覧表示**: ファイルラベルチェックによる軽微な遅延 (通常無視できる)
+- **ファイル比較**: ファイル読み取り権限チェック (数百ファイル以上で数%のオーバーヘッド)
+- **スナップショット作成**: Btrfs ioctl権限チェック (無視できる程度)
 
 ### ベンチマーク方法
 
-SELinuxの影響を測定:
+SELinuxの影響を測定:  
 
 ```bash
 # SELinux有効(Enforcingモード)でベンチマーク
@@ -435,7 +453,7 @@ sudo setenforce 1
 SELinuxのパフォーマンスを最適化するには:
 
 1. **AVC Cacheの最適化**
-   
+
    ```bash
    # AVC統計確認
    cat /sys/fs/selinux/avc/cache_stats
@@ -445,7 +463,7 @@ SELinuxのパフォーマンスを最適化するには:
    ```
 
 2. **監査ログの最適化**
-   
+
    ```bash
    # auditdの設定を調整
    sudo vi /etc/audit/auditd.conf
@@ -458,30 +476,30 @@ SELinuxのパフォーマンスを最適化するには:
 
 ### 1. 既存snapperポリシーとの共存
 
-システムに既存の`snapper_t`ドメインが存在する場合、競合する可能性があります。
+システムに既存のsnapper_tドメインが存在する場合、競合する可能性があります。  
 
-**確認方法:**
+**確認方法:**  
 
 ```bash
 sudo semodule -l | grep snapper
 ```
 
-**対処法:**
+**対処法:**  
 - 既存ポリシーが存在する場合、競合状況を確認
 - 競合が発生する場合は、既存ポリシーの無効化またはqSnapperポリシーの調整が必要
 
 ### 2. Btrfs ioctl番号の変動
 
-Btrfs ioctlの番号は、カーネルバージョンによって変わる可能性があります。
+Btrfs ioctlの番号は、カーネルバージョンによって変わる可能性があります。  
 
-**現在の実装:**
+**現在の実装:**  
 
 ```selinux
 allowxperm qsnapper_dbus_t unlabeled_t:dir ioctl { 0x9400-0x94ff };
 allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 ```
 
-**問題が発生した場合:**
+**問題が発生した場合:**  
 
 ```bash
 # 実際に使用されているioctl番号を確認
@@ -490,9 +508,9 @@ sudo ausearch -m avc -c qsnapper-dbus-service | grep ioctl
 # ポリシーを調整してioctlpermsを追加
 ```
 
-### 3. カーネルLSM(Linux Security Module)スタック
+### 3. カーネルLSM (Linux Security Module) スタック
 
-最近のカーネル(5.x以降)では、複数のLSMを同時に有効化できます:
+最近のカーネル (5.x以降) では、複数のLSMを同時に有効化できます:
 
 ```bash
 # 現在のLSMスタック確認
@@ -502,28 +520,100 @@ cat /sys/kernel/security/lsm
 # capability,selinux,bpf
 ```
 
-AppArmorとSELinuxは同時に有効化できないため、openSUSE Leap 16ではSELinuxが標準採用されています。
+AppArmorとSELinuxは同時に有効化できないため、openSUSE Leap 16ではSELinuxが標準採用されています。  
 
 ### 4. openSUSE Leap 16固有の考慮事項
 
-openSUSE Leap 16でSELinuxが新規採用されたため:
+openSUSE Leap 16でSELinuxが新規採用されたため:  
 
 - 既存のAppArmorポリシーとの重複はありません
-- ただし、`snapper`パッケージ自体のSELinuxポリシーが将来提供される可能性があります
-- 定期的に`sudo semodule -l | grep snapper`で確認することを推奨
+- ただし、snapperパッケージ自体のSELinuxポリシーが将来提供される可能性があります
+- 定期的に、次のコマンドで確認することを推奨します
+
+```bash
+sudo semodule -l | grep snapper
+```
 
 ### 5. RHEL互換性
 
-RHELとopenSUSEでポリシーインターフェース名が異なる場合があります:
+RHELとopenSUSEでポリシーインターフェース名が異なる場合があります:  
 
-**互換性の問題が発生した場合:**
+**互換性の問題が発生した場合:**  
 - ディストリビューション固有の条件分岐を`.te`ファイルに追加
 - または、ディストリビューションごとに別々のポリシーを提供
 
 ### 6. システムラベルへの依存
 
-現在のポリシーはシステム標準のラベル(`etc_t`, `unlabeled_t`, `fs_t`, `var_lib_t`, `var_log_t`)に依存しています。
-システムのベースポリシーが更新されてこれらの型の定義が変更された場合、qSnapperポリシーに影響する可能性があります。
+現在のポリシーはシステム標準のラベル (etc_t, unlabeled_t, fs_t, var_lib_t, var_log_t) に依存しています。  
+システムのベースポリシーが更新されてこれらの型の定義が変更された場合、qSnapperポリシーに影響する可能性があります。  
+
+### 7. Webブラウザでのリンク表示
+
+#### リンクを開く流れ
+
+Aboutダイアログのリンクは、次の順序で開きます。  
+
+1. デスクトップポータル (session busのorg.freedesktop.portal.OpenURI) に依頼します。
+   ブラウザはユーザーセッション側のプロセスとして起動されます。
+   そのため、qsnapper_tの制限は受けません。
+2. ポータルが存在しないことが明らかな場合だけ、QDesktopServicesで直接起動します。
+   対象は、サービスが見つからない、起動できない、session busに接続できない場合です。
+   この場合、ブラウザはqsnapper_tから起動されます。
+
+開くことが可能なリンクは、httpとhttpsだけです。  
+
+ポータルが要求を拒否した場合や、一定時間応答がない場合は、直接起動への切り替えはしません。  
+拒否を回避してはならないためです。  
+
+また、応答が遅れて届くと、リンクが二重に開いてしまうためです。  
+
+QDesktopServicesがブラウザを起動する方法は、プラットフォームとデスクトップ環境によって異なります。  
+
+#### 直接起動に切り替わったときの動作
+
+直接起動したブラウザが、どのドメインで動くかは、ブラウザの実行ファイルのラベルで決まります。  
+
+- 次のラベルを持つブラウザは、unconfined_tで動きます。
+  - mozilla_exec_t
+  - chromium_exec_t
+  - msedge_exec_t
+  - opera_exec_t
+- 上記のラベルを持たないブラウザは、qsnapper_tのまま動きます。
+  ホームディレクトリに展開したブラウザ (user_home_t) や、bin_tのブラウザが該当します。
+
+qsnapper_tのまま動くと、次のような症状が出ます。  
+
+- Firefoxに「プロファイルが見つかりません」というダイアログが表示される。
+- firefox-binによる大量のAVC拒否が記録される。(scontextがqsnapper_tになる)  
+
+#### 対処方法
+
+ディレクトリ全体ではなく、ブラウザの実行ファイルだけを再ラベルします。  
+
+```bash
+# 例: ホームディレクトリにtarballから展開したFirefox
+sudo semanage fcontext -a -t mozilla_exec_t '/home/<user>/InstallSoftware/FireFox/firefox'
+sudo semanage fcontext -a -t mozilla_exec_t '/home/<user>/InstallSoftware/FireFox/firefox-bin'
+sudo restorecon -v /home/<user>/InstallSoftware/FireFox/firefox /home/<user>/InstallSoftware/FireFox/firefox-bin
+```
+
+このポリシーでは、再ラベルしても、通常のデスクトップセッションから起動したときの動作は変わりません。  
+unconfined_tには、mozilla_exec_tへのドメイン遷移が無いためです。  
+
+ただし、システムの他のポリシーが遷移を追加している場合があります。  
+次のコマンドで確認してください。  
+
+```bash
+sesearch -T -s unconfined_t -t mozilla_exec_t
+```
+
+再ラベルで解決するのは、ブラウザのSELinuxによる制限だけです。  
+ファイルのアクセス権や、ブラウザ自身のサンドボックスの問題には影響しません。  
+
+#### やってはいけない設定
+
+ホームディレクトリ内のすべての実行ファイルを、unconfined_tへ遷移させるルールは追加しないでください。  
+GUIが侵害された場合に、ホームディレクトリにある任意のファイルを、制限なしで実行できてしまいます。  
 
 ---
 
@@ -531,7 +621,7 @@ RHELとopenSUSEでポリシーインターフェース名が異なる場合が�
 
 ### Permissiveドメインの活用
 
-特定のドメインのみをPermissiveモードにして、他はEnforcingのまま維持:
+特定のドメインのみをPermissiveモードにして、他はEnforcingのまま維持:  
 
 ```bash
 # qsnapper_dbus_tドメインのみPermissive化
@@ -549,7 +639,7 @@ sudo semanage permissive -d qsnapper_dbus_t
 
 ### ドメイン遷移のデバッグ
 
-ドメイン遷移が正しく行われているか確認:
+ドメイン遷移が正しく行われているか確認:  
 
 ```bash
 # 遷移前のドメイン
@@ -565,7 +655,7 @@ ps -eZ | grep $PID
 # 期待: qsnapper_t ドメイン
 ```
 
-遷移が行われない場合:
+遷移が行われない場合:  
 
 ```bash
 # 実行ファイルのコンテキスト確認
@@ -580,7 +670,7 @@ sudo restorecon -F -v /usr/bin/qsnapper
 
 ### ファイルコンテキストの完全再ラベル
 
-システム全体のファイルコンテキストを再ラベル(最終手段):
+システム全体のファイルコンテキストを再ラベル (最終手段):  
 
 ```bash
 # リブート時にすべてのファイルを再ラベル
@@ -592,7 +682,7 @@ sudo reboot
 
 ### ポリシーソースの取得とカスタマイズ
 
-システムのベースポリシーを取得してカスタマイズ:
+システムのベースポリシーを取得してカスタマイズ:  
 
 **openSUSE Leap 16 / SUSE Linux Enterprise 16:**
 ```bash
@@ -618,7 +708,7 @@ ls /usr/share/selinux/devel/
 
 ### 1. 最小権限原則の維持
 
-ポリシーをカスタマイズする際は、必要最小限の権限のみを付与してください。
+ポリシーをカスタマイズする際は、必要最小限の権限のみを付与してください。  
 
 **悪い例:**
 
@@ -636,7 +726,7 @@ allow qsnapper_dbus_t user_home_t:file write;
 
 ### 2. 監査ログの定期レビュー
 
-毎週/毎月、AVC denialログをレビューして異常な動作を検出:
+毎週/毎月、AVC denialログをレビューして異常な動作を検出:  
 
 ```bash
 # 週次レポート生成
@@ -645,7 +735,7 @@ sudo ausearch -m avc -ts this-week > /var/log/selinux-weekly-report.txt
 
 ### 3. ポリシー更新の追跡
 
-qSnapperの更新時に、SELinuxポリシーも更新されているか確認:
+qSnapperの更新時に、SELinuxポリシーも更新されているか確認:  
 
 ```bash
 # 現在のポリシーバージョン確認
@@ -658,17 +748,17 @@ sudo semodule -l | grep qsnapper
 
 ## サポート
 
-このポリシーに関する問題や質問は、以下のリソースを参照してください:
+このポリシーに関する問題や質問は、以下のリソースを参照してください:  
 
 - **プロジェクトリポジトリ**: https://github.com/presire/qSnapper
 - **Issue報告**: https://github.com/presire/qSnapper/issues
 - **ユーザーガイド**: [README_JP.md](README_JP.md)
 
 **報告時に含めるべき情報:**
-- ディストリビューションとバージョン(例: openSUSE Leap 16)
-- SELinuxモード(`getenforce`の出力)
-- AVC denialログ(`ausearch -m avc -ts recent`)
-- ポリシーバージョン(`semodule -l | grep qsnapper`)
+- ディストリビューションとバージョン (例: openSUSE Leap 16)
+- SELinuxモード (getenforceコマンドの出力)
+- AVC denialログ (ausearch -m avc -ts recentコマンドの出力)
+- ポリシーバージョン (semodule -l | grep qsnapperコマンドの出力)
 
 ---
 

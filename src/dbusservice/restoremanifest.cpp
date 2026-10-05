@@ -611,4 +611,96 @@ qint64 RestoreManifestRegistry::defaultNowMs()
     return QDateTime::currentMSecsSinceEpoch();
 }
 
+FinishedRestorePlanStore::FinishedRestorePlanStore()
+    : m_clock(&QDateTime::currentMSecsSinceEpoch)
+{
+}
+
+void FinishedRestorePlanStore::setClock(std::function<qint64()> clock)
+{
+    m_clock = clock ? std::move(clock)
+                    : std::function<qint64()>(&QDateTime::currentMSecsSinceEpoch);
+}
+
+void FinishedRestorePlanStore::record(const QString &owner, const ManifestStatus &status)
+{
+    if (status.id.isEmpty()) {
+        return;
+    }
+
+    purgeExpired();
+    m_records.erase(status.id);
+
+    // 上限に達している場合は、期限の最も近い記録から破棄する
+    while (static_cast<int>(m_records.size()) >= kMaxEntries) {
+        const auto oldest = std::min_element(
+            m_records.begin(), m_records.end(),
+            [](const auto &lhs, const auto &rhs) {
+                return lhs.second.expiresAtMs < rhs.second.expiresAtMs;
+            });
+        m_records.erase(oldest);
+    }
+
+    m_records.emplace(status.id,
+                      FinishedRecord{owner, status, m_clock() + kDefaultRetentionMs});
+}
+
+std::optional<ManifestStatus> FinishedRestorePlanStore::status(const QString &id,
+                                                               const QString &owner)
+{
+    purgeExpired();
+    const auto it = m_records.find(id);
+    if (it == m_records.end() || it->second.owner != owner) {
+        return std::nullopt;
+    }
+    return it->second.status;
+}
+
+int FinishedRestorePlanStore::removeByOwner(const QString &owner)
+{
+    int removed = 0;
+    for (auto it = m_records.begin(); it != m_records.end();) {
+        if (it->second.owner == owner) {
+            it = m_records.erase(it);
+            ++removed;
+        }
+        else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+int FinishedRestorePlanStore::purgeExpired()
+{
+    const qint64 nowMs = m_clock();
+    int removed = 0;
+    for (auto it = m_records.begin(); it != m_records.end();) {
+        if (it->second.expiresAtMs <= nowMs) {
+            it = m_records.erase(it);
+            ++removed;
+        }
+        else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+int FinishedRestorePlanStore::count() const
+{
+    return static_cast<int>(m_records.size());
+}
+
+int FinishedRestorePlanStore::countForOwner(const QString &owner) const
+{
+    int count = 0;
+    for (const auto &entry : m_records) {
+        if (entry.second.owner == owner) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 } // namespace qsnapper::restore

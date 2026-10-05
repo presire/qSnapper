@@ -13,6 +13,7 @@
  *   - tests/unit/tst_filepaths.cpp
  */
 
+#include <QMap>
 #include <QString>
 
 namespace qsnapper {
@@ -88,13 +89,50 @@ namespace qsnapper {
          *   - 空文字列は安全とみなす (description等は空になり得るため)
          *   - カンマは判定対象外。CSVの列ずれは表示上の破損に留まり、レコード境界そのものは壊さないため、本関数の責務ではない
          *
-         * @note 呼び出し側はエントリを黙って捨てず、メソッド全体をエラー応答にすること (fail-closed)
+         * @note パスのように置き換えると別の対象を指してしまう値では、呼び出し側はエントリを黙って捨てず、メソッド全体をエラー応答にすること (fail-closed)
          *       1件だけ落とすと、クライアントは不完全な一覧を完全な一覧として扱ってしまう
+         *       表示用の値 (description / cleanup / userdata) は、sanitizeRecordText()で置き換えてよい
          *
          * @param value 検査対象の文字列 (パス / description / cleanup / userdata)
          * @return レコード区切りを破壊しない場合: true、拒否すべき場合: false
          */
         bool isRecordSafeText(const QString &value);
+
+        /**
+         * @brief レコード区切りを破壊する文字を置換文字 (U+FFFD) に置き換える
+         *
+         * isRecordSafeText()が拒否する制御文字を1文字ずつU+FFFDに置き換えるため、戻り値は常にisRecordSafeText()を満たす
+         * スナップショット一覧のdescription / cleanup / userdataのような表示用の値に使い、1件の不正な値で一覧全体を失敗させないためのもの
+         * 置き換えた値を識別子として使ってはならない (パスやconfig名には使わないこと)
+         *
+         * @param value 対象の文字列
+         * @return 制御文字をU+FFFDに置き換えた文字列
+         */
+        QString sanitizeRecordText(const QString &value);
+
+        /**
+         * @brief WriteSnapperConfigに渡された設定のキーと値が安全かどうかを判定する
+         *
+         * 書き込みを許可するのは、スナップショットの自動作成とcleanupに関するキーのみである
+         * SUBVOLUME / FSTYPE / QGROUP / ALLOW_USERS / ALLOW_GROUPS / SYNC_ACL / COMPRESSION 等は、
+         * snapperの対象やアクセス権限そのものを変えるため、本経路からは書き込ませない
+         *
+         * 仕様:
+         *   - 空のマップは拒否する
+         *   - 許可リストにないキーを1つでも含む場合は拒否する
+         *   - 真偽値のキー (NUMBER_CLEANUP / TIMELINE_CREATE / TIMELINE_CLEANUP / EMPTY_PRE_POST_CLEANUP / BACKGROUND_COMPARISON) は "yes" / "no" のみ許可する
+         *   - 秒数のキー (NUMBER_MIN_AGE / TIMELINE_MIN_AGE / EMPTY_PRE_POST_MIN_AGE) は、先頭0なしの10進整数 (0..999999999) のみ許可する
+         *   - 個数のキー (NUMBER_LIMIT / NUMBER_LIMIT_IMPORTANT / TIMELINE_LIMIT_*) は、
+         *     上記と同じ形式の整数、または "最小-最大" (最小 <= 最大) の範囲のみ許可する
+         *   - 割合のキー (SPACE_LIMIT / FREE_LIMIT) は、0以上1以下の小数 (小数部は6桁まで) のみ許可する
+         *   - 上記の形式は、改行・制御文字・空白・引用符を含む値を自然に除外する
+         *
+         * @note 拒否する際、呼び出し側はキーや値をエラー本文やログに含めないこと
+         *
+         * @param settings D-Busから受け取ったキー/値のマップ
+         * @return 全てのキーと値が安全な場合: true、拒否すべき場合: false
+         */
+        bool validateSnapperConfigSettings(const QMap<QString, QString> &settings);
     } // namespace security
 } // namespace qsnapper
 

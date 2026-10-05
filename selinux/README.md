@@ -16,9 +16,7 @@ This document describes how to install and use the SELinux policy module.
     - [Installation via CMake](#installation-via-cmake)
     - [Standalone Installation](#standalone-installation)
   - [Configuration](#configuration)
-    - [Boolean Settings](#boolean-settings)
-      - [1. `qsnapper_manage_all_snapshots` (Default: ON)](#1-qsnapper_manage_all_snapshots-default-on)
-      - [2. `qsnapper_user_access` (Default: ON)](#2-qsnapper_user_access-default-on)
+    - [Policy Scope](#policy-scope)
   - [Verification](#verification)
     - [Verify Policy Module Installation](#verify-policy-module-installation)
     - [Verify File Contexts](#verify-file-contexts)
@@ -145,48 +143,16 @@ sudo make install
 
 ## Configuration
 
-### Boolean Settings
+### Policy Scope
 
-The qSnapper policy provides two booleans for customizing behavior.
+The policy module does not define any tunable booleans.
+The following mechanisms control access instead:
 
-#### 1. `qsnapper_manage_all_snapshots` (Default: ON)
+- **GUI execution**: `qsnapper_t` runs through the `qsnapper_exec_t` domain transition. Administrators can restrict it with a local policy.
+- **Privileged operations**: the D-Bus service (`qsnapper_dbus_t`) checks PolicyKit for every operation. Actions and defaults are listed in [`ADMIN.md`](ADMIN.md).
+- **Restoration scope**: restoration targets the `SUBVOLUME` of the Snapper configuration; it is not limited to the user home directory. The authorization and destination checks are described in [`ADMIN.md`](ADMIN.md).
 
-Controls whether the D-Bus service can restore arbitrary files from snapshots.
-
-**Enable (default):**
-
-```bash
-sudo setsebool -P qsnapper_manage_all_snapshots on
-```
-
-**Disable (only user home directory files can be restored):**
-
-```bash
-sudo setsebool -P qsnapper_manage_all_snapshots off
-```
-
-#### 2. `qsnapper_user_access` (Default: ON)
-
-Controls whether regular users can launch the qSnapper GUI application.
-
-**Enable (default):**
-
-```bash
-sudo setsebool -P qsnapper_user_access on
-```
-
-**Disable (administrators only):**
-
-```bash
-sudo setsebool -P qsnapper_user_access off
-```
-
-**Check current settings:**
-
-```bash
-getsebool qsnapper_manage_all_snapshots
-getsebool qsnapper_user_access
-```
+There are no `setsebool` settings for this module. Add local customizations as a separate local policy module.
 
 ---
 

@@ -4,9 +4,9 @@
 #include <QLocalSocket>
 #include <QLockFile>
 #include <QStandardPaths>
-#include <QDir>
 #include <QDebug>
 #include <QtGlobal>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace {
@@ -20,14 +20,18 @@ namespace {
 /**
  * @brief SingleInstanceGuardを初期化する
  *
- * lock fileパスを決定し、stale lock判定時間を設定する
+ * ユーザ専用のruntimeディレクトリを決定し、使える場合だけlock fileを用意する
  */
 SingleInstanceGuard::SingleInstanceGuard(QObject *parent)
     : QObject(parent)
     , m_server(nullptr)
-    , m_lockFile(new QLockFile(lockFilePath()))
+    , m_runtimeDir(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation))
 {
-    m_lockFile->setStaleLockTime(30000);
+    if (!m_runtimeDir.isEmpty()) {
+        m_lockFile = std::make_unique<QLockFile>(lockFilePath());
+        // lockは起動中ずっと保持するため、経過時間ではstaleと判定しない (保持プロセスの生存で判定する)
+        m_lockFile->setStaleLockTime(0);
+    }
 }
 
 /**
@@ -47,32 +51,24 @@ SingleInstanceGuard::~SingleInstanceGuard()
 }
 
 /**
- * @brief UIDごとに分離されたローカルサーバ名を返す
+ * @brief ローカルサーバのソケットパスを返す
  *
- * マルチユーザ環境でもユーザ単位で独立した単一インスタンス制御を行う
+ * ユーザ専用のruntimeディレクトリ配下の絶対パスとする
+ * 相対名にすると、Qtは共有の /tmp にソケットを作るため、他のユーザが同名のソケットを先に作れてしまう
  */
 QString SingleInstanceGuard::serverName() const
 {
-    // UID単位で分離することで、マルチユーザ環境では各ユーザが独立に1インスタンスずつ起動可能とする
-    return QStringLiteral("qsnapper-%1").arg(::getuid());
+    return m_runtimeDir + QStringLiteral("/qsnapper.socket");
 }
 
 /**
  * @brief lock fileの配置パスを返す
  *
- * 通常はXDG_RUNTIME_DIRを使い、未設定環境では /tmp にフォールバックする
+ * ソケットと同じく、ユーザ専用のruntimeディレクトリ配下に置く
  */
 QString SingleInstanceGuard::lockFilePath() const
 {
-    QString runtimeDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-    if (runtimeDir.isEmpty()) {
-        // RuntimeLocationが使えない環境では /tmp フォールバックを許容する
-        // これはroot権限境界ではなく、GUIクライアント側の単一インスタンス制御であり、
-        // lock名もUID単位で分離されるため、ここではgraceful degradationを優先する
-        // ただし /tmp は本来の理想配置ではないため、通常運用ではXDG_RUNTIME_DIRを優先する
-        runtimeDir = QDir::tempPath();
-    }
-    return runtimeDir + QLatin1Char('/') + serverName() + QStringLiteral(".lock");
+    return m_runtimeDir + QStringLiteral("/qsnapper.lock");
 }
 
 /**
@@ -94,43 +90,74 @@ bool SingleInstanceGuard::tryAcquireLock()
 }
 
 /**
+ * @brief 接続先のサーバが自分と同じUIDのプロセスかを確認する
+ *
+ * @param socket 接続済みのソケット
+ * @return 同じUIDの場合: true、異なる・確認できない場合: false
+ */
+bool SingleInstanceGuard::isPeerSameUser(const QLocalSocket &socket)
+{
+    struct ucred credentials {};
+    socklen_t length = sizeof(credentials);
+    if (::getsockopt(static_cast<int>(socket.socketDescriptor()), SOL_SOCKET, SO_PEERCRED,
+                     &credentials, &length) < 0 || length != sizeof(credentials)) {
+        return false;
+    }
+    return credentials.uid == ::getuid();
+}
+
+/**
  * @brief プライマリインスタンス取得を試みる
  *
  * 既存インスタンスがいればraise要求を送信し、自身はセカンダリとしてfalseを返す
  * 既存インスタンスがいなければlistenを開始し、プライマリとしてtrueを返す
+ * ユーザ専用のruntimeディレクトリを使えない場合は、二重起動防止を無効にして起動を許容する
  */
 bool SingleInstanceGuard::tryAcquire()
 {
+    if (m_runtimeDir.isEmpty()) {
+        // 共有の /tmp には置かない (他のユーザが先にソケットやlockを作り、起動を妨げられるため)
+        qWarning() << "SingleInstanceGuard: runtime directory is unavailable; single-instance guard is disabled";
+        return true;
+    }
+
     const QString name = serverName();
 
     // 既存インスタンスへの接続を試みる
     QLocalSocket probe;
     probe.connectToServer(name);
     if (probe.waitForConnected(kConnectTimeoutMs)) {
-        // 既存インスタンスにraise要求を送信
-        const qint64 expectedBytes = qstrlen(kRaiseMessage);
-        const qint64 writtenBytes = probe.write(kRaiseMessage);
-
-        if (writtenBytes != expectedBytes) {
-            qWarning() << "SingleInstanceGuard: failed to queue raise request:"
-                       << probe.errorString();
+        if (!isPeerSameUser(probe)) {
+            // 自分以外のプロセスが待ち受けている場合は、既存インスタンスとして扱わない
+            qWarning() << "SingleInstanceGuard: ignoring a server owned by another user";
+            probe.abort();
         }
-        else if (!probe.waitForBytesWritten(kConnectTimeoutMs)) {
-            qWarning() << "SingleInstanceGuard: failed to deliver raise request:"
-                       << probe.errorString();
-        }
+        else {
+            // 既存インスタンスにraise要求を送信
+            const qint64 expectedBytes = qstrlen(kRaiseMessage);
+            const qint64 writtenBytes = probe.write(kRaiseMessage);
 
-        probe.disconnectFromServer();
-        return false;
+            if (writtenBytes != expectedBytes) {
+                qWarning() << "SingleInstanceGuard: failed to queue raise request:"
+                           << probe.errorString();
+            }
+            else if (!probe.waitForBytesWritten(kConnectTimeoutMs)) {
+                qWarning() << "SingleInstanceGuard: failed to deliver raise request:"
+                           << probe.errorString();
+            }
+
+            probe.disconnectFromServer();
+            return false;
+        }
     }
 
     // 接続に失敗 = 既存インスタンスなし、または前回クラッシュ等でソケットファイルが残留している可能性がある
     if (!tryAcquireLock()) {
-        qWarning() << "SingleInstanceGuard: failed to acquire instance lock:" << lockFilePath();
+        qWarning() << "SingleInstanceGuard: failed to acquire instance lock";
         return false;
     }
 
-    // removeServer() はstaleなソケットを安全に削除する
+    // lockを保持しているため、残っているソケットは前回のものであり、削除してよい
     QLocalServer::removeServer(name);
 
     m_server = new QLocalServer(this);

@@ -93,14 +93,14 @@ public:
         }
     }
 
-    void emitPlanProgress(const QString &manifestId, int current, int total, const QString &filePath)
+    void emitPlanProgress(const QString &manifestId, int current, int total)
     {
         if (!receiver) {
             return;
         }
         QMetaObject::invokeMethod(receiver, "onRestorePlanProgress",
                                   Q_ARG(QString, manifestId), Q_ARG(int, current),
-                                  Q_ARG(int, total), Q_ARG(QString, filePath));
+                                  Q_ARG(int, total));
     }
 
     void emitPlanFinished(const QString &manifestId, const QString &terminalState, const QString &message)
@@ -250,6 +250,7 @@ private slots:
     void stagedRestoreSendsNoMutableValuesAfterCommit();
     void stagedRestoreProgressIsMonotonicOverOriginalTotal();
     void stagedRestoreCompletedTerminalEmitsCompletionOnce();
+    void stagedRestoreFailedTerminalRequestsOwnerStatus();
     void stagedRestoreServiceVanishAfterCommitFinishesWithFailure();
     void stagedRestoreServiceVanishDuringStagingFinishesWithFailure();
     void stagedRestoreStageFailureAbortsFlowWithError();
@@ -512,7 +513,7 @@ void TestFileChangeModel::stagedRestoreStagesBoundedChunksAndCommitsOnce()
     QCOMPARE(stagedTypes, expectedTypes);
 
     // 終端シグナルで完了する
-    fake.emitPlanProgress(fake.nextManifestId, 10, 10, QStringLiteral("file09"));
+    fake.emitPlanProgress(fake.nextManifestId, 10, 10);
     fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("completed"), QString());
     QCOMPARE(completedSpy.count(), 1);
     QCOMPARE(completedSpy.at(0).at(0).toBool(), true);
@@ -594,9 +595,9 @@ void TestFileChangeModel::stagedRestoreProgressIsMonotonicOverOriginalTotal()
     fake.completeAllPendingOk();
 
     QSignalSpy progressSpy(&model, &FileChangeModel::restoreProgress);
-    fake.emitPlanProgress(fake.nextManifestId, 5, 10, QStringLiteral("file05"));
-    fake.emitPlanProgress(fake.nextManifestId, 3, 10, QStringLiteral("file03"));
-    fake.emitPlanProgress(fake.nextManifestId, 10, 10, QStringLiteral("file09"));
+    fake.emitPlanProgress(fake.nextManifestId, 5, 10);
+    fake.emitPlanProgress(fake.nextManifestId, 3, 10);
+    fake.emitPlanProgress(fake.nextManifestId, 10, 10);
 
     QCOMPARE(progressSpy.count(), 3);
     int previousCurrent = -1;
@@ -611,6 +612,18 @@ void TestFileChangeModel::stagedRestoreProgressIsMonotonicOverOriginalTotal()
     QCOMPARE(progressSpy.at(0).at(0).toInt(), 5);
     QCOMPARE(progressSpy.at(1).at(0).toInt(), 5);
     QCOMPARE(progressSpy.at(2).at(0).toInt(), 10);
+
+    // サーバのsignalはpathを運ばないため、ファイル名はstageした順序から求める
+    QStringList stagedPaths;
+    for (const FakeRestorePlanTransport::Call &call : fake.calls) {
+        if (call.kind == FakeRestorePlanTransport::Call::Stage) {
+            stagedPaths += call.paths;
+        }
+    }
+    QCOMPARE(stagedPaths.size(), 10);
+    QCOMPARE(progressSpy.at(0).at(2).toString(), QFileInfo(stagedPaths.at(4)).fileName());
+    QCOMPARE(progressSpy.at(1).at(2).toString(), QFileInfo(stagedPaths.at(4)).fileName());
+    QCOMPARE(progressSpy.at(2).at(2).toString(), QFileInfo(stagedPaths.at(9)).fileName());
 }
 
 void TestFileChangeModel::stagedRestoreCompletedTerminalEmitsCompletionOnce()
@@ -637,6 +650,43 @@ void TestFileChangeModel::stagedRestoreCompletedTerminalEmitsCompletionOnce()
 
     // 状態はリセット済みのため、重複した終端シグナルは無視される
     fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("completed"), QString());
+    QCOMPARE(completedSpy.count(), 1);
+}
+
+/**
+ * @brief 失敗終端でownerにだけ詳細を問い合わせることを確認する
+ */
+void TestFileChangeModel::stagedRestoreFailedTerminalRequestsOwnerStatus()
+{
+    FakeRestorePlanTransport fake;
+    TestableFileChangeModel model;
+    const QStringList paths = {
+        QStringLiteral("/data/a"),
+        QStringLiteral("/data/b"),
+    };
+    QString output;
+    for (const QString &path : paths) {
+        output += QStringLiteral("+.... %1\n").arg(path);
+    }
+
+    prepareStagedRestore(&model, &fake, output, paths, 100);
+    QVERIFY(model.restoreCheckedItems());
+    fake.completeAllPendingOk();
+
+    // 終端signalは固定文言だけを運ぶため、失敗の詳細はowner束縛のGetRestorePlanStatusで取得する
+    QSignalSpy completedSpy(&model, &FileChangeModel::restoreCompleted);
+    const int statusCount = fake.countKind(FakeRestorePlanTransport::Call::Status);
+    fake.emitPlanFinished(fake.nextManifestId, QStringLiteral("failed"),
+                          QStringLiteral("Restore failed"));
+
+    QCOMPARE(completedSpy.count(), 1);
+    QCOMPARE(completedSpy.at(0).at(0).toBool(), false);
+    QCOMPARE(fake.countKind(FakeRestorePlanTransport::Call::Status), statusCount + 1);
+    QCOMPARE(fake.calls.last().kind, FakeRestorePlanTransport::Call::Status);
+    QCOMPARE(fake.calls.last().manifestId, fake.nextManifestId);
+
+    // 状態のリセット後に応答が届いても、モデルの状態には影響しない
+    fake.completeAllPendingOk();
     QCOMPARE(completedSpy.count(), 1);
 }
 
@@ -834,14 +884,14 @@ void TestFileChangeModel::stagedRestoreIgnoresForeignManifestId()
     QSignalSpy errorSpy(&model, &FileChangeModel::errorOccurred);
 
     // 異なるmanifest idのシグナルは全て無視される
-    fake.emitPlanProgress(QStringLiteral("other-manifest"), 1, 10, QStringLiteral("x"));
+    fake.emitPlanProgress(QStringLiteral("other-manifest"), 1, 10);
     fake.emitPlanFinished(QStringLiteral("other-manifest"), QStringLiteral("completed"), QString());
     QCOMPARE(progressSpy.count(), 0);
     QCOMPARE(completedSpy.count(), 0);
     QCOMPARE(errorSpy.count(), 0);
 
     // 実行中の計画のidは引き続き受け付けられる
-    fake.emitPlanProgress(fake.nextManifestId, 2, 2, QStringLiteral("y"));
+    fake.emitPlanProgress(fake.nextManifestId, 2, 2);
     QCOMPARE(progressSpy.count(), 1);
     QCOMPARE(progressSpy.at(0).at(0).toInt(), 2);
     QCOMPARE(progressSpy.at(0).at(1).toInt(), 2);

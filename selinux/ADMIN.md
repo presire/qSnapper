@@ -63,13 +63,16 @@ File: `/usr/share/dbus-1/system.d/com.presire.qsnapper.Operations.conf`
 
 File: `/usr/share/polkit-1/actions/com.presire.qsnapper.policy`
 
-Authentication requirements per action:
-- `com.presire.qsnapper.list-snapshots`: No authentication required (allow_active)
-- `com.presire.qsnapper.create-snapshot`: Authentication required
-- `com.presire.qsnapper.delete-snapshot`: Authentication required
-- `com.presire.qsnapper.rollback-snapshot`: Authentication required
-- `com.presire.qsnapper.get-file-changes`: No authentication required
-- `com.presire.qsnapper.restore-files`: Authentication required
+Authentication requirements per action (active session):
+- `com.presire.qsnapper.list-snapshots`: No authentication required (`ListConfigs`, `ListSnapshots`)
+- `com.presire.qsnapper.view-diff`: Administrator authentication (`GetFileChanges*`, `GetFileDiff*`)
+- `com.presire.qsnapper.create-snapshot`: Administrator authentication
+- `com.presire.qsnapper.modify-snapshot`: Administrator authentication
+- `com.presire.qsnapper.delete-snapshot`: Administrator authentication
+- `com.presire.qsnapper.rollback-snapshot`: Administrator authentication (`RollbackSnapshot`, `CommitRestorePlan`)
+- `com.presire.qsnapper.configure`: Administrator authentication (`WriteSnapperConfig`, `SetupQuota`)
+
+Actions that require authentication use `auth_admin_keep` for active sessions and `auth_admin` otherwise.
 
 #### Layer 3: SELinux MAC (This Policy)
 
@@ -191,7 +194,7 @@ This is a design decision to avoid conflicts with openSUSE's existing file conte
    - Configuration file read/write under `/etc` (`etc_t` - including `/etc/snapper`)
    - Snapper metadata read/write under `/var/lib` (`var_lib_t` - including directory creation/deletion)
    - Full snapshot directory management (`unlabeled_t`, `fs_t` - `/.snapshots`, including creation/deletion/mount)
-   - File restoration: **user home directories only** (`user_home_t`, `user_home_dir_t`)
+   - File restoration: inside the subvolume of the selected Snapper config (see "File Restoration Restrictions")
    - Log file management (`var_log_t` - create, write, append)
    - Runtime data (`var_run_t`)
    - Temporary file creation (`tmp_t`, `qsnapper_tmp_t`)
@@ -230,16 +233,18 @@ This is a design decision to avoid conflicts with openSUSE's existing file conte
 
 #### File Restoration Restrictions
 
-File restoration operations are restricted to **user home directories only**.  
-This restriction is a security constraint hardcoded in the `.te` policy.  
+File restoration is not limited by file label. A restore can write to any path inside the
+subvolume of the selected Snapper config (for the `root` config, the whole root filesystem),
+so `qsnapper_dbus_t` is allowed to write most file types (`file_type`).
 
-```selinux
-# File restoration - LIMITED TO USER HOME DIRECTORIES ONLY
-allow qsnapper_dbus_t user_home_dir_t:dir { ... };
-allow qsnapper_dbus_t user_home_t:dir { ... };
-allow qsnapper_dbus_t user_home_t:file { ... };
-allow qsnapper_dbus_t user_home_t:lnk_file { ... };
-```
+Restoration is restricted by the D-Bus service instead:
+- The GUI only stages a restore plan (`BeginRestorePlan` / `StageRestoreEntries`).
+  Only `qsnapper_dbus_t` writes files, after `CommitRestorePlan` is authorized by PolicyKit
+  (`com.presire.qsnapper.rollback-snapshot`).
+- A restore plan is bound to the D-Bus connection that created it.
+- Destinations are built from the config's `SUBVOLUME`, and every path is resolved beneath it without following symlinks.
+  Recursive deletion stops at mount boundaries.
+- The restore source must be a read-only snapshot.
 
 ### Domain Transitions
 
@@ -527,6 +532,33 @@ Policy interface names may differ between RHEL and openSUSE:
 
 The current policy depends on standard system labels (`etc_t`, `unlabeled_t`, `fs_t`, `var_lib_t`, `var_log_t`).
 If the system base policy is updated and the definitions of these types change, the qSnapper policy may be affected.
+
+### 7. Opening Links in a Web Browser
+
+Links in the About dialogs are opened through the desktop portal (`org.freedesktop.portal.OpenURI` on the session bus).
+The browser is then started by the user session, so it is not confined by `qsnapper_t`.
+Only `http` and `https` links are opened.
+Only when the portal is clearly absent (service unknown, not activatable, or no session bus), qSnapper falls back to `QDesktopServices`, which starts the default browser directly from `qsnapper_t`.
+If the portal refuses the request, or does not answer in time, qSnapper does not retry through the fallback: a refusal must not be bypassed, and a late answer would open the link twice.
+How `QDesktopServices` starts the browser depends on the platform and desktop environment.
+
+The fallback relies on the domain transition in `qsnapper.te`: browsers labeled `mozilla_exec_t`, `chromium_exec_t`, `msedge_exec_t` or `opera_exec_t` run as `unconfined_t`.
+A browser that does not have one of these labels keeps running as `qsnapper_t`.
+Typical symptoms are a Firefox "Profile Missing" dialog and many AVC denials from `firefox-bin` with `scontext=...:qsnapper_t:...`.
+This happens, for example, with a browser unpacked under the home directory (`user_home_t`), or with a browser labeled `bin_t`.
+
+To make the fallback work for such a browser, relabel only its executables (not the whole directory):
+
+```bash
+# Example: Firefox unpacked from the tarball in the home directory
+sudo semanage fcontext -a -t mozilla_exec_t '/home/<user>/InstallSoftware/FireFox/firefox'
+sudo semanage fcontext -a -t mozilla_exec_t '/home/<user>/InstallSoftware/FireFox/firefox-bin'
+sudo restorecon -v /home/<user>/InstallSoftware/FireFox/firefox /home/<user>/InstallSoftware/FireFox/firefox-bin
+```
+
+With the policy shipped here, relabeling to `mozilla_exec_t` does not change how the browser behaves when it is started from the normal desktop session, because `unconfined_t` has no domain transition for this type. Other policies on your system may add one, so check with `sesearch -T -s unconfined_t -t mozilla_exec_t`.
+Relabeling only addresses the SELinux confinement of the browser. It does not affect file permissions or the browser's own sandbox.
+Do not add a rule that moves every executable in the home directory to `unconfined_t`: if the GUI were compromised, it could run any file there without confinement.
 
 ---
 

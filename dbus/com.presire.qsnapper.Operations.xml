@@ -130,7 +130,6 @@
       <arg name="manifestId" type="s"/>
       <arg name="current" type="i"/>
       <arg name="total" type="i"/>
-      <arg name="filePath" type="s"/>
     </signal>
     <signal name="restorePlanFinished">
       <arg name="manifestId" type="s"/>

@@ -85,6 +85,60 @@ namespace qsnapper::restore {
 
 }
 
+namespace qsnapper::security {
+
+    /**
+     * @brief polkitプロンプト待ちの件数を、呼び出し元UID単位と全体の両方で数える
+     *
+     * プロンプトはタイムアウトを持たないため、未応答のまま滞留し得る
+     * 全体の上限だけでは、1人のローカルユーザが上限まで積むことで他のユーザの操作をすべて拒否させられる
+     * UID単位の上限で1ユーザが占有できる量を抑え、全体の上限で総量を抑える
+     */
+    class PendingAuthorizationBudget
+    {
+    public:
+        /**
+         * @brief 上限を指定して構築する
+         * @param perUidLimit 1つのUIDが同時に保持できる件数の上限
+         * @param globalLimit 全体で同時に保持できる件数の上限
+         */
+        PendingAuthorizationBudget(int perUidLimit, int globalLimit);
+
+        /**
+         * @brief 1件分の枠を確保する
+         * @param uid 呼び出し元のUID
+         * @return UID単位と全体の両方の上限内であれば確保してtrue、それ以外は何もせずfalse
+         */
+        bool tryAcquire(uint uid);
+
+        /**
+         * @brief tryAcquire()で確保した1件分の枠を返す
+         * @param uid tryAcquire()に渡したUID
+         */
+        void release(uint uid);
+
+        /**
+         * @brief 全体の保持件数を返す
+         * @return 保持件数
+         */
+        int total() const;
+
+        /**
+         * @brief 指定したUIDの保持件数を返す
+         * @param uid 呼び出し元のUID
+         * @return 保持件数
+         */
+        int countFor(uint uid) const;
+
+    private:
+        int m_perUidLimit;          // UID単位の上限
+        int m_globalLimit;          // 全体の上限
+        int m_total = 0;            // 全体の保持件数
+        QMap<uint, int> m_perUid;   // UIDごとの保持件数 (0件になったUIDは削除する)
+    };
+
+}
+
 class SnapshotOperations : public QObject, protected QDBusContext
 {
     Q_OBJECT
@@ -139,25 +193,30 @@ private:
 
     static constexpr int IdleTimeoutMs = 5 * 60 * 1000;     // アイドルタイムアウト (5分)
                                                             // 最後のD-Busメソッド呼び出しから本値を超えてアクセスが無い場合、サービスプロセスは自律的に終了する
-    static constexpr int MaxPendingAuthorizations = 8;      // 同時に保持できるPolkitプロンプト待ちの上限
-                                                            // プロンプトはタイムアウトを持たないため、未応答のまま滞留し得る
-                                                            // 1呼び出しあたりの保持量は小さいが、無制限に積ませない
+    static constexpr int MaxPendingAuthorizationsPerUid = 4;    // 1つの呼び出し元UIDが同時に保持できるPolkitプロンプト待ちの上限
+                                                                // 1ユーザが全体の枠を占有して他のユーザの操作を拒否させないようにする
+    static constexpr int MaxPendingAuthorizations = 16;         // 全体で同時に保持できるPolkitプロンプト待ちの上限
+                                                                // プロンプトはタイムアウトを持たないため、未応答のまま滞留し得る
+                                                                // 1呼び出しあたりの保持量は小さいが、無制限に積ませない
     std::unique_ptr<snapper::Snapper> m_snapper;            // 現在のSnapperインスタンス
     ComparisonCache<snapper::Comparison> m_comparisonCache; // m_comparisonCacheは、m_snapperの後に宣言
                                                             // (デストラクション順序: Comparisonが所有するmounts/FilesがSnapperより先に破棄されるようにするため)
     QString m_currentConfig;                                // 現在選択中のSnapper設定名
+    QByteArray m_snapshotListFingerprint;                   // m_snapperが読み込んだ時点の .snapshots の指紋 (空なら一覧の再利用不可)
     QTimer m_idleTimer;                                     // アイドルタイムアウト用タイマ
     qsnapper::restore::RestoreManifestRegistry m_restoreRegistry;
     qsnapper::restore::RestorePlanExecutor m_restoreExecutor;
     QDBusServiceWatcher *m_ownerWatcher = nullptr;
     QMap<QString, RestoreExecution> m_restoreExecutions;
     QMap<QString, QString> m_restorePlanOwners;
+    qsnapper::restore::FinishedRestorePlanStore m_finishedRestorePlans; // 終端した計画の詳細 (ownerだけがGetRestorePlanStatusで取得する)
     std::function<bool(bool *)> m_rootReadOnlyProbe;    // rootサブボリュームのread-only状態を取得する (テストで差し替え可能)
     std::function<bool()> m_rootReadWriteRestorer;      // rootサブボリュームをrwへ戻す (テストで差し替え可能)
 
     std::optional<CallReply> m_deferredReply;               // 遅延応答の継続を実行している間のみ有効
                                                             // replyError()がsendErrorReply()ではなくキャプチャ済みmessageを使う判断に用いる
-    int m_pendingAuthorizations = 0;                        // polkitプロンプト待ちの件数
+    qsnapper::security::PendingAuthorizationBudget m_pendingAuthorizations{
+        MaxPendingAuthorizationsPerUid, MaxPendingAuthorizations};  // polkitプロンプト待ちの件数 (呼び出し元UID単位と全体)
 
 private:
     /**
@@ -204,8 +263,9 @@ private:
 
     /**
      * @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
+     * @param callerUid 認可待ちを開始したときの呼び出し元UID
      */
-    void endPendingAuthorization();
+    void endPendingAuthorization(uint callerUid);
 
     /**
      * @brief 遅延応答経路で本体を実行し、戻り値をD-Bus応答として送出する
@@ -447,6 +507,17 @@ private:
                                  bool forceReload = false);
 
     /**
+     * @brief 一覧の取得用にSnapperインスタンスを取得する
+     *
+     * 同じ設定のインスタンスがあり、.snapshots の指紋が読み込み時と一致する場合だけ、再生成せずに再利用する
+     * 指紋が一致しない・計算できない・未記録の場合は再生成し、外部 (snapper CLIやtimer) による作成・削除・変更を反映する
+     *
+     * @param configName 検証済みSnapper設定名
+     * @return Snapperインスタンスへのポインタ、失敗時はnullptr
+     */
+    snapper::Snapper* getSnapperForListing(const QString &configName);
+
+    /**
      * @brief Snapperインスタンスのスナップショット一覧をCSVに整形する
      */
     QString formatSnapshotToCSV(const snapper::Snapper *snapper);
@@ -545,6 +616,14 @@ private:
      * @return staging/frozen/running/completed/failed/cancelledのいずれか
      */
     static QString restoreManifestStateString(
+        qsnapper::restore::ManifestState state);
+
+    /**
+     * @brief restorePlanFinished signalに載せる終端状態ごとの固定文言を返す
+     * @param state 終端状態
+     * @return pathなどの詳細を含まない固定文言
+     */
+    static QString restorePlanFinishedSignalMessage(
         qsnapper::restore::ManifestState state);
 
     /**
@@ -800,18 +879,21 @@ signals:
      * @param manifestId 実行中計画ID
      * @param current 完了エントリ数
      * @param total 凍結時の総エントリ数
-     * @param filePath 情報漏洩を抑えたbasename
+     *
+     * signalはsystem busの全接続へ届くため、復元中のpathは載せない
      */
     void restorePlanProgress(const QString &manifestId,
                              int current,
-                             int total,
-                             const QString &filePath);
+                             int total);
 
     /**
      * @brief staged restore計画の終端通知
      * @param manifestId 終端した計画ID
      * @param terminalState completed / failed / cancelledのいずれか
-     * @param message 終端理由
+     * @param message 終端状態ごとの固定文言
+     *
+     * signalはsystem busの全接続へ届くため、失敗したpathなどの詳細は載せない
+     * 詳細は計画のownerがGetRestorePlanStatusで取得する (終端後も短時間保持する)
      */
     void restorePlanFinished(const QString &manifestId,
                              const QString &terminalState,

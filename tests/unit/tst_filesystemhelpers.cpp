@@ -45,7 +45,7 @@ private slots:
     void safeRemoveAllBeneathRootStopsAtMountBoundary();
     void safeRemoveAllStopsAtNestedBtrfsSubvolume();
 
-    // --- 復元時のmetadata保持とrename前後の差し替え検出 (M3 / M7) ---
+    // --- 復元時のmetadata保持とrename前後の差し替え検出 ---
     void replaceRegularFileAtReplacesContentWithNewInode();
     void replaceRegularFileAtPreservesSetuidAndSetgid();
     void replaceRegularFileAtCopiesAccessAcl();
@@ -75,6 +75,15 @@ private slots:
     void beneathRootWriteRejectsRegularFileAsDirectoryComponent();
     void beneathRootHappyPathWritesNestedFileWithMode();
     void beneathRootRenameAsideMovesWithinRoot();
+    void beneathRootRenameAsideDoesNotReplaceExisting_data();
+    void beneathRootRenameAsideDoesNotReplaceExisting();
+    void beneathRootMissingParentsFollowSnapshotMetadata();
+    void beneathRootMissingParentsDoNotModifyExistingParents();
+    void beneathRootMissingParentsRejectLiveSymlinkComponent();
+    void snapshotListFingerprintDetectsListChanges();
+    void snapshotListFingerprintDetectsLeadingZeroEntries();
+    void parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode();
+    void beneathRootMissingParentsFollowTrustedParentPolicy();
     void beneathRootSymlinkHelpersApplyWithinRoot();
     void beneathRootStaleResolutionStillRejected();
     void beneathRootRepeatedSwapsDoNotLeakDescriptors();
@@ -305,7 +314,7 @@ void TestFilesystemHelpers::safeRemoveAllRejectsSymlinkIntermediateComponent()
 }
 
 // ============================================================================
-// 再帰削除のmount境界検出 (H2)
+// 再帰削除のmount境界検出
 // ============================================================================
 
 namespace {
@@ -602,7 +611,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
 }
 
 // ============================================================================
-// 復元時のmetadata保持とrename前後の差し替え検出 (M3 / M7)
+// 復元時のmetadata保持とrename前後の差し替え検出
 // ============================================================================
 
 namespace {
@@ -1671,6 +1680,340 @@ void TestFilesystemHelpers::beneathRootRenameAsideMovesWithinRoot()
     QFile verify(asidePath);
     QVERIFY(verify.open(QIODevice::ReadOnly | QIODevice::Text));
     QCOMPARE(verify.readAll(), QByteArray("live"));
+}
+
+void TestFilesystemHelpers::beneathRootRenameAsideDoesNotReplaceExisting_data()
+{
+    QTest::addColumn<QString>("existingKind");
+
+    QTest::newRow("regular file") << QStringLiteral("file");
+    QTest::newRow("symlink")      << QStringLiteral("symlink");
+    QTest::newRow("empty dir")    << QStringLiteral("dir");
+}
+
+void TestFilesystemHelpers::beneathRootRenameAsideDoesNotReplaceExisting()
+{
+    QFETCH(QString, existingKind);
+
+    QTemporaryDir rootDir;
+    QVERIFY(rootDir.isValid());
+
+    QVERIFY(QDir().mkpath(rootDir.path() + QStringLiteral("/a")));
+    const QString sourcePath = rootDir.path() + QStringLiteral("/a/live.txt");
+    {
+        QFile file(sourcePath);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("live");
+    }
+
+    // 退避先の名前を先に占有しておく (renameat()は通常ファイル・symlink・空ディレクトリを黙って置換する)
+    const QString asidePath = rootDir.path() + QStringLiteral("/a/.live.txt.qsnapper-old");
+    const QByteArray asideBytes = QFile::encodeName(asidePath);
+    if (existingKind == QLatin1String("file")) {
+        QFile file(asidePath);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("occupied");
+    }
+    else if (existingKind == QLatin1String("symlink")) {
+        QCOMPARE(::symlink("/nonexistent-target", asideBytes.constData()), 0);
+    }
+    else {
+        QCOMPARE(::mkdir(asideBytes.constData(), 0700), 0);
+    }
+
+    errno = 0;
+    const bool renamed = safeRenamePathNoFollowBeneathRoot(rootDir.path(), sourcePath, asidePath);
+    const int err = errno;
+    QVERIFY(!renamed);
+    QCOMPARE(err, EEXIST);
+
+    // 移動元はそのまま残る
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    QCOMPARE(source.readAll(), QByteArray("live"));
+
+    // 既存のエントリも置換されていない
+    struct stat st {};
+    QCOMPARE(::lstat(asideBytes.constData(), &st), 0);
+    if (existingKind == QLatin1String("file")) {
+        QVERIFY(S_ISREG(st.st_mode));
+        QFile aside(asidePath);
+        QVERIFY(aside.open(QIODevice::ReadOnly));
+        QCOMPARE(aside.readAll(), QByteArray("occupied"));
+    }
+    else if (existingKind == QLatin1String("symlink")) {
+        QVERIFY(S_ISLNK(st.st_mode));
+    }
+    else {
+        QVERIFY(S_ISDIR(st.st_mode));
+    }
+}
+
+/**
+ * @brief 欠けている親ディレクトリはsnapshot側の同じディレクトリのmodeで作成され、snapshot側に無い場合は0700になることを確認する
+ */
+void TestFilesystemHelpers::beneathRootMissingParentsFollowSnapshotMetadata()
+{
+    QTemporaryDir liveDir;
+    QTemporaryDir snapshotDir;
+    QVERIFY(liveDir.isValid() && snapshotDir.isValid());
+
+    // snapshot側: a (0751) / a/b (0710)、a/b/c は存在しない、a/link は別ディレクトリへのsymlink
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("a/b")));
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("elsewhere")));
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a")).constData(), 0751), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a/b")).constData(), 0710), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/elsewhere")).constData(), 0755), 0);
+    QCOMPARE(::symlink("../elsewhere",
+                       QFile::encodeName(snapshotDir.path() + QStringLiteral("/a/link")).constData()), 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/a/b/c"), snapshotFd, false);
+    const bool createdThroughLink = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/a/link"), snapshotFd, false);
+    ::close(snapshotFd);
+    QVERIFY(created);
+    QVERIFY(createdThroughLink);
+
+    const auto modeOf = [&liveDir](const QString &relativePath) {
+        struct stat st {};
+        const QByteArray path = QFile::encodeName(liveDir.path() + QLatin1Char('/') + relativePath);
+        if (::lstat(path.constData(), &st) < 0 || !S_ISDIR(st.st_mode)) {
+            return mode_t(~0);
+        }
+        return mode_t(st.st_mode & 07777);
+    };
+    QCOMPARE(modeOf(QStringLiteral("a")), mode_t(0751));
+    QCOMPARE(modeOf(QStringLiteral("a/b")), mode_t(0710));
+    QCOMPARE(modeOf(QStringLiteral("a/b/c")), mode_t(0700));
+    // snapshot側がsymlinkの場合は「無し」と判定し、リンク先のmetadataを適用しない
+    QCOMPARE(modeOf(QStringLiteral("a/link")), mode_t(0700));
+}
+
+/**
+ * @brief 既存の親ディレクトリのmodeは変更されないことを確認する
+ */
+void TestFilesystemHelpers::beneathRootMissingParentsDoNotModifyExistingParents()
+{
+    QTemporaryDir liveDir;
+    QTemporaryDir snapshotDir;
+    QVERIFY(liveDir.isValid() && snapshotDir.isValid());
+
+    QVERIFY(QDir(liveDir.path()).mkpath(QStringLiteral("a")));
+    QCOMPARE(::chmod(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), 0750), 0);
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("a/b")));
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a")).constData(), 0777), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a/b")).constData(), 0755), 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/a/b"), snapshotFd, false);
+    ::close(snapshotFd);
+    QVERIFY(created);
+
+    struct stat st {};
+    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), 0);
+    QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0750));
+    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a/b")).constData(), &st), 0);
+    QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0755));
+}
+
+/**
+ * @brief live側の途中の成分がsymlinkの場合は失敗し、root外に何も作成しないことを確認する
+ */
+void TestFilesystemHelpers::beneathRootMissingParentsRejectLiveSymlinkComponent()
+{
+    QTemporaryDir liveDir;
+    QTemporaryDir snapshotDir;
+    QTemporaryDir outsideDir;
+    QVERIFY(liveDir.isValid() && snapshotDir.isValid() && outsideDir.isValid());
+
+    QCOMPARE(::symlink(QFile::encodeName(outsideDir.path()).constData(),
+                       QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData()), 0);
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("a/b")));
+    const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+    errno = 0;
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/a/b"), snapshotFd, false);
+    const int err = errno;
+    ::close(snapshotFd);
+
+    QVERIFY(!created);
+    QVERIFY(isAttackRejectionErrno(err));
+    QCOMPARE(fingerprintTree(outsideDir.path()), fingerprintBefore);
+}
+
+/**
+ * @brief .snapshots の指紋が、作成・変更・削除で変わり、変化が無ければ変わらないことを確認する
+ */
+void TestFilesystemHelpers::snapshotListFingerprintDetectsListChanges()
+{
+    QTemporaryDir snapshotsDir;
+    QVERIFY(snapshotsDir.isValid());
+    const QString base = snapshotsDir.path();
+
+    const auto writeInfo = [&base](int number, const QByteArray &content) {
+        const QString dirPath = base + QLatin1Char('/') + QString::number(number);
+        if (!QDir().mkpath(dirPath)) {
+            return false;
+        }
+        // snapperと同じく、一時ファイルからのrenameで置き換える
+        QFile temporary(dirPath + QStringLiteral("/info.xml.tmp"));
+        if (!temporary.open(QIODevice::WriteOnly) || temporary.write(content) != content.size()) {
+            return false;
+        }
+        temporary.close();
+        return ::rename(QFile::encodeName(temporary.fileName()).constData(),
+                        QFile::encodeName(dirPath + QStringLiteral("/info.xml")).constData()) == 0;
+    };
+
+    QVERIFY(writeInfo(1, "one"));
+    QVERIFY(writeInfo(2, "two"));
+
+    const QByteArray initial = snapshotListFingerprint(base);
+    QVERIFY(!initial.isEmpty());
+    QCOMPARE(snapshotListFingerprint(base), initial);
+
+    // 作成
+    QVERIFY(writeInfo(3, "three"));
+    const QByteArray afterCreate = snapshotListFingerprint(base);
+    QVERIFY(!afterCreate.isEmpty());
+    QVERIFY(afterCreate != initial);
+
+    // 変更 (同じサイズの内容でinfo.xmlを置き換える)
+    QVERIFY(writeInfo(2, "TWO"));
+    const QByteArray afterModify = snapshotListFingerprint(base);
+    QVERIFY(afterModify != afterCreate);
+
+    // 削除
+    QVERIFY(QDir(base + QStringLiteral("/1")).removeRecursively());
+    const QByteArray afterDelete = snapshotListFingerprint(base);
+    QVERIFY(afterDelete != afterModify);
+
+    // 判定できない場合は空を返す
+    QVERIFY(snapshotListFingerprint(base + QStringLiteral("/missing")).isEmpty());
+}
+
+/**
+ * @brief 先頭に0が付いた名前のエントリも指紋の対象になることを確認する
+ */
+void TestFilesystemHelpers::snapshotListFingerprintDetectsLeadingZeroEntries()
+{
+    QTemporaryDir snapshotsDir;
+    QVERIFY(snapshotsDir.isValid());
+    const QString base = snapshotsDir.path();
+
+    QVERIFY(QDir().mkpath(base + QStringLiteral("/01")));
+    QFile info(base + QStringLiteral("/01/info.xml"));
+    QVERIFY(info.open(QIODevice::WriteOnly));
+    QCOMPARE(info.write("one"), qint64(3));
+    info.close();
+
+    const QByteArray initial = snapshotListFingerprint(base);
+    QVERIFY(!initial.isEmpty());
+
+    // 同じサイズの内容でinfo.xmlを置き換えても指紋が変わる
+    QFile replacement(base + QStringLiteral("/01/info.xml.tmp"));
+    QVERIFY(replacement.open(QIODevice::WriteOnly));
+    QCOMPARE(replacement.write("ONE"), qint64(3));
+    replacement.close();
+    QCOMPARE(::rename(QFile::encodeName(replacement.fileName()).constData(),
+                      QFile::encodeName(base + QStringLiteral("/01/info.xml")).constData()), 0);
+
+    const QByteArray afterModify = snapshotListFingerprint(base);
+    QVERIFY(!afterModify.isEmpty());
+    QVERIFY(afterModify != initial);
+}
+
+/**
+ * @brief metadata適用の可否が親ディレクトリの所有者とmodeから判定されることを確認する
+ */
+void TestFilesystemHelpers::parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode()
+{
+    const auto makeStat = [](mode_t mode, uid_t uid) {
+        struct stat st {};
+        st.st_mode = mode | S_IFDIR;
+        st.st_uid = uid;
+        return st;
+    };
+
+    // root所有・他ユーザー書き込み不可は安全
+    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0755, 0)));
+    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0700, 0)));
+    // sticky bit付きなら、root所有エントリを他ユーザーは差し替えられない
+    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(01777, 0)));
+    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(01755, 0)));
+    // sticky bitが無いgroup/other書き込みは差し替えられる
+    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0777, 0)));
+    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0770, 0)));
+    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0775, 0)));
+    // 書き込み可能なディレクトリは所有者が差し替えられる
+    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0700, 1000)));
+    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0755, 1000)));
+    // 所有者でも書き込み不可なら差し替えられない
+    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0555, 1000)));
+}
+
+/**
+ * @brief metadata適用の可否が実際の作成結果に反映されることを確認する (root専用)
+ */
+void TestFilesystemHelpers::beneathRootMissingParentsFollowTrustedParentPolicy()
+{
+    // 信頼判定はeuid 0のときだけ作成結果へ反映されるため、root以外では実行しない
+    if (::geteuid() != 0) {
+        QSKIP("requires root to exercise the metadata preservation policy");
+    }
+
+    QTemporaryDir snapshotDir;
+    QVERIFY(snapshotDir.isValid());
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("a")));
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a")).constData(), 0751), 0);
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+
+    // 信頼できる親 (root所有・他ユーザー書き込み不可) ではsnapshot側のmodeを適用する
+    {
+        QTemporaryDir liveDir;
+        QVERIFY(liveDir.isValid());
+        QVERIFY(safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/a"), snapshotFd, true));
+        struct stat st {};
+        QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), 0);
+        QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0751));
+        QCOMPARE(st.st_uid, ::geteuid());
+    }
+
+    // 他ユーザーが書き込める親ではmetadataを適用せず、他ユーザー書き込み不可の0711で作成する
+    {
+        QTemporaryDir liveDir;
+        QVERIFY(liveDir.isValid());
+        QCOMPARE(::chown(QFile::encodeName(liveDir.path()).constData(), 65534, 65534), 0);
+        QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0700), 0);
+
+        const mode_t previousUmask = ::umask(0);
+        const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/a"), snapshotFd, true);
+        ::umask(previousUmask);
+        QVERIFY(created);
+
+        struct stat st {};
+        QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), 0);
+        QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0711));
+        QCOMPARE(st.st_uid, ::geteuid());
+    }
+
+    ::close(snapshotFd);
 }
 
 void TestFilesystemHelpers::beneathRootSymlinkHelpersApplyWithinRoot()

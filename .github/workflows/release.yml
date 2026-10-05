@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
@@ -26,6 +26,36 @@ jobs:
           fi
           echo "VERSION=$tag_ver" >> "$GITHUB_OUTPUT"
           echo "Version: $tag_ver"
+
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    container:
+      image: opensuse/tumbleweed:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          zypper --non-interactive refresh
+          zypper --non-interactive install -y \
+            cmake ninja gcc-c++ python3 \
+            qt6-base-devel qt6-declarative-devel \
+            qt6-quickcontrols2-devel qt6-linguist-devel \
+            qt6-network-devel qt6-test-devel \
+            polkit-devel libpolkit-qt6-1-devel libsnapper-devel \
+            libbtrfsutil-devel scdoc
+
+      - name: Build
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DQSNAPPER_BUILD_TESTS=ON \
+            -DENABLE_SELINUX=OFF
+          cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   build-rpm-opensuse:
     needs: validate
@@ -195,8 +225,10 @@ jobs:
           path: build/*.deb
 
   release:
-    needs: [validate, build-rpm-opensuse, build-rpm-tumbleweed, build-rpm-fedora, build-deb]
+    needs: [validate, test, build-rpm-opensuse, build-rpm-tumbleweed, build-rpm-fedora, build-deb]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 

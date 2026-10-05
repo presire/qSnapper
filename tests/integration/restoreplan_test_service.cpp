@@ -151,8 +151,8 @@ public:
         m_restoreExecutor.setProgressSink(
             [this](const QString &manifestId, int current, int total,
                    const QString &path) {
-                emit restorePlanProgress(manifestId, current, total,
-                                         QFileInfo(path).fileName());
+                Q_UNUSED(path);
+                emit restorePlanProgress(manifestId, current, total);
             });
         m_restoreExecutor.setFinishedSink(
             [this](const QString &manifestId,
@@ -428,7 +428,10 @@ public slots:
 
         qsnapper::restore::ManifestError error =
             qsnapper::restore::ManifestError::None;
-        const auto status = m_restoreRegistry.status(manifestId, owner, &error);
+        auto status = m_restoreRegistry.status(manifestId, owner, &error);
+        if (!status) {
+            status = m_finishedRestorePlans.status(manifestId, owner);
+        }
         if (!status) {
             sendManifestError(error);
             return {};
@@ -476,16 +479,14 @@ signals:
      * @param manifestId 実行中計画id
      * @param current 完了entry数
      * @param total 凍結時の総entry数
-     * @param filePath 情報漏洩を抑えたbasename
      */
-    void restorePlanProgress(const QString &manifestId, int current, int total,
-                             const QString &filePath);
+    void restorePlanProgress(const QString &manifestId, int current, int total);
 
     /**
      * @brief staged restore計画の終端通知
      * @param manifestId 終端した計画id
      * @param terminalState completed/failed/cancelledのいずれか
-     * @param message 終端理由
+     * @param message 終端状態ごとの固定文言
      */
     void restorePlanFinished(const QString &manifestId, const QString &terminalState,
                              const QString &message);
@@ -593,6 +594,29 @@ private:
     }
 
     /**
+     * @brief restorePlanFinished signalに載せる終端状態ごとの固定文言を返す
+     * @param state 終端状態
+     * @return pathなどの詳細を含まない固定文言
+     */
+    static QString restorePlanFinishedSignalMessage(qsnapper::restore::ManifestState state)
+    {
+        using qsnapper::restore::ManifestState;
+
+        switch (state) {
+        case ManifestState::Completed:
+            return QStringLiteral("Restore completed");
+        case ManifestState::Cancelled:
+            return QStringLiteral("Restore cancelled");
+        case ManifestState::Staging:
+        case ManifestState::Frozen:
+        case ManifestState::Running:
+        case ManifestState::Failed:
+            break;
+        }
+        return QStringLiteral("Restore failed");
+    }
+
+    /**
      * @brief 復元方式をD-Bus contractの文字列表現へ変換する
      * @param mode 変換対象方式
      * @return yastまたはdirect
@@ -672,9 +696,20 @@ private:
                            qsnapper::restore::ManifestState terminal,
                            const QString &messageText)
     {
+        const QString owner = m_restorePlanOwners.value(manifestId);
+        qsnapper::restore::ManifestStatus finishedStatus =
+            m_restoreRegistry.status(manifestId, owner, nullptr)
+                .value_or(qsnapper::restore::ManifestStatus{});
+        finishedStatus.id = manifestId;
+        finishedStatus.state = terminal;
+        if (finishedStatus.lastError.isEmpty()) {
+            finishedStatus.lastError = messageText;
+        }
+        m_finishedRestorePlans.record(owner, finishedStatus);
+
         emit restorePlanFinished(manifestId,
                                  restoreManifestStateString(terminal),
-                                 messageText);
+                                 restorePlanFinishedSignalMessage(terminal));
 
         m_restoreRegistry.remove(manifestId);
         m_restorePlanOwners.remove(manifestId);
@@ -707,6 +742,7 @@ private:
     qsnapper::restore::RestoreManifestRegistry m_restoreRegistry;
     qsnapper::restore::RestorePlanExecutor m_restoreExecutor;
     QMap<QString, QString> m_restorePlanOwners;
+    qsnapper::restore::FinishedRestorePlanStore m_finishedRestorePlans;
     const QString m_authLogPath;
     const QString m_applyLogPath;
     int m_authorizationCount = 0;

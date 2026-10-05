@@ -6,6 +6,7 @@
 #include <memory>
 
 class QLocalServer;
+class QLocalSocket;
 class QLockFile;
 
 /**
@@ -20,10 +21,11 @@ class QLockFile;
  * 3. 戻り値がtrueの場合、本インスタンスがプライマリとなる
  *    raiseRequested()シグナルをウィンドウの前面化処理へ接続する
  *
- * サーバ名は "qsnapper-<UID>" 形式で、マルチユーザ環境でもユーザごとに独立して1インスタンスを起動可能
+ * ソケットとlock fileはユーザ専用のruntimeディレクトリ (XDG_RUNTIME_DIR) 配下に置くため、マルチユーザ環境でもユーザごとに独立して1インスタンスを起動可能
+ * 接続先のサーバは、SO_PEERCREDで自分と同じUIDのプロセスであることを確認してからraise要求を送る
  *
- * @note 通常は XDG_RUNTIME_DIR 配下に lock を置く。未設定環境では /tmp にフォールバックするが、
- *       この分岐は、GUI側の利便性確保を目的とした劣化運転であり、詳細な前提は実装側コメントを参照
+ * @note runtimeディレクトリを使えない場合 (QStandardPathsが所有者やパーミッションの不正を検出した場合など) は、
+ *       共有の /tmp にはフォールバックせず、二重起動防止を無効にして起動を許容する
  */
 class SingleInstanceGuard : public QObject
 {
@@ -34,9 +36,11 @@ private:
     QString serverName() const;             // サーバ名を生成する
     QString lockFilePath() const;           // ロックファイルパスを生成する
     bool tryAcquireLock();                  // ロック取得を試みる
+    static bool isPeerSameUser(const QLocalSocket &socket); // 接続先が同じUIDのプロセスかを確認する
 
     // リソース
     QLocalServer *m_server;                 // 単一インスタンス用ローカルサーバ
+    QString m_runtimeDir;                   // ユーザ専用のruntimeディレクトリ (使えない場合は空)
     std::unique_ptr<QLockFile> m_lockFile;  // 単一インスタンス用ロックファイル
 
 public:
@@ -49,6 +53,7 @@ public:
      *
      * 既存インスタンスが存在する場合は、そのインスタンスへraise要求を送信してfalseを返す
      * 存在しない場合は自身がプライマリとなり、QLocalServerの待ち受けを開始してtrueを返す
+     * runtimeディレクトリを使えない場合は、二重起動防止を行わずにtrueを返す
      *
      * @return プライマリ取得成功時: true、既存インスタンスあり: false
      */

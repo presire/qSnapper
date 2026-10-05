@@ -88,6 +88,8 @@ private slots:
     void stageOnFrozenManifestIsRejectedWithoutGrowth();
     void errorCodesForMissingWrongOwnerAndExpiredAreIndistinguishableAtTheApiBoundary();
     void keepAliveExtendsTtlWithoutMutatingState();
+    void finishedPlanStatusIsOwnerBoundAndExpires();
+    void finishedPlanStoreIsBoundedAndClearedPerOwner();
 };
 
 void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
@@ -1199,6 +1201,79 @@ void TestRestoreManifest::keepAliveExtendsTtlWithoutMutatingState()
     QVERIFY(stillAlive.has_value());
     QCOMPARE(stillAlive->cursor, beforeKeepAlive->cursor);
     QCOMPARE(stillAlive->state, beforeKeepAlive->state);
+}
+
+void TestRestoreManifest::finishedPlanStatusIsOwnerBoundAndExpires()
+{
+    qint64 nowMs = kInitialTimeMs;
+    FinishedRestorePlanStore store;
+    store.setClock([&nowMs]() { return nowMs; });
+
+    ManifestStatus finished;
+    finished.id = QStringLiteral("rm-finished");
+    finished.state = ManifestState::Failed;
+    finished.totalEntries = 3;
+    finished.processed = 1;
+    finished.lastError = QStringLiteral("Failed to restore path: /etc/example.conf");
+    store.record(QStringLiteral(":1.1"), finished);
+
+    // 終端理由の詳細はownerだけが取得できる
+    const auto ownStatus = store.status(finished.id, QStringLiteral(":1.1"));
+    QVERIFY(ownStatus.has_value());
+    QCOMPARE(ownStatus->state, ManifestState::Failed);
+    QCOMPARE(ownStatus->processed, 1);
+    QCOMPARE(ownStatus->lastError, finished.lastError);
+
+    QVERIFY(!store.status(finished.id, QStringLiteral(":1.2")).has_value());
+    QVERIFY(!store.status(finished.id, QString()).has_value());
+    QVERIFY(!store.status(QStringLiteral("rm-unknown"), QStringLiteral(":1.1")).has_value());
+
+    // 保持期間を過ぎるとownerからも取得できない
+    nowMs += FinishedRestorePlanStore::kDefaultRetentionMs - 1;
+    QVERIFY(store.status(finished.id, QStringLiteral(":1.1")).has_value());
+    nowMs += 1;
+    QVERIFY(!store.status(finished.id, QStringLiteral(":1.1")).has_value());
+    QCOMPARE(store.count(), 0);
+
+    // idが空の状態は記録しない
+    store.record(QStringLiteral(":1.1"), ManifestStatus{});
+    QCOMPARE(store.count(), 0);
+}
+
+void TestRestoreManifest::finishedPlanStoreIsBoundedAndClearedPerOwner()
+{
+    qint64 nowMs = kInitialTimeMs;
+    FinishedRestorePlanStore store;
+    store.setClock([&nowMs]() { return nowMs; });
+
+    // 上限を超えて記録すると、最も早く失効するものから破棄される
+    const int total = FinishedRestorePlanStore::kMaxEntries + 2;
+    for (int i = 0; i < total; ++i) {
+        ManifestStatus status;
+        status.id = QStringLiteral("rm-%1").arg(i);
+        status.state = ManifestState::Completed;
+        store.record(QStringLiteral(":1.%1").arg(i % 2), status);
+        ++nowMs;
+    }
+    QCOMPARE(store.count(), FinishedRestorePlanStore::kMaxEntries);
+    QCOMPARE(store.countForOwner(QStringLiteral(":1.0")), FinishedRestorePlanStore::kMaxEntries / 2);
+    QCOMPARE(store.countForOwner(QStringLiteral(":1.1")), FinishedRestorePlanStore::kMaxEntries / 2);
+    QCOMPARE(store.countForOwner(QStringLiteral(":1.2")), 0);
+    QVERIFY(!store.status(QStringLiteral("rm-0"), QStringLiteral(":1.0")).has_value());
+    QVERIFY(!store.status(QStringLiteral("rm-1"), QStringLiteral(":1.1")).has_value());
+    QVERIFY(store.status(QStringLiteral("rm-%1").arg(total - 1),
+                         QStringLiteral(":1.%1").arg((total - 1) % 2)).has_value());
+
+    // ownerの切断時は、そのownerの記録だけを破棄する
+    const int removed = store.removeByOwner(QStringLiteral(":1.0"));
+    QCOMPARE(removed, FinishedRestorePlanStore::kMaxEntries / 2);
+    QCOMPARE(store.count(), FinishedRestorePlanStore::kMaxEntries / 2);
+    QCOMPARE(store.countForOwner(QStringLiteral(":1.0")), 0);
+    QCOMPARE(store.countForOwner(QStringLiteral(":1.1")), FinishedRestorePlanStore::kMaxEntries / 2);
+    QVERIFY(!store.status(QStringLiteral("rm-%1").arg(total - 2),
+                          QStringLiteral(":1.0")).has_value());
+    QVERIFY(store.status(QStringLiteral("rm-%1").arg(total - 1),
+                         QStringLiteral(":1.1")).has_value());
 }
 
 QTEST_MAIN(TestRestoreManifest)

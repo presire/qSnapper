@@ -16,9 +16,7 @@ qSnapperは、SELinux Mandatory Access Control (MAC)に対応したQt6/QMLベー
     - [CMake経由でのインストール](#cmake経由でのインストール)
     - [スタンドアロンインストール](#スタンドアロンインストール)
   - [設定](#設定)
-    - [ブール値の設定](#ブール値の設定)
-      - [1. `qsnapper_manage_all_snapshots` (デフォルト: ON)](#1-qsnapper_manage_all_snapshots-デフォルト-on)
-      - [2. `qsnapper_user_access` (デフォルト: ON)](#2-qsnapper_user_access-デフォルト-on)
+    - [ポリシーの適用範囲](#ポリシーの適用範囲)
   - [検証](#検証)
     - [ポリシーモジュールのインストール確認](#ポリシーモジュールのインストール確認)
     - [ファイルコンテキストの確認](#ファイルコンテキストの確認)
@@ -145,48 +143,16 @@ sudo make install
 
 ## 設定
 
-### ブール値の設定
+### ポリシーの適用範囲
 
-qSnapperポリシーは、動作をカスタマイズするための2つのブール値を提供します。
+このポリシーモジュールは設定可能なブール値を定義していません。
+アクセスは代わりに次の仕組みで制御されます:
 
-#### 1. `qsnapper_manage_all_snapshots` (デフォルト: ON)
+- **GUIの起動**: `qsnapper_t` は `qsnapper_exec_t` のドメイン遷移で起動します。制限が必要な場合はローカルポリシーで追加します。
+- **特権操作**: D-Busサービス (`qsnapper_dbus_t`) は全ての操作でPolicyKitの認可を確認します。アクションと既定値は [`ADMIN_JP.md`](ADMIN_JP.md) に記載しています。
+- **復元の範囲**: 復元先はSnapper設定の `SUBVOLUME` であり、ユーザーホームディレクトリに限定されません。認可と復元先の検査は [`ADMIN_JP.md`](ADMIN_JP.md) に記載しています。
 
-D-Busサービスがスナップショットから任意のファイルを復元できるかを制御します。
-
-**有効化(デフォルト):**
-
-```bash
-sudo setsebool -P qsnapper_manage_all_snapshots on
-```
-
-**無効化(ユーザーホームディレクトリのみ復元可能):**
-
-```bash
-sudo setsebool -P qsnapper_manage_all_snapshots off
-```
-
-#### 2. `qsnapper_user_access` (デフォルト: ON)
-
-一般ユーザーがqSnapper GUIアプリケーションを起動できるかを制御します。
-
-**有効化(デフォルト):**
-
-```bash
-sudo setsebool -P qsnapper_user_access on
-```
-
-**無効化(管理者のみ起動可能):**
-
-```bash
-sudo setsebool -P qsnapper_user_access off
-```
-
-**現在の設定を確認:**
-
-```bash
-getsebool qsnapper_manage_all_snapshots
-getsebool qsnapper_user_access
-```
+このモジュールに `setsebool` で設定する項目はありません。ローカルの変更は別のローカルポリシーモジュールとして追加してください。
 
 ---
 

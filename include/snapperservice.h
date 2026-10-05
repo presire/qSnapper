@@ -41,27 +41,33 @@ public:
     Q_INVOKABLE void setCurrentConfig(const QString &name);     // 現在の設定を変更する
     Q_INVOKABLE void refreshConfigs();                          // 設定一覧を更新する
 
+    // 外部ブラウザでURLを開く (QML公開)
+    Q_INVOKABLE bool openExternalUrl(const QString &url);       // URLを外部ブラウザで開く
+
     // スナップショット作成可否判定
     Q_INVOKABLE bool createSnapshotAllowed(const QString &snapshotType) const;  // 指定種別のスナップショット作成可否を判定する
 
     // スナップショット作成 (QML公開)
-    Q_INVOKABLE FsSnapshot* createSingle(const QString &description,            // 単発スナップショットを作成する
-                                         FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
-                                         bool important = false,
-                                         const QVariantMap &userdata = QVariantMap());
-    Q_INVOKABLE FsSnapshot* createPre(const QString &description,               // Preスナップショットを作成する
-                                      FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
-                                      bool important = false,
-                                      const QVariantMap &userdata = QVariantMap());
-    Q_INVOKABLE FsSnapshot* createPost(const QString &description,              // Postスナップショットを作成する
-                                       int previousNumber,
-                                       FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
-                                       bool important = false,
-                                       const QVariantMap &userdata = QVariantMap());
+    Q_INVOKABLE int createSingle(const QString &description,                    // 単発スナップショットを作成し番号を返す
+                                 FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
+                                 bool important = false,
+                                 const QVariantMap &userdata = QVariantMap());
+    Q_INVOKABLE int createPre(const QString &description,                       // Preスナップショットを作成し番号を返す
+                              FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
+                              bool important = false,
+                              const QVariantMap &userdata = QVariantMap());
+    Q_INVOKABLE int createPost(const QString &description,                      // Postスナップショットを作成し番号を返す
+                               int previousNumber,
+                               FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
+                               bool important = false,
+                               const QVariantMap &userdata = QVariantMap());
 
     // スナップショット取得・操作
-    Q_INVOKABLE QList<FsSnapshot*> all();                                       // 全スナップショットを取得する
-    Q_INVOKABLE FsSnapshot* find(int number);                                   // 指定番号のスナップショットを検索する
+    // 返すオブジェクトはparentを持たず、呼び出し側が所有する
+    // find()はQObjectを直接返すため、QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される
+    // all()はリストを返し、QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++からのみ呼ぶ
+    QList<FsSnapshot*> all();                                                   // 全スナップショットを取得する (C++専用、呼び出し側が所有)
+    Q_INVOKABLE FsSnapshot* find(int number);                                   // 指定番号のスナップショットを検索する (QML可、呼び出し側が所有)
     Q_INVOKABLE bool rollback(int number);                                      // 指定番号へロールバックする
     Q_INVOKABLE bool deleteSnapshot(int number);                                // 単一スナップショットを削除する
     Q_INVOKABLE bool modifySnapshot(int number, const QString &description,     // スナップショット情報を変更する
@@ -75,7 +81,7 @@ signals:
     void configuredChanged(bool configured);                            // 設定状態変更時に発行する
     void configsChanged();                                              // 設定一覧変更時に発行する
     void currentConfigChanged();                                        // 現在設定変更時に発行する
-    void snapshotCreated(FsSnapshot *snapshot);                         // スナップショット作成成功時に発行する
+    void snapshotCreated(FsSnapshot *snapshot);                         // スナップショット作成成功時に発行する (所有者はSnapperService、発行中のみ有効)
     void snapshotCreationFailed(const QString &error);                  // スナップショット作成失敗時に発行する
     void rollbackCompleted();                                           // ロールバック完了時に発行する
     void rollbackFailed(const QString &error);                          // ロールバック失敗時に発行する
@@ -86,11 +92,11 @@ signals:
 
 private:
     // 内部作成ヘルパー
-    FsSnapshot* create(FsSnapshot::SnapshotType snapshotType,           // スナップショットを作成する内部ヘルパー
-                       const QString &description, FsSnapshot *previous = nullptr,
-                       FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
-                       bool important = false,
-                       const QVariantMap &userdata = QVariantMap());
+    int create(FsSnapshot::SnapshotType snapshotType,                   // スナップショットを作成する内部ヘルパー
+               const QString &description, int previousNumber = -1,
+               FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
+               bool important = false,
+               const QVariantMap &userdata = QVariantMap());
 
     // パス・環境判定
     QString targetRoot() const;                                     // ターゲットルートパスを取得する
@@ -101,7 +107,7 @@ private:
     void setupSnapperQuota();                                       // Snapperクォータを設定する
 
     // 解析・実行
-    QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput); // CSV出力を解析してスナップショットリストを生成する
+    QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput); // CSV出力を解析してスナップショットリストを生成する (呼び出し側が所有)
     bool reconnect();                                               // D-Busサービスへ再接続する
     static SnapperService *s_instance;                              // シングルトンインスタンス
 

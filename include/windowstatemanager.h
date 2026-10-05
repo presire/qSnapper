@@ -8,8 +8,7 @@ class QQuickWindow;
 /**
  * @brief メインウィンドウのサイズと最大化状態を永続化するクラス
  *
- * アプリケーション終了時に通常状態 (非最大化) の幅・高さと最大化状態をQSettingsへ保存し、
- * 次回起動時にウィンドウへ復元する
+ * アプリケーション終了時に通常状態 (非最大化) の幅・高さと最大化状態をQSettingsへ保存し、次回起動時にウィンドウへ復元する
  * 最大化中は通常状態のサイズを追跡して保持することで、最大化解除時に元のサイズへ戻せるようにする
  *
  * 設定キー (グループ window) は既存の theme/mode と同じ形式で保存する:
@@ -24,7 +23,7 @@ class WindowStateManager : public QObject
 public:
     // コンストラクタ/デストラクタ
     explicit WindowStateManager(QObject *parent = nullptr);    // コンストラクタ
-    ~WindowStateManager();                                      // デストラクタ
+    ~WindowStateManager();                                     // デストラクタ
 
     /**
      * @brief 保存済みのウィンドウ状態を復元する

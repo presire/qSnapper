@@ -5,8 +5,10 @@
 #include <QDBusMetaType>
 #include <QMap>
 #include <QDebug>
+#include <memory>
 #include "snapperservice.h"
 #include "csvrecord.h"
+#include "externalurlopener.h"
 
 // QVariantMap --> QMap<QString,QString> 変換ヘルパー
 static QMap<QString, QString> toStringMap(const QVariantMap &src)
@@ -189,6 +191,25 @@ void SnapperService::refreshConfigs()
     }
 }
 
+/**
+ * @brief URLを外部ブラウザで開く
+ *
+ * デスクトップポータル経由で開く (失敗時はQDesktopServicesへ切り替える)
+ * SELinuxが有効な場合、本アプリケーションはSELinuxのqsnapper_tで動作する
+ * そのため、Webブラウザを直接起動するとqsnapper_tの制限下で動作する
+ *
+ * ポータル経由の場合は、Webブラウザはユーザセッション側のプロセスとして起動される
+ *
+ * ただし、httpとhttps以外のURLはアクセス不可とする
+ *
+ * @param url 開くURL
+ * @return 開く処理を開始できた場合はtrue
+ */
+bool SnapperService::openExternalUrl(const QString &url)
+{
+    return qsnapper::desktop::openExternalUrl(QUrl(url, QUrl::StrictMode), this);
+}
+
 void SnapperService::setCurrentConfig(const QString &name)
 {
     if (name == m_currentConfig) return;
@@ -244,46 +265,46 @@ bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
  * @brief シングルスナップショットを作成
  *
  * 単一のスナップショットを作成する
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返す
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合は-1を返す
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 成功時: 作成されたスナップショット、失敗時: nullptr
+ * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-FsSnapshot* SnapperService::createSingle(const QString &description,
-                                         FsSnapshot::CleanupAlgorithm cleanup,
-                                         bool important,
-                                         const QVariantMap &userdata)
+int SnapperService::createSingle(const QString &description,
+                                 FsSnapshot::CleanupAlgorithm cleanup,
+                                 bool important,
+                                 const QVariantMap &userdata)
 {
     if (!createSnapshotAllowed("single")) {
-        return nullptr;
+        return -1;
     }
 
-    return create(FsSnapshot::SnapshotType::Single, description, nullptr, cleanup, important, userdata);
+    return create(FsSnapshot::SnapshotType::Single, description, -1, cleanup, important, userdata);
 }
 
 /**
  * @brief Preスナップショットを作成
  *
  * 変更前のスナップショット (Pre)を作成する
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合はnullptrを返す
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合は-1を返す
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 成功時: 作成されたスナップショット、失敗時: nullptr
+ * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-FsSnapshot* SnapperService::createPre(const QString &description,
-                                      FsSnapshot::CleanupAlgorithm cleanup,
-                                      bool important,
-                                      const QVariantMap &userdata)
+int SnapperService::createPre(const QString &description,
+                              FsSnapshot::CleanupAlgorithm cleanup,
+                              bool important,
+                              const QVariantMap &userdata)
 {
     if (!createSnapshotAllowed("around")) {
-        return nullptr;
+        return -1;
     }
 
-    return create(FsSnapshot::SnapshotType::Pre, description, nullptr, cleanup, important, userdata);
+    return create(FsSnapshot::SnapshotType::Pre, description, -1, cleanup, important, userdata);
 }
 
 /**
@@ -296,35 +317,38 @@ FsSnapshot* SnapperService::createPre(const QString &description,
  * @param previousNumber 対応するPreスナップショットの番号
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 成功時: 作成されたスナップショット、失敗時: nullptr
+ * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-FsSnapshot* SnapperService::createPost(const QString &description,
-                                       int previousNumber,
-                                       FsSnapshot::CleanupAlgorithm cleanup,
-                                       bool important,
-                                       const QVariantMap &userdata)
+int SnapperService::createPost(const QString &description,
+                               int previousNumber,
+                               FsSnapshot::CleanupAlgorithm cleanup,
+                               bool important,
+                               const QVariantMap &userdata)
 {
     if (!createSnapshotAllowed("around")) {
-        return nullptr;
+        return -1;
     }
 
-    FsSnapshot *previous = find(previousNumber);
+    // 存在確認だけに使うため、find()が返したオブジェクトはこのスコープで解放する
+    const std::unique_ptr<FsSnapshot> previous(find(previousNumber));
 
     if (!previous) {
         qCCritical(snapperLog) << "Previous filesystem snapshot was not found:" << previousNumber;
         emit snapshotCreationFailed(tr("Previous snapshot was not found."));
-        return nullptr;
+        return -1;
     }
 
-    return create(FsSnapshot::SnapshotType::Post, description, previous, cleanup, important, userdata);
+    return create(FsSnapshot::SnapshotType::Post, description, previous->number(), cleanup, important, userdata);
 }
 
 /**
  * @brief 全てのスナップショットを取得
  *
  * D-Bus経由でSnapperに問い合わせ、全てのスナップショットのリストを取得する
+ * 返したオブジェクトはparentを持たず、呼び出し側が所有する
+ * QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++から呼ぶこと
  *
- * @return スナップショットのリスト
+ * @return スナップショットのリスト (呼び出し側が解放する)
  */
 QList<FsSnapshot*> SnapperService::all()
 {
@@ -353,18 +377,24 @@ QList<FsSnapshot*> SnapperService::all()
  *
  * スナップショット番号を指定して、該当するスナップショットを検索する
  *
+ * 一致しなかったオブジェクトはここで解放し、一致したものだけを呼び出し側へ渡す
+ * (QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される)
+ *
  * @param number スナップショット番号
- * @return 見つかったスナップショット、見つからない場合はnullptr
+ * @return 見つかったスナップショット (呼び出し側が解放する)、見つからない場合はnullptr
  */
 FsSnapshot* SnapperService::find(int number)
 {
-    QList<FsSnapshot*> snapshots = all();
+    FsSnapshot *found = nullptr;
+    const QList<FsSnapshot*> snapshots = all();
     for (FsSnapshot *snapshot : snapshots) {
-        if (snapshot->number() == number) {
-            return snapshot;
+        if (!found && snapshot->number() == number) {
+            found = snapshot;
+        } else {
+            delete snapshot;
         }
     }
-    return nullptr;
+    return found;
 }
 
 /**
@@ -456,28 +486,27 @@ bool SnapperService::deleteSnapshot(int number)
  *
  * @param snapshotType スナップショットのタイプ
  * @param description スナップショットの説明
- * @param previous 前のスナップショット (Postタイプの場合)
+ * @param previousNumber 対応するPreスナップショットの番号 (Postタイプ以外は-1)
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
- * @return 成功時: 作成されたスナップショット、失敗時: nullptr
+ * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
-                                   const QString &description,
-                                   FsSnapshot *previous,
-                                   FsSnapshot::CleanupAlgorithm cleanup,
-                                   bool important,
-                                   const QVariantMap &userdata)
+int SnapperService::create(FsSnapshot::SnapshotType snapshotType,
+                           const QString &description,
+                           int previousNumber,
+                           FsSnapshot::CleanupAlgorithm cleanup,
+                           bool important,
+                           const QVariantMap &userdata)
 {
     if (!m_dbusInterface || !m_dbusInterface->isValid()) {
         if (!reconnect()) {
             qCCritical(snapperLog) << "D-Bus interface is not valid";
             emit snapshotCreationFailed(tr("D-Bus connection failed."));
-            return nullptr;
+            return -1;
         }
     }
 
     QString type = FsSnapshot::snapshotTypeToString(snapshotType);
-    int preNumber = previous ? previous->number() : -1;
     QString cleanupStr = FsSnapshot::cleanupAlgorithmToString(cleanup);
     if (cleanupStr.isEmpty()) {
         cleanupStr = "none";
@@ -488,7 +517,7 @@ FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
                                                       m_currentConfig,
                                                       type,
                                                       description,
-                                                      preNumber,
+                                                      previousNumber,
                                                       cleanupStr,
                                                       QVariant::fromValue(userdataMap),
                                                       important);
@@ -496,21 +525,22 @@ FsSnapshot* SnapperService::create(FsSnapshot::SnapshotType snapshotType,
     if (!reply.isValid()) {
         qCCritical(snapperLog) << "Failed to create snapshot via D-Bus:" << reply.error().message();
         emit snapshotCreationFailed(tr("Failed to create snapshot: %1").arg(reply.error().message()));
-        return nullptr;
+        return -1;
     }
 
     // 一覧の末尾ではなく、サーバーが応答で返した番号で作成されたスナップショットを特定する
     // (並行して作成された別のスナップショットとの取り違えを防ぐ)
     const int createdNumber = qsnapper::csv::parseCreatedSnapshotNumber(reply.value());
-    FsSnapshot *newSnapshot = createdNumber > 0 ? find(createdNumber) : nullptr;
+    // find()が返したオブジェクトはこのスコープで解放する (snapshotCreatedの受信側はシグナル発行中だけ参照できる)
+    const std::unique_ptr<FsSnapshot> newSnapshot(createdNumber > 0 ? find(createdNumber) : nullptr);
     if (!newSnapshot) {
         qCWarning(snapperLog) << "Created snapshot could not be identified from the reply";
         emit snapshotCreationFailed(tr("The snapshot was created, but it could not be identified."));
-        return nullptr;
+        return -1;
     }
 
-    emit snapshotCreated(newSnapshot);
-    return newSnapshot;
+    emit snapshotCreated(newSnapshot.get());
+    return createdNumber;
 }
 
 /**
@@ -637,8 +667,10 @@ void SnapperService::setupSnapperQuota()
  *
  * Snapperから取得したCSV形式の出力をパースし、FsSnapshotオブジェクトのリストに変換する
  *
+ * 生成したオブジェクトはparentを持たず、所有権は呼び出し側に移る
+ *
  * @param csvOutput CSV形式のスナップショットリスト
- * @return パースされたスナップショットのリスト
+ * @return パースされたスナップショットのリスト (呼び出し側が解放する)
  */
 QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 {
@@ -651,11 +683,12 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 
     for (int i = 1; i < lines.size(); ++i) {
         QString line = lines[i];
-        // 1行 = 1レコードの前提は、サーバー側のisRecordSafeText()が制御文字 (改行含む) をfail-closedで拒否するため維持される
+        // 1行 = 1レコードの前提は、サーバー側がdescription等の制御文字 (改行含む) をU+FFFDに置き換えて出力するため維持される
         // 行分割は変更せず、フィールド分割のみRFC 4180対応のsplitRecord()へ置き換える
         // これによりカンマを含むdescription等が列ずれを起こさなくなる (無quoteの旧サーバー出力もそのまま解釈できる)
         QStringList fields = qsnapper::csv::splitRecord(line);
 
+        // 引用符が閉じていない行はsplitRecord()が空のリストを返すため、ここで除外される
         if (fields.size() < 7) {
             continue;
         }
@@ -701,7 +734,7 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
         }
 
         FsSnapshot *snapshot = new FsSnapshot(number, type, previousNumber, timestamp,
-                                              user, cleanupAlgo, description, userdata, this);
+                                              user, cleanupAlgo, description, userdata);
         snapshots.append(snapshot);
     }
 

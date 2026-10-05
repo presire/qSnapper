@@ -381,52 +381,96 @@ make -j$(nproc)
 
 ```
 qSnapper/
-├── CMakeLists.txt             # Build configuration
-├── src/                       # C++ source files
-│   ├── main.cpp              # Application entry point
-│   ├── fssnapshot.cpp        # Snapshot data model
-│   ├── fssnapshotstore.cpp   # Snapshot data store
-│   ├── snapperservice.cpp    # Snapper service interface
-│   ├── snapshotlistmodel.cpp # Snapshot list model
-│   ├── snapshotgroupmodel.cpp # Pre/Post snapshot grouping model
-│   ├── filechangemodel.cpp   # File change tree model
-│   ├── thememanager.cpp      # Theme management (Light/Dark mode)
-│   └── dbusservice/          # D-Bus service implementation
-│       ├── main.cpp          # D-Bus service entry point
-│       └── snapshotoperations.cpp  # D-Bus method implementations
-├── include/                  # Header files
-├── qml/                      # QML user interface
-│   ├── Main.qml             # Main window with theme support
-│   ├── pages/               # Page components
-│   │   └── SnapshotListPage.qml
-│   └── components/          # Reusable components
-│       ├── SnapshotItem.qml
-│       ├── SnapshotDetailDialog.qml
-│       ├── RestorePreviewDialog.qml
-│       ├── SnapshotTableHeader.qml
-│       ├── SnapshotTableRow.qml
-│       ├── AboutqSnapperDialog.qml
-│       └── AboutQtDialog.qml
-├── cmake/                   # CMake modules
-│   └── packaging.cmake      # CPack packaging configuration
-├── icons/                   # Application icons
-├── dbus/                    # D-Bus configuration files
-├── polkit/                  # PolicyKit policy files
-├── man/                     # Manual page source (scdoc)
-│   └── qsnapper.1.scd      # qsnapper(1) man page source
-├── selinux/                 # SELinux policy module
-│   ├── qsnapper.te          # Type enforcement rules
-│   ├── qsnapper.if          # Interface definitions
-│   └── qsnapper.fc.in       # File context definitions
-├── Licenses/                # Third-party licenses
-│   ├── Qt.md
-│   ├── D-Bus.md
-│   ├── PolicyKit.md
-│   ├── Polkit-Qt.md
-│   └── Snapper.md
-└── translations/            # Translation files
-    ├── qsnapper_ja.ts       # Japanese translation
-    └── qsnapper_de.ts       # German translation
+├── CMakeLists.txt                                  # Top-level build configuration (GUI, D-Bus service, tests, packaging)
+├── qsnapper.desktop.in                             # Desktop entry template
+├── LICENSE.md                                      # Project license
+├── README.md / README_JP.md                        # Documentation (English / Japanese)
+├── .github/workflows/                              # CI workflows
+│   └── release.yml                                 # CI: tests, RPM/DEB builds and release on version tags
+├── src/                                            # C++ sources
+│   ├── main.cpp                                    # GUI application entry point
+│   ├── snapperservice.cpp                          # Client-side D-Bus interface to the Snapper service
+│   ├── fssnapshot.cpp                              # Snapshot data model (one snapshot)
+│   ├── fssnapshotstore.cpp                         # Per-user persistence of Pre snapshot numbers
+│   ├── snapshotlistmodel.cpp                       # Snapshot list model
+│   ├── snapshotgroupmodel.cpp                      # Pre/Post snapshot grouping model
+│   ├── filechangemodel.cpp                         # File change tree model (comparison, diff, restore plan)
+│   ├── thememanager.cpp                            # Theme management (Light/Dark mode)
+│   ├── windowstatemanager.cpp                      # Persistence of window size and maximized state
+│   ├── singleinstanceguard.cpp                     # Single-instance guard (lock file and local socket)
+│   └── dbusservice/                                # Privileged D-Bus service (runs as root)
+│       ├── main.cpp                                # Service entry point (object registration, logging, idle timeout)
+│       ├── snapshotoperations.{cpp,h}              # D-Bus methods (snapshots, restore plans, polkit authorization)
+│       ├── inputvalidator.{cpp,h}                  # Validation of untrusted D-Bus input
+│       ├── filesystemhelpers.{cpp,h}               # Safe file operations beneath a root (no symlink following)
+│       ├── restoremanifest.{cpp,h}                 # Restore plan registry (owner binding, budgets, retention)
+│       ├── restoreplanexecutor.{cpp,h}             # Chunked execution of frozen restore plans
+│       ├── restorevalidation.{cpp,h}               # Restore destination construction and entry validation
+│       └── comparisoncache.h                       # Single-entry cache of a libsnapper comparison
+├── include/                                        # Headers for the GUI application
+│   ├── csvrecord.h                                 # CSV quoting and parsing (shared by service and client)
+│   ├── externalurlopener.h                         # Opens http/https links via the desktop portal
+│   ├── filechangemodel.h                           # File change model and restore plan transport
+│   ├── fssnapshot.h                                # Snapshot data model
+│   ├── fssnapshotstore.h                           # Pre snapshot number store
+│   ├── singleinstanceguard.h                       # Single-instance guard
+│   ├── snapperservice.h                            # Client-side D-Bus interface
+│   ├── snapshotgroupmodel.h                        # Pre/Post grouping model
+│   ├── snapshotlistmodel.h                         # Snapshot list model
+│   ├── thememanager.h                              # Theme manager
+│   └── windowstatemanager.h                        # Window state manager
+├── qml/                                            # QML user interface
+│   ├── Main.qml                                    # Main window (theme support)
+│   ├── pages/                                      # Page components
+│   │   └── SnapshotListPage.qml                    # Snapshot list page
+│   └── components/                                 # Reusable components
+│       ├── AboutQtDialog.qml                       # About Qt dialog
+│       ├── AboutqSnapperDialog.qml                 # About qSnapper dialog
+│       ├── BorderedDialog.qml                      # Dialog base type with a theme-aware border
+│       ├── CompareSnapshotsDialog.qml              # File differences between two snapshots
+│       ├── RestorePreviewDialog.qml                # Restore preview, options and progress
+│       ├── SnapshotDetailDialog.qml                # Snapshot details, file restore and rollback
+│       ├── SnapshotEditDialog.qml                  # Edit snapshot metadata
+│       ├── SnapshotItem.qml                        # Snapshot list item delegate
+│       ├── SnapshotTableHeader.qml                 # Snapshot table header row
+│       └── SnapshotTableRow.qml                    # Snapshot table row delegate
+├── dbus/                                           # D-Bus configuration
+│   ├── com.presire.qsnapper.Operations.conf        # Bus policy (allowed methods)
+│   ├── com.presire.qsnapper.Operations.service.in  # Service activation template
+│   └── com.presire.qsnapper.Operations.xml         # Interface introspection XML
+├── polkit/                                         # PolicyKit policy
+│   └── com.presire.qsnapper.policy                 # Authorization actions
+├── systemd/tmpfiles.d/                             # systemd tmpfiles configuration
+│   └── qsnapper.conf                               # Creates the log directory /var/log/qsnapper (0700)
+├── selinux/                                        # SELinux policy module
+│   ├── qsnapper.te                                 # Type enforcement rules
+│   ├── qsnapper.if                                 # Interface definitions
+│   ├── qsnapper.fc.in                              # File context template (generated by CMake)
+│   ├── qsnapper.fc                                 # File context for the standalone Makefile build
+│   ├── CMakeLists.txt                              # Policy build (CMake)
+│   ├── Makefile                                    # Policy build (standalone)
+│   ├── ADMIN.md / ADMIN_JP.md                      # Administrator guide (English / Japanese)
+│   ├── README.md / README_JP.md                    # Policy overview (English / Japanese)
+│   └── qsnapper-architecture.*                     # Architecture diagram (.drawio / .png)
+├── cmake/                                          # CMake helpers and packaging scripts
+│   ├── packaging.cmake                             # CPack packaging configuration (RPM/DEB)
+│   ├── rpm-post-install.sh                         # RPM post-install (load SELinux module, create log directory)
+│   └── rpm-pre-uninstall.sh                        # RPM pre-uninstall (remove SELinux module)
+├── man/                                            # Manual page source (scdoc)
+│   └── qsnapper.1.scd                              # qsnapper(1) man page
+├── icons/                                          # Application and UI icons
+├── translations/                                   # Translation files
+│   ├── qsnapper_ja.ts                              # Japanese translation
+│   └── qsnapper_de.ts                              # German translation
+├── tests/                                          # Tests (enabled with QSNAPPER_BUILD_TESTS=ON)
+│   ├── unit/                                       # Qt Test unit tests (tst_*.cpp, one per component)
+│   ├── integration/                                # D-Bus contract checks and isolated D-Bus tests
+│   ├── security_poc/                               # Vulnerability PoC scripts (VM only)
+│   └── TESTREPORT_v1.3.3.md                        # Test report template
+├── Licenses/                                       # Third-party licenses
+│   ├── Qt.md, D-Bus.md, PolicyKit.md               # License texts (Qt, D-Bus, PolicyKit)
+│   └── Polkit-Qt.md, Snapper.md, Btrfs-progs.md    # License texts (Polkit-Qt, Snapper, Btrfs-progs)
+└── ScreenShot/                                     # Screenshots used in the README
 ```
 
 ## Contributing

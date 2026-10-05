@@ -96,6 +96,10 @@ vgcore.*
 *.tar.xz
 **/packaging/
 
+# SELinuxビルド成果物 (selinux/Makefile)
+selinux/*.mod
+selinux/*.pp
+
 # Temporary files
 *.tmp
 *.temp

@@ -363,12 +363,10 @@ def main() -> int:
             f"(total={total_staged})",
         )
 
-        # --- Step 9: A cancels; observe termination via the finished signal
-        # (GetRestorePlanStatus becomes AccessDenied the instant the plan is
-        # reaped, which the executor does synchronously within
-        # CancelRestorePlan in this single-threaded service). The signal
-        # match MUST be armed before the call that triggers it (see
-        # FinishedSignalWaiter docstring). ---
+        # --- Step 9: Aがキャンセルし、finishedシグナルで終端を確認する
+        # (この単一スレッドのサービスでは、executorはCancelRestorePlan内で
+        # 同期的に計画を回収する)。シグナル待ちは、それを発生させる呼び出し
+        # より前に準備する必要がある (FinishedSignalWaiterのdocstring参照)。 ---
         finished_waiter = FinishedSignalWaiter(bus_a, manifest_id)
         applied_before_cancel = len(read_log_lines(apply_log))
         cancelled = obj_a.CancelRestorePlan(manifest_id, dbus_interface=IFACE)
@@ -382,6 +380,34 @@ def main() -> int:
             fail(
                 "timed out or wrong terminal state waiting for restorePlanFinished "
                 f"after CancelRestorePlan: got {terminal_state!r}"
+            )
+        # finishedシグナルはsystem busの全接続へ届くため、終端状態ごとの
+        # 固定文言だけを載せる (pathや詳細を載せない)。
+        if terminal_message != "Restore cancelled":
+            fail(
+                "restorePlanFinished must carry only the fixed text for its "
+                f"terminal state, got {terminal_message!r}"
+            )
+
+        # 詳細は短時間だけ、ownerに限り取得できる。
+        status_terminal = obj_a.GetRestorePlanStatus(manifest_id, dbus_interface=IFACE)
+        proof("OWNER_STATUS_AFTER_TERMINAL", status_terminal)
+        terminal_state_field = status_terminal.split(",", 2)[1] if status_terminal else ""
+        if terminal_state_field != "cancelled":
+            fail(
+                "owner could not read the terminal status after the finished "
+                f"signal: got {status_terminal!r}"
+            )
+        terminal_cross_name, terminal_cross_msg = expect_access_denied(
+            obj_b, IFACE, "GetRestorePlanStatus", [manifest_id],
+            "STATUS_AFTER_TERMINAL_CROSS_OWNER"
+        )
+        if (terminal_cross_name, terminal_cross_msg) != (oracle_name, oracle_msg):
+            fail(
+                "GetRestorePlanStatus for a finished plan (wrong owner) differs from "
+                "a fabricated id -- an existence oracle is observable: "
+                f"{(terminal_cross_name, terminal_cross_msg)!r} vs "
+                f"{(oracle_name, oracle_msg)!r}"
             )
 
         time.sleep(0.2)

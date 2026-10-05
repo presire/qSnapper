@@ -317,8 +317,8 @@ protected:
     /**
      * @brief 変更レコードからモデルデータを構築する
      *
-     * レガシーの改行区切りステータス出力を1回だけ解析し、指定した表示モードの
-     * モデルツリーを構築する。テストからもD-Busを介さずに検証できるよう保護する。
+     * レガシーの改行区切りステータス出力を1回だけ解析し、指定した表示モードのモデルツリーを構築する
+     * テストからもD-Busを介さずに検証できるよう保護する
      *
      * @param changeOutput Snapperの変更出力
      * @param flatMode trueの場合はフラットモデルを構築する
@@ -328,8 +328,8 @@ protected:
     /**
      * @brief 2スナップショット比較の条件を設定する
      *
-     * loadChangesBetween()からD-Bus読み込みを切り離した部分で、比較の向きと表示モードだけを確定させる。
-     * テストはD-Busサービスを起動せずに比較モードを再現するためにこれを直接呼び出す。
+     * loadChangesBetween()からD-Bus読み込みを切り離した部分で、比較の向きと表示モードだけを確定させる
+     * テストはD-Busサービスを起動せずに比較モードを再現するためにこれを直接呼び出す
      *
      * @param number1 比較元スナップショット番号 (このモードでの復元元)
      * @param number2 比較先スナップショット番号
@@ -342,8 +342,8 @@ protected:
     /**
      * @brief 変更レコード出力から正規化済みパスの集合を抽出する
      *
-     * パスの末尾スラッシュを除去してから格納するため、ディレクトリが
-     * 一方の比較でのみ末尾スラッシュ付きで報告されても同一パスとして扱える。
+     * パスの末尾スラッシュを除去してから格納するため、
+     * ディレクトリが一方の比較でのみ末尾スラッシュ付きで報告されても同一パスとして扱える
      *
      * @param changeOutput Snapperの変更出力
      * @return 出力に含まれる正規化済みパスの集合
@@ -353,8 +353,8 @@ protected:
     /**
      * @brief 変更レコード出力を、許可パス集合に含まれる行だけへ絞り込む
      *
-     * 行の内容 (ステータスフラグと変更種別) は一切書き換えない。
-     * 返す行は必ず入力changeOutputの部分集合であり、エントリが追加されることはない。
+     * 行の内容 (ステータスフラグと変更種別) は一切書き換えない
+     * 返す行は必ず入力changeOutputの部分集合であり、エントリが追加されることはない
      *
      * @param changeOutput 絞り込み対象のSnapperの変更出力
      * @param allowedPaths 表示を許可する正規化済みパスの集合
@@ -366,10 +366,9 @@ protected:
     /**
      * @brief 文字列応答のD-Bus呼び出しを非同期で発行する
      *
-     * 変更一覧とファイル差分の両方がこの一点を経由する。
-     * doneはモデルの生存中にちょうど1回だけ呼び出される。
-     * テストはこれをオーバーライドし、実D-Busサービスを起動させずに
-     * 応答の完了順序を任意に制御する。
+     * 変更一覧とファイル差分の両方がこの一点を経由する
+     * doneはモデルの生存中にちょうど1回だけ呼び出される
+     * テストはこれをオーバーライドし、実D-Busサービスを起動させずに応答の完了順序を任意に制御する
      *
      * @param methodName 呼び出すD-Busメソッド名
      * @param arguments メソッドへ渡す引数
@@ -419,7 +418,7 @@ public:
     void setUseDirectRestore(bool use);                             // Direct Copy方式の使用設定を更新する
 
     // 公開メソッド
-    Q_INVOKABLE void loadChanges();                                                     // 対カレントの変更を読み込む
+    Q_INVOKABLE void loadChanges();                                 // 対カレントの変更を読み込む
 
     /**
      * @brief 2つのスナップショット間の変更を読み込む
@@ -447,10 +446,10 @@ public:
      * @brief 復元元スナップショットを明示して選択済み項目の復元を開始する
      *
      * 比較モード (m_betweenMode) を保ったまま復元できるようにするためのオーバーロードで、
-     * 2スナップショット比較モードではloadChangesBetween()の第1引数 (比較元) のみを復元元として受け付ける。
+     * 2スナップショット比較モードではloadChangesBetween()の第1引数 (比較元) のみを復元元として受け付ける
      * 現在モデルが保持するエントリのchangeTypeは「比較元 --> 比較先」の向きで解釈されるため、
      * これ以外のスナップショットを復元元にするとcreatedとdeletedの意味が反転し、
-     * 復元対象外のファイルを削除する危険がある。
+     * 復元対象外のファイルを削除する危険がある
      *
      * @param sourceSnapshotNumber 復元元スナップショット番号
      * @return 復元処理が開始された場合: true、検証に失敗した場合: false
@@ -460,7 +459,7 @@ public:
     /**
      * @brief 復元元スナップショットを明示して指定ファイルの復元を開始する
      *
-     * restoreCheckedItemsFrom()と同一の整合性検証を単一ファイル復元へ適用する。
+     * restoreCheckedItemsFrom()と同一の整合性検証を単一ファイル復元へ適用する
      *
      * @param filePath 復元対象のファイルパス
      * @param sourceSnapshotNumber 復元元スナップショット番号
@@ -493,8 +492,8 @@ signals:
 
 private slots:
     // D-Bus復元通知の処理
-    void onRestorePlanProgress(const QString &manifestId, int current, int total, const QString &filePath);         // 復元計画の進捗通知を処理する
-    void onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message);    // 復元計画の完了通知を処理する
+    void onRestorePlanProgress(const QString &manifestId, int current, int total);                                 // 復元計画の進捗通知を処理する
+    void onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message);   // 復元計画の完了通知を処理する
 
     void onRestorePlanServiceVanished(); // 復元サービスの消失を失敗として処理する
 };

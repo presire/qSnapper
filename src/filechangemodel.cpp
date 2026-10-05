@@ -279,7 +279,7 @@ public:
             "com.presire.qsnapper.Operations",
             "restorePlanProgress",
             receiver,
-            SLOT(onRestorePlanProgress(QString,int,int,QString))
+            SLOT(onRestorePlanProgress(QString,int,int))
         );
         const bool finishedOk = QDBusConnection::systemBus().connect(
             "com.presire.qsnapper.Operations",
@@ -321,7 +321,7 @@ public:
             "com.presire.qsnapper.Operations",
             "restorePlanProgress",
             receiver,
-            SLOT(onRestorePlanProgress(QString,int,int,QString))
+            SLOT(onRestorePlanProgress(QString,int,int))
         );
         QDBusConnection::systemBus().disconnect(
             "com.presire.qsnapper.Operations",
@@ -651,14 +651,16 @@ FileChangeModel::~FileChangeModel()
  * サーバ側manifestが送る進捗シグナルを受信し、元の選択全体を基準に単調な進捗として再送出する
  * サーバのtotal値は契約上同じ値だが、UIへは計画開始時に固定した総数を必ず通知する
  *
+ * signalはsystem busの全接続へ届くため、サーバはpathを載せない
+ * サーバはstageした順にエントリを処理するため、表示するファイル名はクライアントが保持する計画 (m_planPaths) から求める
+ *
  * 実行中の計画以外のマニフェストIDを持つシグナルは無視される
  *
  * @param manifestId 進捗を報告してきた計画のマニフェストID
  * @param current 処理済みエントリ数 (manifest全体基準)
  * @param total マニフェストの総エントリ数
- * @param filePath 現在処理中のファイルのベース名
  */
-void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int current, int total, const QString &filePath)
+void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int current, int total)
 {
     // 実行中の計画以外のシグナルは無視する
     if (!m_planActive || m_planManifestId != manifestId) {
@@ -669,7 +671,8 @@ void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int curre
 
     const int boundedCurrent = qBound(0, current, m_planTotalFiles);
     m_planLastProgress = qMax(m_planLastProgress, boundedCurrent);
-    emit restoreProgress(m_planLastProgress, m_planTotalFiles, filePath);
+    const QString fileName = QFileInfo(m_planPaths.value(m_planLastProgress - 1)).fileName();
+    emit restoreProgress(m_planLastProgress, m_planTotalFiles, fileName);
 }
 
 /**
@@ -680,9 +683,12 @@ void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int curre
  *
  * 実行中の計画以外のマニフェストIDを持つシグナルは無視される
  *
+ * signalはsystem busの全接続へ届くため、messageは終端状態ごとの固定文言である
+ * 失敗した場合も、計画のownerだけが取得できるGetRestorePlanStatusの詳細 (復元pathを含み得る) はログへ出さない
+ *
  * @param manifestId 完了した計画のマニフェストID
  * @param terminalState 終端状態 ("completed" / "failed" / "cancelled")
- * @param message サーバ側からの追加メッセージ
+ * @param message 終端状態ごとの固定文言
  */
 void FileChangeModel::onRestorePlanFinished(const QString &manifestId, const QString &terminalState, const QString &message)
 {
@@ -700,6 +706,17 @@ void FileChangeModel::onRestorePlanFinished(const QString &manifestId, const QSt
     const bool completed = (terminalState == QStringLiteral("completed"));
     if (!completed) {
         qWarning() << "Restore plan finished with state:" << terminalState << message;
+    }
+    if (terminalState == QStringLiteral("failed")) {
+        m_restorePlanTransport->requestStatus(manifestId,
+            [](bool ok, const QString &statusCsv, const QString &error) {
+                // statusCsvのlastErrorには復元pathが含まれ得るため、内容はログに出さない
+                Q_UNUSED(statusCsv);
+                Q_UNUSED(error);
+                if (!ok) {
+                    qWarning() << "Failed to get restore plan status";
+                }
+            });
     }
 
     // 状態を先にリセットしてから完了を通知する (完了ハンドラからの再開始に備える)

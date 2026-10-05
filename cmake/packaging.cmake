@@ -61,9 +61,11 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_APPEND
     /usr/share/selinux/packages
 )
 
-# RPM SELinux scriptlets
+# RPMスクリプトレット
+# post-installはログディレクトリの作成 (systemd-tmpfiles) も行うため、SELinuxの有無にかかわらず登録する
+# (SELinuxポリシーの読み込みは、ポリシーパッケージがインストールされている場合のみ行われる)
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/cmake/rpm-post-install.sh")
 if(ENABLE_SELINUX)
-    set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/cmake/rpm-post-install.sh")
     set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/cmake/rpm-pre-uninstall.sh")
 endif()
 

@@ -535,6 +535,88 @@ private:
     qint64 m_maxPathBytesPerUid = kMaxPathBytesPerUid;
 };
 
+/**
+ * @brief 終端した復元計画の状態を短時間だけowner束縛で保持する
+ *
+ * 終端signalはsystem busの全接続へ届くため、失敗したpathなどの詳細は載せない
+ * 詳細はこのstoreに残し、計画のownerだけがGetRestorePlanStatusで取得する
+ *
+ * 保持期間と件数に上限を設け、上限を超えた場合は期限の近いものから破棄する
+ * 単一Qtイベントループスレッドから利用する非スレッドセーフなコンテナである
+ */
+class FinishedRestorePlanStore
+{
+public:
+    static constexpr qint64 kDefaultRetentionMs = 60 * 1000;
+    static constexpr int kMaxEntries = RestoreManifestRegistry::kMaxManifestsGlobal;
+
+    /**
+     * @brief 実時間clockを使用する空のstoreを構築する
+     */
+    FinishedRestorePlanStore();
+
+    /**
+     * @brief 保持期限の判定に使うclockを差し替える
+     * @param clock millisecondsを返す関数
+     *              空なら実時間clockへ戻す
+     */
+    void setClock(std::function<qint64()> clock);
+
+    /**
+     * @brief 終端した計画の状態を記録する
+     * @param owner 計画のowner (D-Busのunique name)
+     * @param status 終端状態を設定済みの計画状態
+     *
+     * idが空の場合は記録しない
+     * ownerの照合はRestoreManifestRegistryと同じく完全一致で行う
+     */
+    void record(const QString &owner, const ManifestStatus &status);
+
+    /**
+     * @brief owner確認後に終端した計画の状態を取得する
+     * @param id マニフェスト識別子
+     * @param owner 呼び出し元owner
+     * @return 保持期限内かつownerが一致する場合は状態、それ以外はstd::nullopt
+     */
+    std::optional<ManifestStatus> status(const QString &id, const QString &owner);
+
+    /**
+     * @brief 消失したownerに属する記録を全て削除する
+     * @param owner 削除対象owner
+     * @return 削除した記録数
+     */
+    int removeByOwner(const QString &owner);
+
+    /**
+     * @brief 保持期限を過ぎた記録を削除する
+     * @return 削除した記録数
+     */
+    int purgeExpired();
+
+    /**
+     * @brief 保持している記録数を返す
+     * @return 記録数
+     */
+    int count() const;
+
+    /**
+     * @brief ownerに属する記録数を返す
+     * @param owner 対象owner
+     * @return 記録数
+     */
+    int countForOwner(const QString &owner) const;
+
+private:
+    struct FinishedRecord {
+        QString owner;
+        ManifestStatus status;
+        qint64 expiresAtMs = 0;
+    };
+
+    std::map<QString, FinishedRecord> m_records;
+    std::function<qint64()> m_clock;
+};
+
 } // namespace qsnapper::restore
 
 #endif // QSNAPPER_RESTOREMANIFEST_H

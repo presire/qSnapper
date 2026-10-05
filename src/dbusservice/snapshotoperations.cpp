@@ -170,6 +170,69 @@ bool qsnapper::restore::isPinnedRestoreSourceReadOnly(int snapshotDirFd, const s
     return ::fstatvfs(snapshotDirFd, &fsInfo) == 0 && (fsInfo.f_flag & ST_RDONLY) != 0;
 }
 
+/**
+ * @brief 上限を指定して構築する
+ * @param perUidLimit 1つのUIDが同時に保持できる件数の上限
+ * @param globalLimit 全体で同時に保持できる件数の上限
+ */
+qsnapper::security::PendingAuthorizationBudget::PendingAuthorizationBudget(int perUidLimit, int globalLimit)
+    : m_perUidLimit(perUidLimit)
+    , m_globalLimit(globalLimit)
+{
+}
+
+/**
+ * @brief 1件分の枠を確保する
+ * @param uid 呼び出し元のUID
+ * @return UID単位と全体の両方の上限内であれば確保してtrue、それ以外は何もせずfalse
+ */
+bool qsnapper::security::PendingAuthorizationBudget::tryAcquire(uint uid)
+{
+    if (m_total >= m_globalLimit || m_perUid.value(uid, 0) >= m_perUidLimit) {
+        return false;
+    }
+    ++m_perUid[uid];
+    ++m_total;
+    return true;
+}
+
+/**
+ * @brief tryAcquire()で確保した1件分の枠を返す
+ * @param uid tryAcquire()に渡したUID
+ */
+void qsnapper::security::PendingAuthorizationBudget::release(uint uid)
+{
+    const auto it = m_perUid.find(uid);
+    if (it == m_perUid.end()) {
+        return;
+    }
+    if (--it.value() <= 0) {
+        m_perUid.erase(it);
+    }
+    if (m_total > 0) {
+        --m_total;
+    }
+}
+
+/**
+ * @brief 全体の保持件数を返す
+ * @return 保持件数
+ */
+int qsnapper::security::PendingAuthorizationBudget::total() const
+{
+    return m_total;
+}
+
+/**
+ * @brief 指定したUIDの保持件数を返す
+ * @param uid 呼び出し元のUID
+ * @return 保持件数
+ */
+int qsnapper::security::PendingAuthorizationBudget::countFor(uint uid) const
+{
+    return m_perUid.value(uid, 0);
+}
+
 namespace {
 
     QString siblingTemporaryPath(const QString &path, const QString &tag, int attempt)
@@ -624,9 +687,9 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
     m_restoreExecutor.setProgressSink(
         [this](const QString &manifestId, int current, int total,
                const QString &path) {
+            Q_UNUSED(path);
             resetIdleTimer();
-            emit restorePlanProgress(manifestId, current, total,
-                                     QFileInfo(path).fileName());
+            emit restorePlanProgress(manifestId, current, total);
         });
     m_restoreExecutor.setFinishedSink(
         [this](const QString &manifestId,
@@ -687,7 +750,7 @@ SnapshotOperations::~SnapshotOperations()
  */
 void SnapshotOperations::resetIdleTimer()
 {
-    if (m_pendingAuthorizations > 0) {
+    if (m_pendingAuthorizations.total() > 0) {
         m_idleTimer.stop();
         return;
     }
@@ -776,6 +839,30 @@ QString SnapshotOperations::restoreManifestStateString(
         return QStringLiteral("cancelled");
     }
     return QStringLiteral("failed");
+}
+
+/**
+ * @brief restorePlanFinished signalに載せる終端状態ごとの固定文言を返す
+ * @param state 終端状態
+ * @return pathなどの詳細を含まない固定文言
+ */
+QString SnapshotOperations::restorePlanFinishedSignalMessage(
+    qsnapper::restore::ManifestState state)
+{
+    using qsnapper::restore::ManifestState;
+
+    switch (state) {
+    case ManifestState::Completed:
+        return QStringLiteral("Restore completed");
+    case ManifestState::Cancelled:
+        return QStringLiteral("Restore cancelled");
+    case ManifestState::Staging:
+    case ManifestState::Frozen:
+    case ManifestState::Running:
+    case ManifestState::Failed:
+        break;
+    }
+    return QStringLiteral("Restore failed");
 }
 
 /**
@@ -932,9 +1019,21 @@ void SnapshotOperations::finishRestorePlan(
         unmountRestoreExecution(execution.value());
     }
 
+    // 詳細 (失敗したpathを含み得る) はownerだけが取得できるように残し、signalには固定文言だけを載せる
+    const QString owner = m_restorePlanOwners.value(manifestId);
+    qsnapper::restore::ManifestStatus finishedStatus =
+        m_restoreRegistry.status(manifestId, owner, nullptr)
+            .value_or(qsnapper::restore::ManifestStatus{});
+    finishedStatus.id = manifestId;
+    finishedStatus.state = terminal;
+    if (finishedStatus.lastError.isEmpty()) {
+        finishedStatus.lastError = messageText;
+    }
+    m_finishedRestorePlans.record(owner, finishedStatus);
+
     emit restorePlanFinished(manifestId,
                              restoreManifestStateString(terminal),
-                             messageText);
+                             restorePlanFinishedSignalMessage(terminal));
 
     m_restoreExecutions.remove(manifestId);
     m_restoreRegistry.remove(manifestId);
@@ -963,6 +1062,7 @@ void SnapshotOperations::handleRestoreOwnerUnregistered(const QString &owner)
     }
 
     m_restoreRegistry.removeByOwner(owner);
+    m_finishedRestorePlans.removeByOwner(owner);
     if (m_ownerWatcher && m_restoreRegistry.countForOwner(owner) == 0) {
         m_ownerWatcher->removeWatchedService(owner);
     }
@@ -974,6 +1074,7 @@ void SnapshotOperations::handleRestoreOwnerUnregistered(const QString &owner)
 void SnapshotOperations::purgeExpiredRestorePlans()
 {
     m_restoreRegistry.purgeExpired();
+    m_finishedRestorePlans.purgeExpired();
 
     const QStringList planIds = m_restorePlanOwners.keys();
     for (const QString &manifestId : planIds) {
@@ -1005,7 +1106,9 @@ void SnapshotOperations::removeUnusedRestoreOwnerWatches()
 
     const QStringList watchedOwners = m_ownerWatcher->watchedServices();
     for (const QString &owner : watchedOwners) {
-        if (m_restoreRegistry.countForOwner(owner) == 0) {
+        // 終端した計画も保持期間中はownerの切断時に掃除する必要があるため、watchを残す
+        if (m_restoreRegistry.countForOwner(owner) == 0
+                && m_finishedRestorePlans.countForOwner(owner) == 0) {
             m_ownerWatcher->removeWatchedService(owner);
         }
     }
@@ -1049,6 +1152,12 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
         return false;
     }
 
+    // 許可リスト外のキーや不正な値は認可前に拒否する (キーと値はエラー本文に含めない)
+    if (!qsnapper::security::validateSnapperConfigSettings(settings)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid config settings"));
+        return false;
+    }
+
     return authorizeThen<bool>(
         QStringLiteral("com.presire.qsnapper.configure"),
         [this, config = *cfg, settings]() {
@@ -1075,6 +1184,7 @@ bool SnapshotOperations::writeSnapperConfigAuthorized(
 
         // 設定変更前にComparisonキャッシュを無効化 (mount/Filesが古い設定状態に依存しないように)
         m_comparisonCache.clear();
+        m_snapshotListFingerprint.clear();
 
         std::map<std::string, std::string> info;
         for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
@@ -1086,7 +1196,7 @@ bool SnapshotOperations::writeSnapperConfigAuthorized(
     }
     catch (const snapper::Exception &e) {
         qWarning() << "Failed to write snapper config:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to write config: %1").arg(e.what()));
+        replyError(QDBusError::Failed, QStringLiteral("Failed to write config"));
         return false;
     }
 }
@@ -1203,12 +1313,11 @@ void SnapshotOperations::replyError(QDBusError::ErrorType type, const QString &t
 
 /**
  * @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
+ * @param callerUid 認可待ちを開始したときの呼び出し元UID
  */
-void SnapshotOperations::endPendingAuthorization()
+void SnapshotOperations::endPendingAuthorization(uint callerUid)
 {
-    if (m_pendingAuthorizations > 0) {
-        --m_pendingAuthorizations;
-    }
+    m_pendingAuthorizations.release(callerUid);
     resetIdleTimer();
 }
 
@@ -1286,7 +1395,19 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
         return AuthorizationOutcome::Denied;
     }
 
-    if (m_pendingAuthorizations >= MaxPendingAuthorizations) {
+    // 認可待ちの枠は呼び出し元のUID単位で数える
+    // UIDはBeginRestorePlanと同じく、バスデーモンが保持する接続の資格情報から取得する
+    // 取得できない場合は誰の枠か決められないため拒否する
+    const QDBusConnectionInterface *bus = reply.connection.interface();
+    const QDBusReply<uint> uidReply = bus ? bus->serviceUid(reply.message.service()) : QDBusReply<uint>();
+    if (!uidReply.isValid()) {
+        g_object_unref(subject);
+        replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
+        return AuthorizationOutcome::Denied;
+    }
+    const uint callerUid = uidReply.value();
+
+    if (!m_pendingAuthorizations.tryAcquire(callerUid)) {
         g_object_unref(subject);
         replyError(QDBusError::LimitsExceeded,
                    QStringLiteral("Too many pending authorization requests"));
@@ -1297,8 +1418,8 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     // 一意に紐づくようにする
     auto *request = new AsyncAuthorization;
     request->service = this;
-    request->continuation = [this, reply, continuation](bool granted) {
-        endPendingAuthorization();
+    request->continuation = [this, reply, continuation, callerUid](bool granted) {
+        endPendingAuthorization(callerUid);
         continuation(reply, granted);
     };
 
@@ -1310,7 +1431,6 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     // polkit_authority_check_authorization()はsubjectを同期的にGVariant化するため、呼び出し直後に解放してよい
     g_object_unref(subject);
 
-    ++m_pendingAuthorizations;
     setDelayedReply(true);
     // プロンプト応答待ちの間にアイドル終了しないようタイマを止める
     m_idleTimer.stop();
@@ -1336,6 +1456,8 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
             // Snapper差し替え前にキャッシュを無効化し、
             // 古いSnapperを指すComparisonが残らない (mount/Filesの寿命が古Snapperに依存する) ようにする
             m_comparisonCache.clear();
+            // 指紋は再生成前に取ったものだけが有効であるため、ここで破棄する (getSnapperForListing()が設定し直す)
+            m_snapshotListFingerprint.clear();
             m_snapper.reset(new snapper::Snapper(configName.toStdString(), "/"));
             m_currentConfig = configName;
         }
@@ -1345,6 +1467,52 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
         qWarning() << "Failed to create Snapper instance:" << e.what();
         return nullptr;
     }
+}
+
+/**
+ * @brief 一覧の取得用にSnapperインスタンスを取得する
+ *
+ * libsnapperのSnapperは構築時に一覧を読み込み、外部で作成・削除・変更されたスナップショットを取り込まない
+ * そのため、.snapshots の指紋が読み込み時から変わっていれば再生成する
+ *
+ * 一覧を無効化する条件:
+ *   - 設定の切り替え・強制再生成 (getSnapper()が指紋を破棄する)
+ *   - 本サービスによる作成・削除・変更・rollback・設定変更 (各処理が変更前に指紋を破棄する)
+ *   - 外部による作成・削除・変更 (指紋の不一致として検出する)
+ *   - 指紋を計算できない場合
+ *
+ * @param configName 検証済みSnapper設定名
+ * @return Snapperインスタンスへのポインタ、失敗時はnullptr
+ */
+snapper::Snapper* SnapshotOperations::getSnapperForListing(const QString &configName)
+{
+    // 指紋は再生成より先に取る
+    // 再生成の途中で一覧が変わった場合も、保存した指紋とは一致しなくなるため、次回に再生成される
+    QByteArray fingerprint;
+    try {
+        const snapper::ConfigInfo configInfo = snapper::Snapper::getConfig(configName.toStdString(), "/");
+        QString snapshotsDir = QString::fromStdString(configInfo.get_subvolume());
+        if (!snapshotsDir.endsWith(QLatin1Char('/'))) {
+            snapshotsDir += QLatin1Char('/');
+        }
+        snapshotsDir += QStringLiteral(".snapshots");
+        fingerprint = qsnapper::security::snapshotListFingerprint(snapshotsDir);
+    }
+    catch (const snapper::Exception &) {
+        // e.what()には設定ファイルのpath (指定された設定名) が含まれ得るため、ログには載せない
+        qWarning() << "Failed to read Snapper config for listing";
+    }
+
+    if (m_snapper && m_currentConfig == configName && !fingerprint.isEmpty()
+            && fingerprint == m_snapshotListFingerprint) {
+        return m_snapper.get();
+    }
+
+    snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
+    if (snapper) {
+        m_snapshotListFingerprint = fingerprint;
+    }
+    return snapper;
 }
 
 /**
@@ -1404,37 +1572,39 @@ QString SnapshotOperations::formatSnapshotToCSV(const snapper::Snapper *snapper)
         // 本CSVは、"1行 = 1スナップショット"である
         // description / cleanup / userdataは、snapper CLIやpluginからも書き込まれる信頼できない値であり、
         // 改行を混入されると行が割れて攻撃者の選んだnumberを持つ偽のスナップショット行が生まれる
+        // 偽のnumberはクライアントからDeleteSnapshot / RollbackSnapshotへそのまま渡る
         //
-        // 偽のnumberはクライアントからDeleteSnapshot / RollbackSnapshotへそのまま渡るため、1件でも検出したら一覧全体を失敗させる (fail-closed)
-        // カンマは拒否しない (正当なdescriptionにも現れ得る)
+        // これらは表示用の値であるため、制御文字をU+FFFDに置き換えて出力する
+        // 1件の不正な値で一覧全体を失敗させず、かつ行を割らない (numberはlibsnapperの値であり、置き換えの影響を受けない)
+        // カンマは置き換えない (正当なdescriptionにも現れ得る)
         // 代わりにqsnapper::csv::quoteField()によるRFC 4180準拠のクォートで列ずれを防ぐ
         //
-        // クォートは表示正しさのための修正であり、isRecordSafeText()による制御文字拒否の上に重ねる層であって代替ではない
-        const QString cleanup     = QString::fromStdString(snapshot.getCleanup());
-        const QString description = QString::fromStdString(snapshot.getDescription());
+        // クォートは表示正しさのための修正であり、sanitizeRecordText()による制御文字の置き換えの上に重ねる層であって代替ではない
+        const QString rawCleanup     = QString::fromStdString(snapshot.getCleanup());
+        const QString rawDescription = QString::fromStdString(snapshot.getDescription());
+        bool recordSafe = qsnapper::security::isRecordSafeText(rawCleanup)
+                && qsnapper::security::isRecordSafeText(rawDescription);
+        const QString cleanup     = qsnapper::security::sanitizeRecordText(rawCleanup);
+        const QString description = qsnapper::security::sanitizeRecordText(rawDescription);
 
         // ユーザデータを key1=value1,key2=value2形式に変換
         // 各ペアは個別のCSVフィールドであるため、ペア文字列を組み立てた上で1フィールド毎にクォートする
         // (keyやvalueにカンマがあってもペアが2フィールドに割れない)
         const std::map<std::string, std::string> &userdata = snapshot.getUserdata();
         QStringList userdataPairs;
-        bool recordSafe = qsnapper::security::isRecordSafeText(cleanup)
-                && qsnapper::security::isRecordSafeText(description);
         for (const auto &pair : userdata) {
             const QString key   = QString::fromStdString(pair.first);
             const QString value = QString::fromStdString(pair.second);
             if (!qsnapper::security::isRecordSafeText(key) || !qsnapper::security::isRecordSafeText(value)) {
                 recordSafe = false;
-                break;
             }
-            userdataPairs.append(qsnapper::csv::quoteField(key + "=" + value));
+            userdataPairs.append(qsnapper::csv::quoteField(qsnapper::security::sanitizeRecordText(key) + "="
+                                                           + qsnapper::security::sanitizeRecordText(value)));
         }
         if (!recordSafe) {
-            // 攻撃者が制御する値はログにもエラー本文にも載せない (ログ注入防止)
-            qWarning() << "Rejected snapshot listing: snapshot" << snapshot.getNum()
-                       << "has metadata containing control characters";
-            replyError(QDBusError::Failed, QStringLiteral("Snapshot metadata contains control characters"));
-            return QString();
+            // 攻撃者が制御する値はログに載せない (ログ注入防止)
+            qWarning() << "Snapshot listing: replaced control characters in metadata of snapshot"
+                       << snapshot.getNum();
         }
 
         csv += QString::number(snapshot.getNum()) + ",";
@@ -1529,8 +1699,8 @@ QString SnapshotOperations::ListSnapshots(const QString &configName)
 QString SnapshotOperations::listSnapshotsAuthorized(const QString &configName)
 {
     try {
-        // 一覧取得時は必ず再構築して外部で作成された最新スナップショットを反映する
-        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
+        // 外部で作成・削除・変更されたスナップショットを反映するため、一覧が変わっている場合は再構築する
+        snapper::Snapper *snapper = getSnapperForListing(configName);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -1610,8 +1780,9 @@ QString SnapshotOperations::createSnapshotAuthorized(
             }
         }
 
-        // スナップショット作成 (スナップショット一覧の変化) 前にComparisonキャッシュを無効化
+        // スナップショット作成 (スナップショット一覧の変化) 前にComparisonキャッシュと一覧の指紋を無効化
         m_comparisonCache.clear();
+        m_snapshotListFingerprint.clear();
 
         snapper::SCD scd;
         scd.description = description.toStdString();
@@ -1785,8 +1956,9 @@ bool SnapshotOperations::modifySnapshotAuthorized(
             return false;
         }
 
-        // スナップショット属性変更前にComparisonキャッシュを無効化
+        // スナップショット属性変更前にComparisonキャッシュと一覧の指紋を無効化
         m_comparisonCache.clear();
+        m_snapshotListFingerprint.clear();
 
         snapper::SMD smd;
         smd.description = description.toStdString();
@@ -1870,8 +2042,9 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
             return false;
         }
 
-        // スナップショット削除 (スナップショット一覧の変化) 前にComparisonキャッシュを無効化
+        // スナップショット削除 (スナップショット一覧の変化) 前にComparisonキャッシュと一覧の指紋を無効化
         m_comparisonCache.clear();
+        m_snapshotListFingerprint.clear();
 
 #if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
         snapper::Plugins::Report report;
@@ -1958,8 +2131,9 @@ bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, i
             return false;
         }
 
-        // ロールバックはスナップショット一覧・現在状態を変化させるためComparisonキャッシュを無効化
+        // ロールバックはスナップショット一覧・現在状態を変化させるためComparisonキャッシュと一覧の指紋を無効化
         m_comparisonCache.clear();
+        m_snapshotListFingerprint.clear();
 
         // "sudo snapper rollback N"と同等の挙動を再現する
         //
@@ -3218,7 +3392,11 @@ QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
     }
 
     qsnapper::restore::ManifestError error = qsnapper::restore::ManifestError::None;
-    const auto status = m_restoreRegistry.status(manifestId, owner, &error);
+    auto status = m_restoreRegistry.status(manifestId, owner, &error);
+    if (!status) {
+        // 終端してregistryから削除された計画は、保持期間内であればownerにだけ詳細を返す
+        status = m_finishedRestorePlans.status(manifestId, owner);
+    }
     if (!status) {
         sendManifestError(error);
         return {};
@@ -3292,6 +3470,8 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &rootPath,
             return true;
         }
 
+        // 退避先の名前が既に使われている場合 (RENAME_NOREPLACEによりEEXIST) は次の候補を試す
+        // RENAME_NOREPLACE未対応 (EINVAL / ENOSYS) を含むその他のエラーでは、live側に触れずに失敗する
         if (errno == EEXIST || errno == ENOTEMPTY) {
             continue;
         }
@@ -3370,15 +3550,6 @@ bool SnapshotOperations::applyRestoreEntry(
         return removed;
     }
 
-    const int slashIndex = destinationPath.lastIndexOf(QLatin1Char('/'));
-    const QString parentPath = slashIndex <= 0 ? QStringLiteral("/")
-                                               : destinationPath.left(slashIndex);
-    if (parentPath != rootPath && !qsnapper::security::safeCreateDirectoryBeneathRoot(rootPath, parentPath, 0755)) {
-        qWarning() << "Staged restore: Failed to create live parent directory:"
-                   << strerror(errno);
-        return false;
-    }
-
     // ソースの種別判定はpin済みsnapshot dirfd相対で行う
     // 実行中にsnapshotDirのpath上で何が起きても、認可時にpinしたinodeを観測する
     // (AT_SYMLINK_NOFOLLOWによりleafのsymlinkも展開しない)
@@ -3395,6 +3566,19 @@ bool SnapshotOperations::applyRestoreEntry(
     const bool sourceIsRegular = hasSnapshotFileInfo && S_ISREG(snapshotFileInfo.st_mode);
     if (!sourceIsLink && !sourceIsDirectory && !sourceIsRegular) {
         qWarning() << "Staged restore: Source is not restorable";
+        return false;
+    }
+
+    // 復元対象ではない欠けた親ディレクトリは、snapshot側の同じディレクトリに合わせて作成する
+    // snapshot側に無い場合は0700・root所有のままにし、既存の親ディレクトリは変更しない
+    const int slashIndex = destinationPath.lastIndexOf(QLatin1Char('/'));
+    const QString parentPath = slashIndex <= 0 ? QStringLiteral("/")
+                                               : destinationPath.left(slashIndex);
+    if (parentPath != rootPath
+            && !qsnapper::security::safeCreateParentDirectoriesFromSourceBeneathRoot(
+                rootPath, parentPath, context.snapshotDirFd, ::geteuid() == 0)) {
+        qWarning() << "Staged restore: Failed to create live parent directory:"
+                   << strerror(errno);
         return false;
     }
 

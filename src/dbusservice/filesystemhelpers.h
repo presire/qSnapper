@@ -220,6 +220,38 @@ namespace qsnapper::security {
                                         mode_t mode = 0755);
 
     /**
+     * @brief rootPath配下に、復元先の欠けている親ディレクトリを作成する
+     *
+     * 既存の成分はO_NOFOLLOWで辿るだけで、所有者やmodeを変更しない
+     * 欠けている成分は0700・作成者所有で作成し、snapshot側の同じ相対パスにディレクトリがあれば、その所有者・mode・ACL・xattrを適用する
+     * 親ディレクトリが他ユーザーに差し替えられ得る場合、metadataは適用せず、他ユーザーに書き込みを与えない0711で作成する
+     * snapshot側に無い場合 (存在しない・ディレクトリ以外) は、0700・作成者所有のままにする
+     * snapshot側の状態を判定できない場合は、その成分を作成せずに失敗する
+     *
+     * @param rootPath 基点ルートディレクトリ (snapshot dirfdと同じ相対パスで対応付く)
+     * @param parentPath 作成する親ディレクトリの絶対パス (rootPath配下であること)
+     * @param sourceDirFd pin済みのsnapshot dirfd
+     * @param mustPreserveMetadata 必須metadata (所有者、mode、ACL) を適用できない場合に失敗させる場合true
+     * @return 成功時: true、失敗時: false (errno設定)
+     */
+    bool safeCreateParentDirectoriesFromSourceBeneathRoot(const QString &rootPath,
+                                                          const QString &parentPath,
+                                                          int sourceDirFd,
+                                                          bool mustPreserveMetadata);
+
+    /**
+     * @brief 作成したディレクトリへsnapshotのmetadataを安全に適用できる親ディレクトリかを判定する
+     *
+     * sticky bitが無い状態でgroup/otherへ書き込みが許可されている場合と、root以外が所有する書き込み可能な
+     * ディレクトリでは、他ユーザーが作成直後のエントリを差し替え得るため、安全と判定しない
+     * sticky bit付きでrootが所有するディレクトリでは、root所有のエントリを他ユーザーは差し替えられない
+     *
+     * @param parentStat 親ディレクトリのstat
+     * @return 安全に適用できる場合: true
+     */
+    bool parentDirectoryIsSafeForMetadata(const struct stat &parentStat);
+
+    /**
      * @brief rootPath配下の通常ファイルを安全に新規/上書きオープンする
      *
      * componentwiseなO_NOFOLLOW走査で親まで辿り、leafをopenat(..., O_NOFOLLOW)で開いた後、fstat()でregular fileであることを再確認する
@@ -252,7 +284,9 @@ namespace qsnapper::security {
      * @brief rootPath配下で sourcePath を destinationPath へ移動する (rename-aside用)
      *
      * source / destination ともにrootPath配下であることを検証した上で、
-     * それぞれをcomponentwiseなO_NOFOLLOW走査で解決し、renameat()を実行する
+     * それぞれをcomponentwiseなO_NOFOLLOW走査で解決し、renameat2(RENAME_NOREPLACE)を実行する
+     * destinationに既存のエントリ (ファイル・symlink・空ディレクトリを含む) がある場合は置換せず、EEXISTで失敗する
+     * RENAME_NOREPLACEに対応しないカーネル / FS (EINVAL / ENOSYS) でも、置換し得るrenameat()へは切り替えずに失敗する
      *
      * @param rootPath 基点ルートディレクトリ
      * @param sourcePath 移動元の絶対パス (rootPath配下であること)
@@ -401,6 +435,18 @@ namespace qsnapper::security {
     bool replaceSymlinkAt(int destinationParentFd, const QByteArray &leafName,
                           const QByteArray &linkTarget, const struct stat &sourceStat,
                           bool *metadataApplied = nullptr);
+
+    /**
+     * @brief スナップショット一覧の変化を検出するための指紋を計算する
+     *
+     * snapper設定の .snapshots ディレクトリについて、ディレクトリ自体と、数字のみの名前の各エントリ (先頭に0が付いた名前を含む)、その info.xml のstat情報 (inode・サイズ・mtime・ctime) から指紋を作る
+     * スナップショットの作成・削除・変更 (info.xmlの書き換え) は、いずれかの値を変える
+     * 読み取りだけを行い、何も変更しない
+     *
+     * @param snapshotsDirPath .snapshots ディレクトリの絶対パス
+     * @return 指紋 (SHA-256)、判定できない場合は空のQByteArray (呼び出し側は「変化あり」として扱うこと)
+     */
+    QByteArray snapshotListFingerprint(const QString &snapshotsDirPath);
 } // namespace qsnapper::security
 
 #endif // QSNAPPER_FILESYSTEMHELPERS_H

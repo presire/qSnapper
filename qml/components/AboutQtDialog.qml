@@ -3,6 +3,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QSnapper 1.0
 
 BorderedDialog {
     id: root
@@ -78,7 +79,7 @@ BorderedDialog {
                         Layout.topMargin: 10
 
                         onLinkActivated: function(link) {
-                            Qt.openUrlExternally(link)
+                            SnapperService.openExternalUrl(link)
                         }
 
                         HoverHandler {
@@ -105,7 +106,7 @@ BorderedDialog {
                         Layout.topMargin: 10
 
                         onLinkActivated: function(link) {
-                            Qt.openUrlExternally(link)
+                            SnapperService.openExternalUrl(link)
                         }
 
                         HoverHandler {

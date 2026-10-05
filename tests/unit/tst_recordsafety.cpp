@@ -13,6 +13,7 @@
 #include "inputvalidator.h"
 
 using qsnapper::security::isRecordSafeText;
+using qsnapper::security::sanitizeRecordText;
 
 class TestRecordSafety : public QObject
 {
@@ -27,6 +28,10 @@ private slots:
 
     void carrierPathSplitsFileChangeRecord();
     void carrierDescriptionSplitsSnapshotRecord();
+
+    void sanitizeReplacesControlCharacters_data();
+    void sanitizeReplacesControlCharacters();
+    void sanitizedDescriptionKeepsSnapshotRecord();
 };
 
 void TestRecordSafety::accept_data()
@@ -194,6 +199,51 @@ void TestRecordSafety::carrierDescriptionSplitsSnapshotRecord()
     QCOMPARE(lines.at(2).split(QLatin1Char(',')).at(0).toInt(), 999);
 
     QVERIFY(!isRecordSafeText(forgedDescription));
+}
+
+void TestRecordSafety::sanitizeReplacesControlCharacters_data()
+{
+    QTest::addColumn<QString>("value");
+    QTest::addColumn<QString>("expected");
+
+    const QString r(QChar::ReplacementCharacter);
+    QTest::newRow("plain") << QStringLiteral("before update, 1") << QStringLiteral("before update, 1");
+    QTest::newRow("empty") << QString() << QString();
+    QTest::newRow("LF") << QStringLiteral("a\nb") << QStringLiteral("a") + r + QStringLiteral("b");
+    QTest::newRow("CRLF") << QStringLiteral("a\r\n") << QStringLiteral("a") + r + r;
+    QTest::newRow("NUL") << QString(QStringLiteral("a") + QChar(0) + QStringLiteral("b"))
+                         << QStringLiteral("a") + r + QStringLiteral("b");
+    QTest::newRow("DEL") << QStringLiteral("a\x7f") << QStringLiteral("a") + r;
+    QTest::newRow("C1 NEL") << QString(QStringLiteral("a") + QChar(0x85)) << QStringLiteral("a") + r;
+    QTest::newRow("non-ASCII kept") << QStringLiteral("更新前 é") << QStringLiteral("更新前 é");
+}
+
+void TestRecordSafety::sanitizeReplacesControlCharacters()
+{
+    QFETCH(QString, value);
+    QFETCH(QString, expected);
+
+    const QString sanitized = sanitizeRecordText(value);
+    QCOMPARE(sanitized, expected);
+    QCOMPARE(sanitized.size(), value.size());
+    QVERIFY(isRecordSafeText(sanitized));
+}
+
+/**
+ * @brief 置き換えた後のdescriptionは偽のスナップショット行を生まないことを示す
+ */
+void TestRecordSafety::sanitizedDescriptionKeepsSnapshotRecord()
+{
+    const QString forgedDescription =
+        QStringLiteral("update\n999,single,0,2026-01-01T00:00:00,0,number,evil,");
+
+    QString csv = QStringLiteral("number,type,pre-number,date,user,cleanup,description,userdata\n");
+    csv += QStringLiteral("42,single,0,2026-01-01T00:00:00,0,number,") + sanitizeRecordText(forgedDescription)
+           + QStringLiteral(",\n");
+
+    const QStringList lines = csv.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 2);
+    QVERIFY(lines.at(1).startsWith(QStringLiteral("42,")));
 }
 
 QTEST_APPLESS_MAIN(TestRecordSafety)

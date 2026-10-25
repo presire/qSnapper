@@ -60,6 +60,7 @@ ItemDelegate {
 
         // ID列
         Label {
+            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
             text: root.displayId
             font.pixelSize: 15
             Layout.preferredWidth: columnWidths ? columnWidths.idWidth : 80
@@ -99,6 +100,7 @@ ItemDelegate {
 
             // 種別名をローカライズして表示する
             Label {
+                textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                 text: {
                     switch (root.groupTypeString) {
                     case "single":
@@ -156,6 +158,7 @@ ItemDelegate {
 
         // 開始日列
         Label {
+            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
             text: Qt.formatDateTime(root.startTime, "yyyy-MM-dd HH:mm:ss")
             font.pixelSize: 15
             Layout.preferredWidth: columnWidths ? columnWidths.dateWidth : 170
@@ -166,6 +169,7 @@ ItemDelegate {
 
         // 終了日列 (Post番号を持つグループのみ時刻を表示する)
         Label {
+            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
             text: root.postNumber > 0 ? Qt.formatDateTime(root.endTime, "yyyy-MM-dd HH:mm:ss") : ""
             font.pixelSize: 15
             Layout.preferredWidth: columnWidths ? columnWidths.dateWidth : 170
@@ -176,6 +180,7 @@ ItemDelegate {
 
         // 説明列 (空の場合はプレースホルダを表示する)
         Label {
+            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
             text: root.description || qsTr("(No description)")
             font.pixelSize: 15
             Layout.fillWidth: true
@@ -186,6 +191,7 @@ ItemDelegate {
 
         // ユーザデータ列 (key=valueをカンマ区切りで1行に連結する)
         Label {
+            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
             text: {
                 if (!root.userdata || Object.keys(root.userdata).length === 0)
                     return ""

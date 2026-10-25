@@ -82,15 +82,16 @@ BASELINE=1 ./tests/security_poc/poc_change_record_injection.sh build
 user namespace内scratch rootに全操作を閉じる点はC-8と同じ)。  
 
 staged restore計画のentry (`path, changeType`) をクライアントが改ざんした場合、
-サーバがcommit時に (source, counterpart) から権威ある比較を再構築して
-全entryを照合する層の有効性を検証する。pre/postの2つの「snapshot」木から
-現実の差分を計算し、本番と同一の純粋関数群 (`qsnapper::restore::restorevalidation`) と
+サーバがcommit時に復元元と比較相手の木を直接観測し、全entryが実際の差分に
+裏付けられているかを照合する層の有効性を検証する (libsnapperの比較結果は、
+改行を含むファイル名でfilelistキャッシュが汚染され得るため照合に使わない)。
+pre/postの2つの「snapshot」木を用意し、本番と同一の純粋関数群 (`qsnapper::restore::restorevalidation`) と
 実security core (`RestoreManifestRegistry` / `RestorePlanExecutor` /
 `qsnapper::security::*`) を用いる。
 
 | 層 | 実装 |
 |---|---|
-| 状態ビット -> changeType写像 / path正規化 / 権威あるmap構築 | `qsnapper::restore::restorevalidation` |
+| 復元元と比較相手の木の観測による差分の裏付け | `qsnapper::restore::restorevalidation` / `qsnapper::security::observePathNoFollowAt()` |
 | 凍結済み計画の保持とbounded slice読み出し | `RestoreManifestRegistry` |
 | created削除前の復元元存在確認 | `qsnapper::security::isConfirmedAbsentAt()` |
 | 実際の削除 | `qsnapper::security::safeRemoveAllBeneathRoot()` |

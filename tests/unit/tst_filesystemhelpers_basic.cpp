@@ -146,6 +146,11 @@ void TestFilesystemHelpers::safeLstatReportsSymlinkItself()
     QVERIFY(S_ISLNK(st.st_mode));
 }
 
+/**
+ * @brief symlinkを含む木を、linkの先を辿らずに削除できることを確認する
+ *
+ * 木の中のsymlinkを追従すると、復元先の外にあるファイルを削除してしまう
+ */
 void TestFilesystemHelpers::safeRemoveAllRemovesTreeWithoutFollowingSymlink()
 {
     QTemporaryDir tempDir;
@@ -169,7 +174,7 @@ void TestFilesystemHelpers::safeRemoveAllRemovesTreeWithoutFollowingSymlink()
     const QString symlinkPath = treePath + QStringLiteral("/link.txt");
     QVERIFY(::symlink(outsideFile.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
 
-    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), treePath));
+    QVERIFY(safeRemoveAllBeneathRoot(tempDir.path(), treePath));
     QVERIFY(!QDir(treePath).exists());
 
     QFile verify(outsideFile);
@@ -177,6 +182,11 @@ void TestFilesystemHelpers::safeRemoveAllRemovesTreeWithoutFollowingSymlink()
     QCOMPARE(verify.readAll(), QByteArray("outside"));
 }
 
+/**
+ * @brief 木ではなく単一ファイルを指定した場合も削除できることを確認する
+ *
+ * 復元計画はファイル単位の削除も行うため、ディレクトリ専用の削除経路に閉じない
+ */
 void TestFilesystemHelpers::safeRemoveAllRemovesSingleFile()
 {
     QTemporaryDir tempDir;
@@ -189,10 +199,15 @@ void TestFilesystemHelpers::safeRemoveAllRemovesSingleFile()
         file.write("only");
     }
 
-    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), filePath));
+    QVERIFY(safeRemoveAllBeneathRoot(tempDir.path(), filePath));
     QVERIFY(!QFile::exists(filePath));
 }
 
+/**
+ * @brief 途中の成分がsymlinkの場合、その先を削除せず拒否することを確認する
+ *
+ * 攻撃者が親ディレクトリを外部へのsymlinkへ差し替えても、復元先の外を削除させない
+ */
 void TestFilesystemHelpers::safeRemoveAllRejectsSymlinkIntermediateComponent()
 {
     QTemporaryDir tempDir;
@@ -212,7 +227,7 @@ void TestFilesystemHelpers::safeRemoveAllRejectsSymlinkIntermediateComponent()
     QVERIFY(::symlink(realDir.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
 
     const QString victimPath = symlinkPath + QStringLiteral("/target.txt");
-    QVERIFY(!safeRemoveAllBeneathRoot(QStringLiteral("/"), victimPath));
+    QVERIFY(!safeRemoveAllBeneathRoot(tempDir.path(), victimPath));
     QVERIFY(QFile::exists(realFile));
 }
 
@@ -309,6 +324,12 @@ namespace {
 
 }
 
+/**
+ * @brief 木の中のmountポイントで再帰削除を止め、境界の内側を消さないことを確認する
+ *
+ * 別ファイルシステムの内容はスナップショットに含まれず復元もできないため、削除すると取り返しがつかない
+ * mountの作成には特権が必要なためprivate mount namespaceで再現し、使えない環境ではQSKIPする
+ */
 void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
 {
     QTemporaryDir tempDir;
@@ -331,7 +352,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
         }
 
         errno = 0;
-        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), tree)) {
+        if (safeRemoveAllBeneathRoot(tempDir.path(), tree)) {
             return 2;
         }
         if (errno != EXDEV) {
@@ -355,6 +376,11 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
     QCOMPARE(result, 0);
 }
 
+/**
+ * @brief 削除対象そのものがmountポイントの場合も、中身を消さずに拒否することを確認する
+ *
+ * 削除対象がmount pointなら、配下はスナップショットに含まれない別ファイルシステムである
+ */
 void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
 {
     QTemporaryDir tempDir;
@@ -373,7 +399,7 @@ void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
 
         // 削除対象そのものがmount pointである場合も降りない
         errno = 0;
-        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), mountPoint)) {
+        if (safeRemoveAllBeneathRoot(tempDir.path(), mountPoint)) {
             return 2;
         }
         if (errno != EXDEV) {
@@ -388,6 +414,11 @@ void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
     QCOMPARE(result, 0);
 }
 
+/**
+ * @brief 同じファイルシステムのbind mountでも、st_devが同じという理由で越えないことを確認する
+ *
+ * bind mountはst_devが親と一致するため、st_devの比較だけでは境界を検出できない
+ */
 void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
 {
     QTemporaryDir tempDir;
@@ -418,7 +449,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
         }
 
         errno = 0;
-        if (safeRemoveAllBeneathRoot(QStringLiteral("/"), tree)) {
+        if (safeRemoveAllBeneathRoot(tempDir.path(), tree)) {
             return 2;
         }
         if (errno != EXDEV) {
@@ -469,6 +500,12 @@ void TestFilesystemHelpers::safeRemoveAllBeneathRootStopsAtMountBoundary()
     QCOMPARE(result, 0);
 }
 
+/**
+ * @brief ネストしたbtrfs subvolumeを、mountでなくても境界として扱うことを確認する
+ *
+ * subvolumeはst_devが親と異なるがmountではないため、mount一覧だけの判定では越えてしまう
+ * subvolumeの作成はbtrfsと権限を要するため、作れない環境ではQSKIPする
+ */
 void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
 {
     // ネストしたsubvolumeはmountではないが、st_devが親と異なる
@@ -502,7 +539,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
     QVERIFY(createEmptyFile(inside));
 
     errno = 0;
-    QVERIFY(!safeRemoveAllBeneathRoot(QStringLiteral("/"), tree));
+    QVERIFY(!safeRemoveAllBeneathRoot(tempDir.path(), tree));
     QCOMPARE(errno, EXDEV);
     QVERIFY(existsNoFollow(inside));
 

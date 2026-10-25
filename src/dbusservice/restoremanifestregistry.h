@@ -24,7 +24,7 @@ namespace qsnapper::restore {
 
 /**
  * @class RestoreManifestRegistry
- * @brief owner束縛とTTLと容量上限を強制して復元計画を所有するregistry
+ * @brief 復元計画を所有し、作成したD-Bus接続 (owner) 以外からの操作、有効期限 (TTL) の超過、容量上限の超過を拒否するregistry
  *
  * 単一Qtイベントループスレッドから利用する非スレッドセーフな所有コンテナである
  *
@@ -48,7 +48,8 @@ public:
     static constexpr int kMaxManifestsGlobal = 32;                     // 全体の最大計画数
     static constexpr qint64 kDefaultTtlMs = 10 * 60 * 1000;             // 既定のTTL (ミリ秒)
 
-    // staging ([BeginRestorePlan] / [StageRestoreEntries]) は設計上、認可を要さない
+    // staging ([BeginRestorePlan] / [StageRestoreEntries]) は、差分の閲覧と同じview-diffの認可だけで行える
+    // view-diffはauth_admin_keepで一度の認証が一定時間続くため、復元の実行より緩い条件で計画を作れる
     // マニフェスト単位の上限だけでは、攻撃者がD-Bus接続を複数開くだけで (ユニーク名ごとに別ownerとして数えられるため) 上限を掛け算でき、
     // rootサービスに [32マニフェスト x 64MB = 2GB] を確保させられる
     //
@@ -101,7 +102,7 @@ public:
         qint64 maxEntriesPerUid = kMaxEntriesPerUid,
         qint64 maxPathBytesPerUid = kMaxPathBytesPerUid);
 
-    // owner束縛を変更する操作系
+    // ownerを照合して計画を作成・変更する操作
     /**
      * @brief ownerに束縛された空のStaging計画を作成する
      * @param owner D-Bus呼び出し元のユニーク名
@@ -131,7 +132,7 @@ public:
                       const QStringList &paths, const QStringList &changeTypes,
                       ManifestError *err);
 
-    // owner束縛の状態遷移系
+    // ownerを照合して計画の状態を進める操作
     /**
      * @brief owner確認後にマニフェストをfreezeする
      * @param id マニフェスト識別子
@@ -162,6 +163,18 @@ public:
                  ManifestError *err);
 
     /**
+     * @brief owner確認後にcursorを進め、同じchunkで削除・スキップした件数を記録する
+     * @param id マニフェスト識別子
+     * @param owner 呼び出し元owner
+     * @param count 進める正のエントリ数 (スキップを含む)
+     * @param tally countに含まれるエントリの内訳
+     * @param err 結果エラーの格納先 (省略可)
+     * @return 更新成功時true
+     */
+    bool advance(const QString &id, const QString &owner, int count,
+                 const RestoreChunkTally &tally, ManifestError *err);
+
+    /**
      * @brief owner確認済みマニフェストのTTLだけを延長する
      *
      * 状態もcursorも変更せず、m_lastActivityMsのみ更新する
@@ -186,6 +199,20 @@ public:
                     const QString &reason, ManifestError *err);
 
     /**
+     * @brief owner確認後に、失敗したエントリの位置を記録してFailedへ遷移する
+     * @param id マニフェスト識別子
+     * @param owner 呼び出し元owner
+     * @param reason 人間向けの失敗理由
+     * @param failedIndex 失敗したエントリの0始まりの位置
+     * @param failedPath 失敗したエントリのパス
+     * @param err 結果エラーの格納先 (省略可)
+     * @return 遷移成功時true
+     */
+    bool markFailedAt(const QString &id, const QString &owner,
+                      const QString &reason, int failedIndex,
+                      const QString &failedPath, ManifestError *err);
+
+    /**
      * @brief owner確認後にマニフェストをCancelledへ遷移する
      * @param id マニフェスト識別子
      * @param owner 呼び出し元owner
@@ -194,7 +221,7 @@ public:
      */
     bool cancel(const QString &id, const QString &owner, ManifestError *err);
 
-    // owner束縛の参照系
+    // ownerを照合して計画を参照する操作
     /**
      * @brief owner確認後にマニフェスト状態を取得する
      * @param id マニフェスト識別子
@@ -277,6 +304,55 @@ public:
      */
     qint64 globalEntries() const;
 
+    // ownerを照合しないサービス内部専用の照会
+    // config操作や計画の作成時に、他のownerが持つ計画も含めて判定する必要があるため、owner確認を行わない
+    // 返すのは状態とIDだけで、パスなどの計画の中身は返さない
+    /**
+     * @brief 指定configに、凍結済みまたは実行中の計画があるかを返す
+     *
+     * Staging計画は誰でも作れるため、config操作を止める理由にしない
+     * Frozen計画は認可待ちか認可済みで実行直前、Running計画は実行中であり、configを消すと復元が壊れる
+     *
+     * @param configName 判定対象のSnapper設定名
+     * @return 失効していないFrozenまたはRunningの計画がある場合true
+     */
+    bool hasActivePlanForConfig(const QString &configName) const;
+
+    /**
+     * @brief 指定スナップショットを、凍結済みまたは実行中の計画が復元元か比較相手として参照しているかを返す
+     *
+     * 認可待ちの間に参照先を削除されると、管理者が確認した内容と異なる状態で復元が始まる、または途中で失敗するため、
+     * 単体削除でこれらのスナップショットを保護する
+     *
+     * @param configName 判定対象のSnapper設定名
+     * @param snapshotNumber 判定対象のスナップショット番号
+     * @return 失効していないFrozenまたはRunningの計画が参照している場合true
+     */
+    bool isSnapshotReferencedByActivePlan(const QString &configName, int snapshotNumber) const;
+
+    /**
+     * @brief 指定UIDのStaging計画のIDを、作成の古い順に返す
+     *
+     * 同じUIDが上限に達したときに、最も古い計画から破棄して新しい計画の枠を空けるために使う
+     *
+     * @param ownerUid 対象のUID
+     * @param excludeId 結果から除く計画のID (空文字列なら除かない)
+     * @return Staging計画のID (作成の古い順)
+     */
+    QStringList stagingIdsForUidOldestFirst(uint ownerUid, const QString &excludeId) const;
+
+    /**
+     * @brief 指定configのStaging計画のIDを、ownerを問わず返す
+     *
+     * config操作の後に同じ名前のconfigや同じ番号のスナップショットが作り直されると、
+     * 古い計画が別の内容を指したまま確定されかねないため、config操作の直前に破棄する計画を集めるために使う
+     *
+     * @param configName 対象のSnapper設定名
+     * @param snapshotNumber 復元元か比較相手として参照する計画だけに絞る番号 (負の値なら絞らない)
+     * @return 失効していないStaging計画のID
+     */
+    QStringList stagingIdsForConfig(const QString &configName, int snapshotNumber) const;
+
 private:
     /**
      * @class ManifestRecord
@@ -285,11 +361,13 @@ private:
      * manifest : 所有する復元計画本体
      * pathBytes : 本計画が保持するUTF-8 pathバイト数
      * ownerUid : 予算集計に使う呼び出し元UID
+     * creationSequence : 作成順の通し番号 (同じ作成時刻の計画を古い順に破棄するため)
      */
     struct ManifestRecord {
-        std::unique_ptr<RestoreManifest> manifest; // 所有する復元計画本体
-        qint64 pathBytes = 0;                      // 本計画が保持するUTF-8 pathバイト数
+        std::unique_ptr<RestoreManifest> manifest;  // 所有する復元計画本体
+        qint64 pathBytes = 0;                       // 本計画が保持するUTF-8 pathバイト数
         uint ownerUid = 0;                          // 予算集計に使う呼び出し元UID
+        quint64 creationSequence = 0;               // 作成順の通し番号 (古い計画から破棄する順序の判定用)
     };
 
     using ManifestMap = std::map<QString, ManifestRecord>;
@@ -327,17 +405,18 @@ private:
 
     ManifestMap m_manifests;                          // 識別子を鍵とする計画と予算記録の所有map
     std::function<qint64()> m_clock;                  // TTL判定と活動更新に使う時刻源
+    quint64 m_nextCreationSequence = 0;               // 次に作る計画へ振る作成順の通し番号
     int m_maxEntriesPerManifest = kMaxEntriesPerManifest; // マニフェスト単位のエントリ数上限
     qint64 m_maxPathBytesPerManifest = kMaxPathBytesPerManifest; // マニフェスト単位のUTF-8 pathバイト数上限
     qint64 m_maxEntriesGlobal = kMaxEntriesGlobal;    // registry全体のエントリ数上限
     qint64 m_maxPathBytesGlobal = kMaxPathBytesGlobal; // registry全体のUTF-8 pathバイト数上限
-    qint64 m_maxEntriesPerUid = kMaxEntriesPerUid;    // UID単位のエントリ数上限
+    qint64 m_maxEntriesPerUid = kMaxEntriesPerUid;   // UID単位のエントリ数上限
     qint64 m_maxPathBytesPerUid = kMaxPathBytesPerUid; // UID単位のUTF-8 pathバイト数上限
 };
 
 /**
  * @class FinishedRestorePlanStore
- * @brief 終端した復元計画の状態を短時間だけowner束縛で保持する
+ * @brief 終端した復元計画の状態を、計画のownerだけが取得できる形で短時間保持する
  *
  * 終端signalはsystem busの全接続へ届くため、失敗したpathなどの詳細は載せない
  * 詳細はこのstoreに残し、計画のownerだけが [GetRestorePlanStatus] で取得する

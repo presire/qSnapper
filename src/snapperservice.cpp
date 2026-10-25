@@ -1,14 +1,21 @@
 /**
  * @file snapperservice.cpp
- * @brief Snapper操作サービスのD-Bus連携実装
+ * @brief スナップショット操作をqsnapper-dbus-serviceへ非同期に依頼するSnapperServiceの実装
+ *
+ * すべてのD-Bus呼び出しをQDBusPendingCallWatcherで受け取り、GUIを止めない
+ * 結果はシグナルでQMLへ返し、処理中の操作数をoperationBusyとして公開する
+ *
+ * 利用する側 : SnapshotListModel、FileChangeModel、設定画面
+ * 出力 : Q_PROPERTYの変更通知、各操作の完了シグナル
+ * 依存 : Qt D-Bus、qsnapper::csv、snappertimerstate.h、externalurlopener.h
  */
 
 #include <QCoreApplication>
 #include <QDBusConnection>
-#include <QDBusConnectionInterface>
 #include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDBusMessage>
-#include <QDBusReply>
 #include <QDBusError>
 #include <QDBusMetaType>
 #include <QMap>
@@ -19,7 +26,6 @@
 #include "csvrecord.h"
 #include "externalurlopener.h"
 
-// QVariantMap --> QMap<QString,QString> 変換ヘルパー
 /**
  * @brief QVariantMapをD-Bus送信用のQMap<QString,QString>へ変換する
  * @param src 変換元のマップ
@@ -40,10 +46,10 @@ SnapperService* SnapperService::s_instance = nullptr;
 
 /**
  * @brief D-Busエラーを利用者へ表示する文言へ変換する
- * @param error ヘルパから返されたD-Busエラー
+ * @param error qsnapper-dbus-serviceから返されたD-Busエラー
  * @return 既知の拒否理由であれば翻訳済みの固定文言、それ以外はエラー本文
- * @note ヘルパは復元や設定変更の実行中に操作を一律で拒否し、英語の固定文言だけを返す
- *       拒否は一時的なものが多く、完了後に再実行すれば成功するため、エラー名で判別して理由を翻訳して伝える
+ * @note qsnapper-dbus-serviceは復元や設定変更の実行中に操作を一律で拒否し、英語の固定文言だけを返す
+ *       一時的な拒否は再実行で成功し得るが、認可の拒否は管理者認証が必要であるため、エラー名で判別して理由を翻訳して伝える
  *       エラー名はdbus/com.presire.qsnapper.Operations.xmlに記載した名前と一致させる必要がある
  */
 QString SnapperService::errorText(const QDBusError &error)
@@ -69,41 +75,41 @@ QString SnapperService::errorText(const QDBusError &error)
         return QCoreApplication::translate("SnapperService",
                                            "The snapshot list is being updated by Snapper. Try again in a minute.");
     }
+    // Polkitの認可が得られなかった場合 (認証ダイアログの取消、権限の無いユーザ、認証の失敗など)
+    // バスの標準エラー名と、qsnapper-dbus-serviceが独自に返す名前の両方を同じ文言で扱う
+    if (name == QLatin1String("org.freedesktop.DBus.Error.AccessDenied")
+        || name == QLatin1String("com.presire.qsnapper.Error.AccessDenied")
+        || name == QLatin1String("com.presire.qsnapper.Error.NotAuthorized")) {
+        return QCoreApplication::translate("SnapperService",
+                                           "Authorization was denied. Administrator authentication is required for this operation.");
+    }
     return error.message();
 }
 
 /**
  * @brief SnapperServiceのコンストラクタ
  *
- * D-Busインターフェースを初期化し、Snapperサービスへの接続を確立する
+ * D-Busでやり取りする型を登録し、現在の設定を既定値で初期化する
  *
  * @param parent 親オブジェクト
+ * @note QDBusInterfaceを生成するとリモートオブジェクトの問い合わせでGUIが止まるため、接続は各呼び出し時に固定の宛先へ非同期で行う
  */
 SnapperService::SnapperService(QObject *parent)
     : QObject(parent)
-    , m_dbusInterface(nullptr)
     , m_configsChecked(false)
+    , m_configsGeneration(0)
+    , m_pendingOperations(0)
     , m_currentConfig(QStringLiteral("root"))
 {
-    // QMap<QString,QString> の D-Bus 型登録 (クライアント側)
+    // QMap<QString, QString>のD-Bus型登録(クライアント側)
     qDBusRegisterMetaType<QMap<QString, QString>>();
 
-    // GetTimerStates の応答 a{s(ss)} を復元するための型登録 (構造体 (ss) と、そのマップ)
+    // GetTimerStatesの応答a{s(ss)}を復元するための型登録(構造体(ss)と、そのマップ)
     qDBusRegisterMetaType<SnapperTimerState>();
     qDBusRegisterMetaType<SnapperTimerStateMap>();
 
-    m_dbusInterface = new QDBusInterface(
-        "com.presire.qsnapper.Operations",
-        "/com/presire/qsnapper/Operations",
-        "com.presire.qsnapper.Operations",
-        QDBusConnection::systemBus(),
-        this
-    );
-
-    if (!m_dbusInterface->isValid()) {
-        qCWarning(snapperLog) << "Failed to connect to D-Bus service:"
-                              << QDBusConnection::systemBus().lastError().message();
-    }
+    // QDBusInterfaceはコンストラクタでリモートオブジェクトを同期的に問い合わせてGUIを止めるため、生成しない
+    // すべての呼び出しは非同期の固定宛先で行い、特権サービスの起動はバスのD-Bus activationに任せる
 }
 
 /**
@@ -132,89 +138,60 @@ SnapperService* SnapperService::instance()
 }
 
 /**
- * @brief D-Busサービスへの再接続を試みる
- *
- * アイドルタイムアウトでヘルパープロセスが終了した場合など、D-Busインターフェースが無効になった時に呼び出す
- * QDBusInterfaceを再生成することでD-Bus activationが発動し、ヘルパープロセスが自動的に再起動される
- *
- * @return 再接続に成功した場合: true
- */
-bool SnapperService::reconnect()
-{
-    qCInfo(snapperLog) << "D-Bus service lost, attempting to reconnect...";
-
-    // startService() でヘルパーの起動完了を待ってから接続する
-    // QDBusInterface 再生成だけでは activation の完了前に isValid() を確認してしまい、falseが返ることがある
-    // Qt 6では startService() は QDBusReply<void> を返すため isValid() のみ確認する
-    auto startReply = QDBusConnection::systemBus().interface()->startService("com.presire.qsnapper.Operations");
-    if (!startReply.isValid()) {
-        qCCritical(snapperLog) << "Failed to start D-Bus service:" << startReply.error().message();
-        return false;
-    }
-
-    delete m_dbusInterface;
-    m_dbusInterface = new QDBusInterface(
-        "com.presire.qsnapper.Operations",
-        "/com/presire/qsnapper/Operations",
-        "com.presire.qsnapper.Operations",
-        QDBusConnection::systemBus(),
-        this
-    );
-
-    if (!m_dbusInterface->isValid()) {
-        qCCritical(snapperLog) << "Reconnection failed:" << QDBusConnection::systemBus().lastError().message();
-        return false;
-    }
-
-    qCInfo(snapperLog) << "Reconnected to D-Bus service successfully.";
-    return true;
-}
-
-/**
  * @brief D-Bus経由で利用可能なSnapper config一覧を取得
  * @return キャッシュされた設定名の一覧
  */
 QStringList SnapperService::configs()
 {
-    // 注意:
-    // ここで 遅延refreshConfigs()を呼ぶと、プロパティゲッター評価中にconfigsChangedシグナルが送信され、QML側でbinding loopとして検出される
-    // 初回取得はQMLのComponent.onCompletedから明示的にrefreshConfigs()を呼ぶ契約とする
+    // getterからrefreshConfigs()を呼ぶと、プロパティを評価するたびに再取得が始まり、応答のconfigsChangedで再び評価されて取得が繰り返される
+    // この循環を避けるため、getterはキャッシュを返すだけにして、初回の取得はQMLのComponent.onCompletedからrefreshConfigs()を明示的に呼んで行う
     return m_configs;
 }
 
+// asyncSettingsCall()の定義は、非同期APIをまとめた位置にあるため、ここでは宣言だけを置く
+// 待ち時間を省略した呼び出しは5分で打ち切られる
+static QDBusPendingCall asyncSettingsCall(const QString &method, const QList<QVariant> &arguments,
+                                          int timeoutMs = 5 * 60 * 1000);
+
 /**
- * @brief 設定一覧をD-Busから再取得する
+ * @brief 設定一覧をD-Busから非同期に再取得する
  *
  * 取得した一覧をキャッシュし、現在の設定が一覧に無ければ先頭を採用する
- * 取得結果にかかわらずconfigsChanged()を発行する
+ * 取得結果にかかわらず、応答の受信後にconfigsChanged()を発行する
+ *
+ * @note 同期呼び出しでは、ヘルパの起動待ちや応答の遅延の間にGUIが固まるため、QDBusPendingCallWatcherで応答を受け取る
+ *       連続して呼ばれた場合は、世代番号 (m_configsGeneration) が一致する最新の応答だけを反映し、古い応答は捨てる
+ *       ヘルパの起動はバスのD-Bus activationに任せる
  */
 void SnapperService::refreshConfigs()
 {
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid; cannot list configs";
+    const quint64 generation = ++m_configsGeneration;
+    auto *watcher = new QDBusPendingCallWatcher(
+        asyncSettingsCall(QStringLiteral("ListConfigs"), {}, 60 * 1000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation]() {
+        watcher->deleteLater();
+        if (generation != m_configsGeneration) {
             return;
         }
-    }
 
-    QDBusReply<QStringList> reply = m_dbusInterface->call("ListConfigs");
+        if (watcher->isError()) {
+            qCWarning(snapperLog) << "ListConfigs failed:" << watcher->error().message();
+            m_configs.clear();
+        }
+        else {
+            const QDBusPendingReply<QStringList> reply = *watcher;
+            m_configs = reply.value();
+        }
 
-    if (reply.isValid()) {
-        m_configs = reply.value();
-    }
-    else {
-        qCWarning(snapperLog) << "ListConfigs failed:" << reply.error().message();
-        m_configs.clear();
-    }
+        m_configsChecked = true;
+        emit configsChanged();
 
-    m_configsChecked = true;
-    emit configsChanged();
-
-    // 現在のconfigが一覧に無ければ先頭を採用
-    if (!m_configs.isEmpty() && !m_configs.contains(m_currentConfig)) {
-        m_currentConfig = m_configs.first();
-        emit currentConfigChanged();
-    }
+        // 現在のconfigが一覧に無ければ先頭を採用
+        if (!m_configs.isEmpty() && !m_configs.contains(m_currentConfig)) {
+            m_currentConfig = m_configs.first();
+            emit currentConfigChanged();
+        }
+    });
 }
 
 /**
@@ -235,14 +212,14 @@ static QDBusPendingCall connectionFailedCall()
  * @param arguments メソッドの引数
  * @param timeoutMs 応答を待つ上限 (ミリ秒)
  * @return 応答を待つQDBusPendingCall、システムバスへ接続できない場合はエラー応答
- * @note 既定の待ち時間 (25秒) では、polkitの認証ダイアログへの入力やタイマ操作の完了を待つ間に応答が打ち切られ、
+ * @note D-Busの既定の待ち時間 (25秒) のままでは、Polkitの認証ダイアログへの入力やタイマ操作の完了を待つ間に応答が打ち切られ、
  *       実際には成功した操作が失敗と表示されるため、待ち時間を延ばす
  *       打ち切られた場合も呼び出し元は状態を読み直すため、表示が実際の状態と食い違ったままにはならない
- *       QDBusInterfaceの再生成 (reconnect) は同期呼び出しでGUIを止めるため使わず、固定の宛先へ直接送る
+ *       QDBusInterfaceの生成は同期呼び出しでGUIを止めるため使わず、固定の宛先へ直接送る
  *       特権サービスがアイドル終了していても、バスのD-Bus activationが起動するため再接続は不要である
  */
 static QDBusPendingCall asyncSettingsCall(const QString &method, const QList<QVariant> &arguments,
-                                          int timeoutMs = 5 * 60 * 1000)
+                                          int timeoutMs)
 {
     QDBusConnection bus = QDBusConnection::systemBus();
     if (!bus.isConnected()) {
@@ -284,7 +261,7 @@ QDBusPendingCall SnapperService::asyncWriteSnapperConfig(const QString &configNa
  * @brief 指定設定のBtrfsクォータを非同期に設定する (SetupQuota)
  * @param configName 対象の設定名
  * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
- * @note 認可はサーバ側のpolkitで行われるため、認証ダイアログの表示中は応答が遅れる
+ * @note 認可はサーバ側のPolkitで行われるため、認証ダイアログの表示中は応答が遅れる
  *       asyncGetConfigと同様に、長い待ち時間の非同期呼び出しを使い、同期のreconnectは行わない
  */
 QDBusPendingCall SnapperService::asyncSetupQuota(const QString &configName)
@@ -306,7 +283,7 @@ QDBusPendingCall SnapperService::asyncGetTimerStates()
  * @param unit 対象のユニット名
  * @param enabled trueで有効化して起動、falseで停止して無効化
  * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
- * @note 認可はサーバ側のpolkitで行われるため、認証ダイアログの表示中は応答が遅れる
+ * @note 認可はサーバ側のPolkitで行われるため、認証ダイアログの表示中は応答が遅れる
  */
 QDBusPendingCall SnapperService::asyncSetTimerEnabled(const QString &unit, bool enabled)
 {
@@ -318,7 +295,7 @@ QDBusPendingCall SnapperService::asyncSetTimerEnabled(const QString &unit, bool 
  * @param configName 作成する設定名
  * @param subvolume 設定が対象とするBtrfsサブボリュームの絶対パス
  * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
- * @note polkitは毎回auth_adminで認証を求めるため、入力待ちとサブボリュームの作成時間を見込んで待ち時間を延ばす
+ * @note Polkitは毎回auth_adminで認証を求めるため、入力待ちとサブボリュームの作成時間を見込んで待ち時間を延ばす
  */
 QDBusPendingCall SnapperService::asyncCreateConfig(const QString &configName, const QString &subvolume)
 {
@@ -370,6 +347,18 @@ QDBusPendingCall SnapperService::asyncDeleteSnapshot(const QString &configName, 
     return asyncSettingsCall(QStringLiteral("DeleteSnapshot"),
                              {configName, static_cast<int>(number)},
                              10 * 60 * 1000);
+}
+
+/**
+ * @brief 指定設定のスナップショット一覧を非同期に取得する (ListSnapshots)
+ * @param configName 対象の設定名
+ * @return 応答がCSV文字列のQDBusPendingCall、接続できない場合はエラー応答
+ * @note 同期呼び出しでは、snapperdの応答待ちや認証ダイアログの表示中にGUIが固まるため、非同期で呼び出す
+ *       認証の入力待ちを見込み、待ち時間は10分とする
+ */
+QDBusPendingCall SnapperService::asyncListSnapshots(const QString &configName)
+{
+    return asyncSettingsCall(QStringLiteral("ListSnapshots"), {configName}, 10 * 60 * 1000);
 }
 
 /**
@@ -428,7 +417,7 @@ void SnapperService::setCurrentConfig(const QString &name)
  *
  * 環境変数DISABLE_SNAPSHOTSの設定に基づいて、指定されたタイプのスナップショット作成が許可されているか判定する
  *
- * @param snapshotType スナップショットのタイプ ("single", "around"など)
+ * @param snapshotType スナップショットの種別 ("single", "around"など)
  * @return 作成が許可されている場合: true、それ以外: false
  */
 bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
@@ -450,292 +439,297 @@ bool SnapperService::createSnapshotAllowed(const QString &snapshotType) const
 }
 
 /**
- * @brief シングルスナップショットを作成
+ * @brief スナップショット作成の受付可否を確認し、不可なら失敗を通知する
+ * @param snapshotType 作成するスナップショットの種別 (DISABLE_SNAPSHOTSの判定に使う文字列)
+ * @return 作成を続けてよい場合はtrue、環境変数により無効化されている場合はfalse
+ * @note 無効化されている場合はsnapshotCreationFailedシグナルを発行する
+ *       呼び出し元に何も表示されないままボタン操作が無視されるのを避けるため、理由を通知する
+ */
+bool SnapperService::checkCreateAllowed(const QString &snapshotType)
+{
+    if (createSnapshotAllowed(snapshotType)) {
+        return true;
+    }
+
+    emit snapshotCreationFailed(tr("Creating this type of snapshot is disabled by the DISABLE_SNAPSHOTS environment variable."));
+    return false;
+}
+
+/**
+ * @brief シングルスナップショットを非同期に作成
  *
  * 単一のスナップショットを作成する
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合は-1を返す
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合は、snapshotCreationFailedシグナルを発行する
+ * 作成の結果はsnapshotCreated / snapshotCreationFailedシグナルで通知する
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
  * @param userdata ユーザデータマップ
- * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-int SnapperService::createSingle(const QString &description,
-                                 FsSnapshot::CleanupAlgorithm cleanup,
-                                 bool important,
-                                 const QVariantMap &userdata)
+void SnapperService::createSingle(const QString &description,
+                                  FsSnapshot::CleanupAlgorithm cleanup,
+                                  bool important,
+                                  const QVariantMap &userdata)
 {
-    if (!createSnapshotAllowed("single")) {
-        return -1;
+    if (!checkCreateAllowed(QStringLiteral("single"))) {
+        return;
     }
 
-    return create(FsSnapshot::SnapshotType::Single, description, -1, cleanup, important, userdata);
+    create(FsSnapshot::SnapshotType::Single, description, -1, cleanup, important, userdata, m_currentConfig);
 }
 
 /**
- * @brief Preスナップショットを作成
+ * @brief Preスナップショットを非同期に作成
  *
- * 変更前のスナップショット (Pre)を作成する
- * DISABLE_SNAPSHOTS環境変数により無効化されている場合は-1を返す
+ * 変更前のスナップショット(Pre)を作成する
+ * DISABLE_SNAPSHOTS環境変数により無効化されている場合は、snapshotCreationFailedシグナルを発行する
+ * 作成の結果はsnapshotCreated / snapshotCreationFailedシグナルで通知する
  *
  * @param description スナップショットの説明
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
  * @param userdata ユーザデータマップ
- * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
  */
-int SnapperService::createPre(const QString &description,
-                              FsSnapshot::CleanupAlgorithm cleanup,
-                              bool important,
-                              const QVariantMap &userdata)
+void SnapperService::createPre(const QString &description,
+                               FsSnapshot::CleanupAlgorithm cleanup,
+                               bool important,
+                               const QVariantMap &userdata)
 {
-    if (!createSnapshotAllowed("around")) {
-        return -1;
+    if (!checkCreateAllowed(QStringLiteral("around"))) {
+        return;
     }
 
-    return create(FsSnapshot::SnapshotType::Pre, description, -1, cleanup, important, userdata);
+    create(FsSnapshot::SnapshotType::Pre, description, -1, cleanup, important, userdata, m_currentConfig);
 }
 
 /**
- * @brief Postスナップショットを作成
+ * @brief Postスナップショットを非同期に作成
  *
- * 変更後のスナップショット (Post) を作成する
+ * 変更後のスナップショット(Post)を作成する
  * 対応するPreスナップショットとペアになる
+ * 作成の結果はsnapshotCreated / snapshotCreationFailedシグナルで通知する
  *
  * @param description スナップショットの説明
  * @param previousNumber 対応するPreスナップショットの番号
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
  * @param userdata ユーザデータマップ
- * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
+ * @note 紐付け先のPreが存在することを、一覧を非同期に取得して確認してから作成を要求する
+ *       確認から作成までの間に設定が切り替わっても、確認した設定に対して作成するよう設定名を先に控える
  */
-int SnapperService::createPost(const QString &description,
-                               int previousNumber,
-                               FsSnapshot::CleanupAlgorithm cleanup,
-                               bool important,
-                               const QVariantMap &userdata)
+void SnapperService::createPost(const QString &description,
+                                int previousNumber,
+                                FsSnapshot::CleanupAlgorithm cleanup,
+                                bool important,
+                                const QVariantMap &userdata)
 {
-    if (!createSnapshotAllowed("around")) {
-        return -1;
+    if (!checkCreateAllowed(QStringLiteral("around"))) {
+        return;
     }
 
-    // 存在確認だけに使うため、find()が返したオブジェクトはこのスコープで解放する
-    const std::unique_ptr<FsSnapshot> previous(find(previousNumber));
+    const QString configName = m_currentConfig;
+    beginOperation();
+    auto *watcher = new QDBusPendingCallWatcher(asyncListSnapshots(configName), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, description, previousNumber, cleanup, important, userdata, configName]() {
+        watcher->deleteLater();
 
-    if (!previous) {
-        qCCritical(snapperLog) << "Previous filesystem snapshot was not found:" << previousNumber;
-        emit snapshotCreationFailed(tr("Previous snapshot was not found."));
-        return -1;
-    }
-
-    return create(FsSnapshot::SnapshotType::Post, description, previous->number(), cleanup, important, userdata);
-}
-
-/**
- * @brief 全てのスナップショットを取得
- *
- * D-Bus経由でSnapperに問い合わせ、全てのスナップショットのリストを取得する
- * 返したオブジェクトはparentを持たず、呼び出し側が所有する
- * QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++から呼ぶこと
- *
- * @return スナップショットのリスト (呼び出し側が解放する)
- */
-QList<FsSnapshot*> SnapperService::all()
-{
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            return QList<FsSnapshot*>();
+        if (watcher->isError()) {
+            qCCritical(snapperLog) << "Failed to list snapshots via D-Bus:" << watcher->error().message();
+            emit snapshotCreationFailed(tr("Failed to create snapshot: %1").arg(errorText(watcher->error())));
+            endOperation();
+            return;
         }
-    }
 
-    QDBusReply<QString> reply = m_dbusInterface->call("ListSnapshots", m_currentConfig);
-
-    if (!reply.isValid()) {
-        qCCritical(snapperLog) << "Failed to list snapshots via D-Bus:"
-                               << reply.error().message();
-        return QList<FsSnapshot*>();
-    }
-
-    QString csvOutput = reply.value();
-
-    return parseSnapshotList(csvOutput);
-}
-
-/**
- * @brief 指定された番号のスナップショットを検索
- *
- * スナップショット番号を指定して、該当するスナップショットを検索する
- *
- * 一致しなかったオブジェクトはここで解放し、一致したものだけを呼び出し側へ渡す
- * (QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される)
- *
- * @param number スナップショット番号
- * @return 見つかったスナップショット (呼び出し側が解放する)、見つからない場合はnullptr
- */
-FsSnapshot* SnapperService::find(int number)
-{
-    FsSnapshot *found = nullptr;
-    const QList<FsSnapshot*> snapshots = all();
-    for (FsSnapshot *snapshot : snapshots) {
-        if (!found && snapshot->number() == number) {
-            found = snapshot;
-        } else {
-            delete snapshot;
+        const QDBusPendingReply<QString> reply = *watcher;
+        const QList<FsSnapshot*> snapshots = parseSnapshotList(reply.value());
+        bool previousExists = false;
+        for (const FsSnapshot *snapshot : snapshots) {
+            if (snapshot->number() == previousNumber) {
+                previousExists = true;
+                break;
+            }
         }
-    }
-    return found;
+        qDeleteAll(snapshots);
+
+        if (!previousExists) {
+            qCCritical(snapperLog) << "Previous filesystem snapshot was not found:" << previousNumber;
+            emit snapshotCreationFailed(tr("Previous snapshot was not found."));
+            endOperation();
+            return;
+        }
+
+        // create()が自身で処理中の状態を開始するため、その後でこの確認分の処理中の状態を終える
+        // 先に終えると、処理中の状態が一瞬だけ解除されて画面の表示が点滅する
+        create(FsSnapshot::SnapshotType::Post, description, previousNumber, cleanup, important, userdata, configName);
+        endOperation();
+    });
 }
 
 /**
- * @brief 指定されたスナップショットにロールバック
+ * @brief 指定されたスナップショットへ非同期にロールバック
  *
- * D-Bus経由でスナップショットへのロールバックを実行する
+ * D-Bus経由でスナップショットへのロールバックを要求する
  * 成功時はrollbackCompletedシグナル、失敗時はrollbackFailedシグナルを発行する
  *
  * @param number ロールバック先のスナップショット番号
- * @return ロールバックが成功した場合: true、それ以外: false
+ * @note ロールバックは、認証の入力待ちとサブボリュームの切り替えに時間がかかるため、待ち時間を40分とする
+ *       処理中はoperationBusyがtrueになり、完了または失敗のシグナルを発行する直前にfalseへ戻る
  */
-bool SnapperService::rollback(int number)
+void SnapperService::rollback(int number)
 {
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            emit rollbackFailed(tr("D-Bus connection failed."));
-            return false;
+    beginOperation();
+    const QString configName = m_currentConfig;
+    auto *watcher = new QDBusPendingCallWatcher(
+        asyncSettingsCall(QStringLiteral("RollbackSnapshot"), {configName, number}, 40 * 60 * 1000), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, number]() {
+        watcher->deleteLater();
+        endOperation();
+
+        if (watcher->isError()) {
+            qCCritical(snapperLog) << "Failed to rollback snapshot via D-Bus:" << watcher->error().message();
+            emit rollbackFailed(tr("Failed to rollback snapshot: %1").arg(errorText(watcher->error())));
+            return;
         }
-    }
 
-    QDBusReply<bool> reply = m_dbusInterface->call("RollbackSnapshot", m_currentConfig, number);
-
-    if (!reply.isValid()) {
-        qCCritical(snapperLog) << "Failed to rollback snapshot via D-Bus:"
-                               << reply.error().message();
-        emit rollbackFailed(tr("Failed to rollback snapshot: %1").arg(errorText(reply.error())));
-        return false;
-    }
-
-    bool success = reply.value();
-    if (success) {
-        emit rollbackCompleted();
-    }
-    else {
-        qCWarning(snapperLog) << "Rollback to snapshot" << number << "failed";
-        emit rollbackFailed(tr("Rollback operation failed."));
-    }
-
-    return success;
+        const QDBusPendingReply<bool> reply = *watcher;
+        if (reply.value()) {
+            emit rollbackCompleted();
+        }
+        else {
+            qCWarning(snapperLog) << "Rollback to snapshot" << number << "failed";
+            emit rollbackFailed(tr("Rollback operation failed."));
+        }
+    });
 }
 
 /**
- * @brief 指定されたスナップショットを削除
+ * @brief 指定されたスナップショットを非同期に削除
  *
- * D-Bus経由でスナップショットの削除を実行する
+ * D-Bus経由でスナップショットの削除を要求する
  * 成功時はsnapshotDeletedシグナル、失敗時はsnapshotDeletionFailedシグナルを発行する
  *
  * @param number 削除するスナップショット番号
- * @return 削除が成功した場合: true、それ以外: false
+ * @note 削除の要求にはasyncDeleteSnapshot()を使い、認証の入力待ちを見込んだ待ち時間で呼び出す
  */
-bool SnapperService::deleteSnapshot(int number)
+void SnapperService::deleteSnapshot(int number)
 {
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            emit snapshotDeletionFailed(number, tr("D-Bus connection failed."));
-            return false;
+    beginOperation();
+    auto *watcher = new QDBusPendingCallWatcher(
+        asyncDeleteSnapshot(m_currentConfig, static_cast<uint>(qMax(number, 0))), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, number]() {
+        watcher->deleteLater();
+        endOperation();
+
+        if (watcher->isError()) {
+            qCCritical(snapperLog) << "Failed to delete snapshot via D-Bus:" << watcher->error().message();
+            emit snapshotDeletionFailed(number, tr("Failed to delete snapshot: %1").arg(errorText(watcher->error())));
+            return;
         }
-    }
 
-    QDBusReply<bool> reply = m_dbusInterface->call("DeleteSnapshot", m_currentConfig, number);
-
-    if (!reply.isValid()) {
-        qCCritical(snapperLog) << "Failed to delete snapshot via D-Bus:"
-                              << reply.error().message();
-        emit snapshotDeletionFailed(number, tr("Failed to delete snapshot: %1")
-                                   .arg(errorText(reply.error())));
-        return false;
-    }
-
-    bool success = reply.value();
-    if (success) {
-        emit snapshotDeleted(number);
-    }
-    else {
-        qCWarning(snapperLog) << "Delete snapshot" << number << "failed";
-        emit snapshotDeletionFailed(number, tr("Delete operation failed."));
-    }
-
-    return success;
+        const QDBusPendingReply<bool> reply = *watcher;
+        if (reply.value()) {
+            emit snapshotDeleted(number);
+        }
+        else {
+            qCWarning(snapperLog) << "Delete snapshot" << number << "failed";
+            emit snapshotDeletionFailed(number, tr("Delete operation failed."));
+        }
+    });
 }
 
 /**
- * @brief スナップショットを作成 (内部実装)
+ * @brief スナップショットを非同期に作成 (内部実装)
  *
- * D-Bus経由でスナップショットを作成する
- * 作成成功時はsnapshotCreatedシグナル、失敗時はsnapshotCreationFailedシグナルを送信する
+ * D-Bus経由でスナップショットの作成を要求する
+ * 作成成功時はsnapshotCreatedシグナル、失敗時はsnapshotCreationFailedシグナルを発行する
  *
- * @param snapshotType スナップショットのタイプ
+ * @param snapshotType スナップショットの種別
  * @param description スナップショットの説明
  * @param previousNumber 対応するPreスナップショットの番号 (Postタイプ以外は-1)
  * @param cleanup クリーンアップアルゴリズム
  * @param important 重要フラグ
  * @param userdata ユーザデータマップ
- * @return 成功時: 作成されたスナップショットの番号、失敗時: -1
+ * @param configName 作成先の設定名 (呼び出し時点の設定を渡し、完了までの間に設定が切り替わっても取り違えない)
+ * @note 作成後は、サーバが応答で返した番号を一覧から探して作成済みのスナップショットを特定する
+ *       一覧の取得も非同期に行い、特定できるまで処理中の状態 (operationBusy) を維持する
  */
-int SnapperService::create(FsSnapshot::SnapshotType snapshotType,
-                           const QString &description,
-                           int previousNumber,
-                           FsSnapshot::CleanupAlgorithm cleanup,
-                           bool important,
-                           const QVariantMap &userdata)
+void SnapperService::create(FsSnapshot::SnapshotType snapshotType,
+                            const QString &description,
+                            int previousNumber,
+                            FsSnapshot::CleanupAlgorithm cleanup,
+                            bool important,
+                            const QVariantMap &userdata,
+                            const QString &configName)
 {
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            emit snapshotCreationFailed(tr("D-Bus connection failed."));
-            return -1;
-        }
-    }
-
-    QString type = FsSnapshot::snapshotTypeToString(snapshotType);
-    // サーバ側のCreateSnapshotは空文字列 / number / timeline / empty-pre-postだけを受け付けるため、
+    const QString type = FsSnapshot::snapshotTypeToString(snapshotType);
+    // qsnapper-dbus-serviceのCreateSnapshotは空文字列、number、timeline、empty-pre-postだけを受け付けるため、
     // クリーンアップなしは"none"ではなく空文字列で送る
     const QString cleanupStr = FsSnapshot::cleanupAlgorithmToString(cleanup);
 
     const QMap<QString, QString> userdataMap = toStringMap(userdata);
-    QDBusReply<QString> reply = m_dbusInterface->call("CreateSnapshot",
-                                                      m_currentConfig,
-                                                      type,
-                                                      description,
-                                                      previousNumber,
-                                                      cleanupStr,
-                                                      QVariant::fromValue(userdataMap),
-                                                      important);
+    beginOperation();
+    auto *watcher = new QDBusPendingCallWatcher(
+        asyncSettingsCall(QStringLiteral("CreateSnapshot"),
+                          {configName, type, description, previousNumber, cleanupStr,
+                           QVariant::fromValue(userdataMap), important},
+                          10 * 60 * 1000),
+        this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, configName]() {
+        watcher->deleteLater();
 
-    if (!reply.isValid()) {
-        qCCritical(snapperLog) << "Failed to create snapshot via D-Bus:" << reply.error().message();
-        emit snapshotCreationFailed(tr("Failed to create snapshot: %1").arg(errorText(reply.error())));
-        return -1;
-    }
+        if (watcher->isError()) {
+            qCCritical(snapperLog) << "Failed to create snapshot via D-Bus:" << watcher->error().message();
+            emit snapshotCreationFailed(tr("Failed to create snapshot: %1").arg(errorText(watcher->error())));
+            endOperation();
+            return;
+        }
 
-    // 一覧の末尾ではなく、サーバーが応答で返した番号で作成されたスナップショットを特定する
-    // (並行して作成された別のスナップショットとの取り違えを防ぐ)
-    const int createdNumber = qsnapper::csv::parseCreatedSnapshotNumber(reply.value());
-    // find()が返したオブジェクトはこのスコープで解放する (snapshotCreatedの受信側はシグナル発行中だけ参照できる)
-    const std::unique_ptr<FsSnapshot> newSnapshot(createdNumber > 0 ? find(createdNumber) : nullptr);
-    if (!newSnapshot) {
-        qCWarning(snapperLog) << "Created snapshot could not be identified from the reply";
-        emit snapshotCreationFailed(tr("The snapshot was created, but it could not be identified."));
-        return -1;
-    }
+        // 一覧の末尾ではなく、サーバが応答で返した番号で作成されたスナップショットを特定する
+        // (並行して作成された別のスナップショットとの取り違えを防ぐ)
+        const QDBusPendingReply<QString> reply = *watcher;
+        const int createdNumber = qsnapper::csv::parseCreatedSnapshotNumber(reply.value());
+        if (createdNumber <= 0) {
+            qCWarning(snapperLog) << "Created snapshot could not be identified from the reply";
+            emit snapshotCreationFailed(tr("The snapshot was created, but it could not be identified."));
+            endOperation();
+            return;
+        }
 
-    emit snapshotCreated(newSnapshot.get());
-    return createdNumber;
+        auto *listWatcher = new QDBusPendingCallWatcher(asyncListSnapshots(configName), this);
+        connect(listWatcher, &QDBusPendingCallWatcher::finished, this, [this, listWatcher, createdNumber]() {
+            listWatcher->deleteLater();
+
+            std::unique_ptr<FsSnapshot> newSnapshot;
+            if (!listWatcher->isError()) {
+                const QDBusPendingReply<QString> listReply = *listWatcher;
+                const QList<FsSnapshot*> snapshots = parseSnapshotList(listReply.value());
+                for (FsSnapshot *snapshot : snapshots) {
+                    if (!newSnapshot && snapshot->number() == createdNumber) {
+                        newSnapshot.reset(snapshot);
+                    }
+                    else {
+                        delete snapshot;
+                    }
+                }
+            }
+            endOperation();
+
+            if (!newSnapshot) {
+                qCWarning(snapperLog) << "Created snapshot could not be found in the snapshot list";
+                emit snapshotCreationFailed(tr("The snapshot was created, but it could not be identified."));
+                return;
+            }
+
+            // snapshotCreatedの受信側は、シグナル発行中だけ参照できる
+            emit snapshotCreated(newSnapshot.get());
+        });
+    });
 }
 
 /**
- * @brief 既存スナップショットのメタデータを編集する
+ * @brief 既存スナップショットのメタデータを非同期に編集する
  *
  * description / cleanup / userdata を更新する
  * 成功時にsnapshotModifiedシグナル、失敗時にsnapshotModificationFailedシグナルを送信する
@@ -744,53 +738,77 @@ int SnapperService::create(FsSnapshot::SnapshotType snapshotType,
  * @param description 新しい説明文
  * @param cleanup 新しいクリーンアップアルゴリズム文字列
  * @param userdata 新しいユーザデータマップ
- * @return 成功時: true、それ以外: false
+ * @note 認証の入力待ちを見込み、待ち時間を10分とする
+ *       処理中はoperationBusyがtrueになり、完了または失敗のシグナルを発行する直前にfalseへ戻る
  */
-bool SnapperService::modifySnapshot(int number,
+void SnapperService::modifySnapshot(int number,
                                     const QString &description,
                                     const QString &cleanup,
                                     const QVariantMap &userdata)
 {
-    if (!m_dbusInterface || !m_dbusInterface->isValid()) {
-        if (!reconnect()) {
-            qCCritical(snapperLog) << "D-Bus interface is not valid";
-            emit snapshotModificationFailed(number, tr("D-Bus connection failed."));
-            return false;
-        }
-    }
-
     const QMap<QString, QString> userdataMap = toStringMap(userdata);
-    QDBusReply<bool> reply = m_dbusInterface->call("ModifySnapshot",
-                                                   m_currentConfig,
-                                                   number,
-                                                   description,
-                                                   cleanup,
-                                                   QVariant::fromValue(userdataMap));
-    if (!reply.isValid()) {
-        qCCritical(snapperLog) << "ModifySnapshot failed:" << reply.error().message();
-        emit snapshotModificationFailed(number, tr("Failed to modify snapshot: %1").arg(errorText(reply.error())));
-        return false;
-    }
+    beginOperation();
+    auto *watcher = new QDBusPendingCallWatcher(
+        asyncSettingsCall(QStringLiteral("ModifySnapshot"),
+                          {m_currentConfig, number, description, cleanup, QVariant::fromValue(userdataMap)},
+                          10 * 60 * 1000),
+        this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, number]() {
+        watcher->deleteLater();
+        endOperation();
 
-    const bool success = reply.value();
-    if (success) {
-        emit snapshotModified(number);
-    }
-    else {
-        emit snapshotModificationFailed(number, tr("Modify operation failed."));
-    }
-    return success;
+        if (watcher->isError()) {
+            qCCritical(snapperLog) << "ModifySnapshot failed:" << watcher->error().message();
+            emit snapshotModificationFailed(number, tr("Failed to modify snapshot: %1").arg(errorText(watcher->error())));
+            return;
+        }
+
+        const QDBusPendingReply<bool> reply = *watcher;
+        if (reply.value()) {
+            emit snapshotModified(number);
+        }
+        else {
+            emit snapshotModificationFailed(number, tr("Modify operation failed."));
+        }
+    });
 }
 
 /**
- * @brief CSV形式のスナップショットリストをパース
+ * @brief 処理中の操作を1件増やし、0件から1件になった場合にoperationBusyChangedを発行する
+ */
+void SnapperService::beginOperation()
+{
+    ++m_pendingOperations;
+    if (m_pendingOperations == 1) {
+        emit operationBusyChanged();
+    }
+}
+
+/**
+ * @brief 処理中の操作を1件減らし、0件になった場合にoperationBusyChangedを発行する
+ * @note 対応するbeginOperation()より多く呼ばれても0未満にならないようにする
+ */
+void SnapperService::endOperation()
+{
+    if (m_pendingOperations <= 0) {
+        return;
+    }
+
+    --m_pendingOperations;
+    if (m_pendingOperations == 0) {
+        emit operationBusyChanged();
+    }
+}
+
+/**
+ * @brief CSV形式のスナップショットリストを解析する
  *
- * Snapperから取得したCSV形式の出力をパースし、FsSnapshotオブジェクトのリストに変換する
+ * qsnapper-dbus-serviceがlibsnapperの情報から生成したCSV形式の出力を解析し、FsSnapshotオブジェクトのリストに変換する
  *
  * 生成したオブジェクトはparentを持たず、所有権は呼び出し側に移る
  *
  * @param csvOutput CSV形式のスナップショットリスト
- * @return パースされたスナップショットのリスト (呼び出し側が解放する)
+ * @return 解析したスナップショットのリスト (呼び出し側が解放する)
  */
 QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 {
@@ -803,9 +821,9 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 
     for (int i = 1; i < lines.size(); ++i) {
         QString line = lines[i];
-        // 1行 = 1レコードの前提は、サーバー側がdescription等の制御文字 (改行含む) をU+FFFDに置き換えて出力するため維持される
-        // 行分割は変更せず、フィールド分割のみRFC 4180対応のsplitRecord()へ置き換える
-        // これによりカンマを含むdescription等が列ずれを起こさなくなる (無quoteの旧サーバー出力もそのまま解釈できる)
+        // 1行が1レコードである前提は、qsnapper-dbus-serviceがdescription等の制御文字(改行含む)をU+FFFDに置き換えて出力するため維持される
+        // フィールドだけをRFC 4180に対応したsplitRecord()で分割し、行の分割は変えない
+        // カンマを含むdescription等が列ずれを起こさなくなる(引用符のない旧サーバ出力もそのまま解釈できる)
         QStringList fields = qsnapper::csv::splitRecord(line);
 
         // 引用符が閉じていない行はsplitRecord()が空のリストを返すため、ここで除外される
@@ -838,8 +856,8 @@ QList<FsSnapshot*> SnapperService::parseSnapshotList(const QString &csvOutput)
 
         QString description = fields[6];
 
-        // userdataをパースする (key1=value1,key2=value2形式)
-        // 注意: 行はカンマで区切られているため、各userdataのペアは個別のフィールドとなっている
+        // userdataはフィールド7以降にkey=valueの組で並ぶため、各組をキーと値へ分解する
+        // 行はカンマで区切られているため、各組は個別のフィールドとして届く
         QVariantMap userdata;
         for (int j = 7; j < fields.size(); ++j) {
             if (fields[j].isEmpty()) {

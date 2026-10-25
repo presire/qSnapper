@@ -141,7 +141,7 @@ namespace qsnapper::security {
         }
 
         return openDirectoryChainAt(rootFd.get(), components,
-                                    static_cast<int>(components.size()), createMissing, mode);
+                                    static_cast<int>(components.size()), createMissing, mode, true);
     }
 
     /**
@@ -190,13 +190,15 @@ namespace qsnapper::security {
          *
          * snapshot側の状態を先に確定させ、判定できない場合は何も作成しない
          * 作成直後は0700・作成者所有とし、開き直したinodeの所有者とpermissionを確認してからmetadataを適用する
-         * 親ディレクトリが他ユーザーに差し替えられ得る場合はmetadataを適用せず、他ユーザーに書き込みを与えない0711で作成する
+         * 親ディレクトリが他ユーザーに差し替えられ得る場合はmetadataを適用せず、作成者所有のまま作成する
+         * このときgroupとotherには、snapshot側で許されていた検索 (x) だけを与え、最大でも0711に留める
+         * snapshot側が0700で隠していた子孫を、復元によって他ユーザーへ見せないため
          *
          * @param dirFd 作成先の親ディレクトリfd
          * @param name 作成する成分名
          * @param sourceDirFd pin済みのsnapshot dirfd
          * @param sourceRelativePath snapshot dirfdからの相対パス (作成する成分まで)
-         * @param mustPreserveMetadata 必須metadataを適用できない場合に失敗させる場合true (差し替え可能な親では適用せず0711で作成する)
+         * @param mustPreserveMetadata 必須metadataを適用できない場合に失敗させる場合true (差し替え可能な親では適用せず、最大0711で作成する)
          * @return 成功時: 作成したディレクトリのfd (呼び出し側でclose)、失敗時: -1 (errno設定)
          */
         int createMissingParentFromSourceAt(int dirFd, const QByteArray &name, int sourceDirFd,
@@ -220,11 +222,19 @@ namespace qsnapper::security {
             const bool applySnapshotMetadata =
                     sourceFd.isValid() && (!mustPreserveMetadata || metadataSafe);
 
-            // metadataを適用できない場合でも、復元先の子孫へ辿れるよう他ユーザーに書き込みを与えない0711で作成する
-            // (0700のままだと復元した内容へ辿れなくなる)
+            // metadataを適用できない場合でも、復元先の子孫へ辿れるよう、他ユーザーには検索 (x) だけを与える
+            // ただし、snapshot側が検索を許していない場合 (例: 0700) は与えない
+            // 一律に0711で作ると、snapshot側で親が隠していた子 (0644のファイルなど) を他ユーザーが読めるようになるため
             const bool needsTraversableFallback =
                     sourceFd.isValid() && mustPreserveMetadata && !metadataSafe;
-            const mode_t creationMode = needsTraversableFallback ? 0711 : 0700;
+            mode_t creationMode = 0700;
+            if (needsTraversableFallback) {
+                struct stat sourceStat;
+                if (::fstat(sourceFd.get(), &sourceStat) < 0) {
+                    return -1;
+                }
+                creationMode = 0700 | (sourceStat.st_mode & 0011);
+            }
 
             if (::mkdirat(dirFd, name.constData(), creationMode) < 0) {
                 return -1;
@@ -322,13 +332,41 @@ namespace qsnapper::security {
             return false;
         }
 
+        // 復元先の木から別のファイルシステムへ降りないよう、既存の成分をrootPathのデバイスと比べる
+        // 別mountの下へ作成すると、復元先のサブボリュームの外へ書き込むことになるため
+        struct stat rootInfo;
+        if (::fstat(dirFd, &rootInfo) != 0) {
+            const int savedErrno = errno;
+            ::close(dirFd);
+            errno = savedErrno;
+            return false;
+        }
+
         for (int i = 0; i < components.size(); ++i) {
             const QByteArray name = components.at(i).toUtf8();
 
             // 既存の成分は辿るだけで、所有者やmodeを変更しない
             int nextFd = ::openat(dirFd, name.constData(),
                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            if (nextFd < 0 && errno == ENOENT) {
+            if (nextFd >= 0) {
+                // 開いたディレクトリがrootPathと同じファイルシステム上かを確認する
+                // statxに失敗した場合は同一性を確認できないため、開いたfdを捨てて失敗させる (fail-closed)
+                struct statx openedInfo;
+                if (::statx(nextFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO,
+                            &openedInfo) != 0) {
+                    const int savedErrno = errno;
+                    ::close(nextFd);
+                    nextFd = -1;
+                    errno = savedErrno;
+                }
+                else if (isMountBoundary(openedInfo, rootInfo.st_dev)) {
+                    // 境界の下は復元先のサブボリュームではないため、作成せずに拒否する
+                    ::close(nextFd);
+                    nextFd = -1;
+                    errno = EXDEV;
+                }
+            }
+            else if (errno == ENOENT) {
                 const QString sourceRelativePath =
                         components.mid(0, i + 1).join(QLatin1Char('/'));
                 nextFd = createMissingParentFromSourceAt(dirFd, name, sourceDirFd,

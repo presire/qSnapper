@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.16)
+# CheckCompilerFlag / CheckLinkerFlagを使うため3.19以降を要求する
+cmake_minimum_required(VERSION 3.19)
 
 project(qsnapper VERSION 1.4.0 LANGUAGES CXX)
 
@@ -28,7 +29,8 @@ find_package(PolkitQt6-1 REQUIRED)
 # 同時実行時にどのD-Bus呼び出しの結果かを判別できず、rootサービスでは認可の取り違えに繋がるため使用しない
 #
 # polkit-gobject-1の.pcはSUSE / Fedoraではpolkit-develに含まれる一方、Debianではlibpolkit-gobject-1-devが必須
-# (libpolkit-qt6-1-devはこれに依存しないため、ビルド環境では明示的なインストールが必要。CIのDebianジョブの依存リストを参照)
+# libpolkit-qt6-1-devはこれに依存しないため、ビルド環境には明示的にインストールする必要がある
+# 必要なパッケージはCIのDebianジョブの依存リストを参照
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POLKIT_GOBJECT REQUIRED IMPORTED_TARGET polkit-gobject-1)
 
@@ -37,6 +39,42 @@ qt6_standard_project_setup()
 # QTP0004: サブディレクトリ (qml/pages, qml/components) のqmldir要求を抑制
 # NO_PLUGIN指定でリソース埋め込みのためqmldirは不要
 qt6_policy(SET QTP0004 OLD)
+
+# コンパイラとリンカの堅牢化機能を確認する
+#
+# 配布バイナリがメモリ破壊攻撃を受けたときの影響を小さくするため、PIE、RELRO、スタック保護、
+# バッファ長の検査 (_FORTIFY_SOURCE) を有効にする
+# 古いツールチェーンでは利用できないものがあるため、個別に確認して使えるものだけを適用する
+include(CheckPIESupported)
+include(CheckCompilerFlag)
+include(CheckLinkerFlag)
+
+# 実行形式をPIEにできるか確認する
+check_pie_supported(LANGUAGES CXX)
+
+# RELROと即時バインドはリンク時の指定なので、リンカが受け付けるか確認する
+check_linker_flag(CXX "-Wl,-z,relro,-z,now" QSNAPPER_LINKER_SUPPORTS_RELRO_NOW)
+
+# スタック上のバッファを破壊する攻撃を検出する
+check_compiler_flag(CXX "-fstack-protector-strong" QSNAPPER_COMPILER_SUPPORTS_STACK_PROTECTOR)
+# スタックを大きく確保するときにガードページを飛び越えられないようにする
+check_compiler_flag(CXX "-fstack-clash-protection" QSNAPPER_COMPILER_SUPPORTS_STACK_CLASH_PROTECTION)
+
+# _FORTIFY_SOURCEは最適化 (-O1以上) が有効なときだけ機能する
+# Debugは最適化しないため定義せず、最適化される構成だけで定義する
+# 一部のディストリビューションは既定で定義しているため、-Uで打ち消してから定義し直し、
+# マクロの再定義警告を出さない
+set(QSNAPPER_FORTIFY_OPTIONS
+    "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-U_FORTIFY_SOURCE>"
+    "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=3>"
+)
+
+# 堅牢化の対象は実際に配布する実行ファイルだけとし、テストには適用しない
+set(QSNAPPER_HARDENING_TARGETS
+    qsnapper
+    qsnapper-dbus-service
+)
+
 
 # GUIアプリケーション本体のC++ソース
 set(SOURCES
@@ -252,6 +290,27 @@ target_compile_definitions(qsnapper-dbus-service PRIVATE
 install(TARGETS qsnapper-dbus-service
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}
 )
+
+# 各実行ファイルに堅牢化オプションを適用する
+#
+# PIEはリンク時の再配置方式を変えるため、コンパイルとリンクの両方で有効にする
+# POSITION_INDEPENDENT_CODEは対象の定義後にしか設定できないため、ここでまとめて指定する
+foreach(_target IN LISTS QSNAPPER_HARDENING_TARGETS)
+    set_target_properties(${_target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_options(${_target} PRIVATE
+        ${QSNAPPER_FORTIFY_OPTIONS}
+    )
+    if(QSNAPPER_COMPILER_SUPPORTS_STACK_PROTECTOR)
+        target_compile_options(${_target} PRIVATE "-fstack-protector-strong")
+    endif()
+    if(QSNAPPER_COMPILER_SUPPORTS_STACK_CLASH_PROTECTION)
+        target_compile_options(${_target} PRIVATE "-fstack-clash-protection")
+    endif()
+    if(QSNAPPER_LINKER_SUPPORTS_RELRO_NOW)
+        target_link_options(${_target} PRIVATE "-Wl,-z,relro,-z,now")
+    endif()
+endforeach()
+
 
 # D-Busサービス設定ファイル (ビルド時にパスを動的生成)
 configure_file(

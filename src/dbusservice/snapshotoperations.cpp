@@ -191,9 +191,9 @@ SnapshotOperations::~SnapshotOperations()
  */
 void SnapshotOperations::resetIdleTimer()
 {
-    // timerの操作の途中で終了すると、systemdへの変更が途中で止まり、呼び出し元へ結果を返せなくなるため、完了まで終了しない
+    // timerの操作 (変更と照会) の途中で終了すると、systemdへの変更が途中で止まったり、呼び出し元へ結果を返せなくなるため、完了まで終了しない
     // snapperdへ転送した変更も同じ理由で、完了 (結果が分からない場合はsnapperdの終了) まで終了しない
-    if (m_pendingAuthorizations.total() > 0 || m_timerOperation || m_snapperdOperation) {
+    if (m_pendingAuthorizations.total() > 0 || m_timerOperation || m_timerQueryOperation || m_snapperdOperation) {
         m_idleTimer.stop();
         return;
     }
@@ -415,29 +415,66 @@ void SnapshotOperations::setRootSubvolumeAccessForTesting(
 /**
  * @brief 実行を開始した復元計画に限り、rootサブボリュームをrwへ戻す安全ネットを実行する
  * @param state commit時に記録した安全ネットの判定材料
+ * @return 安全ネットが不要だった場合、またはrwであることを確認・回復できた場合true
+ *         状態を取得できない場合とrwへ戻せなかった場合はfalse (rootがread-onlyのまま残っている可能性がある)
  */
-void SnapshotOperations::runRootReadWriteSafetyNet(
+bool SnapshotOperations::runRootReadWriteSafetyNet(
     const qsnapper::restore::RootReadWriteSafetyNetState &state)
 {
     // 復元後にread-onlyだったと仮定しても条件を満たさない計画では、状態の取得すら行わない
-    // 未認可のBegin -> Cancelなどから特権操作へ到達させないため
+    // 復元の実行を認可されていないBegin -> Cancelなどから特権操作へ到達させないため
     if (!qsnapper::restore::shouldRestoreRootReadWrite(state, true)) {
-        return;
+        return true;
     }
 
     bool readOnly = false;
     if (!m_rootReadOnlyProbe || !m_rootReadOnlyProbe(&readOnly)) {
         qWarning() << "Staged restore: Failed to read root subvolume read-only state";
-        return;
+        return false;
     }
     if (!qsnapper::restore::shouldRestoreRootReadWrite(state, readOnly)) {
-        return;
+        return true;
     }
 
     qWarning() << "Staged restore: Root subvolume became read-only after restore, restoring rw";
-    if (m_rootReadWriteRestorer) {
-        m_rootReadWriteRestorer();
+    if (!m_rootReadWriteRestorer || !m_rootReadWriteRestorer()) {
+        qCritical() << "Staged restore: Failed to make the root subvolume writable again";
+        return false;
     }
+    return true;
+}
+
+/**
+ * @brief 実行を開始した計画の後片付けを決まった順序で行い、実行contextを削除する
+ *
+ * 安全ネット → ディレクトリの時刻 → dirfdを閉じる → unmountの順に行う
+ * 正常な終端とowner消失のどちらでも同じ順序にし、rootサブボリュームのrw化や時刻の復元が経路によって抜けないようにする
+ * 実行contextは認可済みcommitでのみ作られるため、復元の実行を認可される前の計画では何もしない
+ *
+ * @param manifestId 対象のマニフェストID
+ * @return rootサブボリュームがread-onlyのまま残った可能性がある場合true
+ */
+bool SnapshotOperations::finalizeRestoreExecution(const QString &manifestId)
+{
+    const auto execution = m_restoreExecutions.find(manifestId);
+    if (execution == m_restoreExecutions.end()) {
+        return false;
+    }
+
+    const bool rootLeftReadOnly = !runRootReadWriteSafetyNet(execution->rootReadWriteState);
+
+    // 子entryの適用で更新されたディレクトリの時刻を、全entryの適用後にまとめて復元元に合わせる
+    // 失敗・中止で終わった場合も、適用済みのディレクトリは復元元の状態にそろえる
+    applyPendingDirectoryTimes(execution->pendingDirectoryTimes);
+
+    // cleanupRestoreExecutionと同じ順序規約: dirfdを先に閉じる
+    if (execution->snapshotDirFd >= 0) {
+        ::close(execution->snapshotDirFd);
+        execution->snapshotDirFd = -1;
+    }
+    unmountRestoreExecution(execution.value());
+    m_restoreExecutions.erase(execution);
+    return rootLeftReadOnly;
 }
 
 /**
@@ -451,24 +488,23 @@ void SnapshotOperations::finishRestorePlan(
     qsnapper::restore::ManifestState terminal,
     const QString &messageText)
 {
-    // 実行contextは認可済みcommitでのみ作られるため、未認可で終端した計画では安全ネットもunmountも走らない
-    const auto execution = m_restoreExecutions.find(manifestId);
-    if (execution != m_restoreExecutions.end()) {
-        runRootReadWriteSafetyNet(execution->rootReadWriteState);
-
-        // cleanupRestoreExecutionと同じ順序規約: dirfdを先に閉じる
-        if (execution->snapshotDirFd >= 0) {
-            ::close(execution->snapshotDirFd);
-            execution->snapshotDirFd = -1;
-        }
-        unmountRestoreExecution(execution.value());
-    }
+    const bool rootLeftReadOnly = finalizeRestoreExecution(manifestId);
 
     // 詳細 (失敗したpathを含み得る) はownerだけが取得できるように残し、signalには固定文言だけを載せる
     const QString owner = m_restorePlanOwners.value(manifestId);
     qsnapper::restore::ManifestStatus finishedStatus =
         m_restoreRegistry.status(manifestId, owner, nullptr)
             .value_or(qsnapper::restore::ManifestStatus{});
+    // rootサブボリュームがread-onlyのまま残った可能性がある場合は、entryを全て適用できていても成功として報告しない
+    // 管理者が気付かないまま再起動するとシステムが書き込み不能になるため、Failedと理由を必ずownerへ返す
+    if (rootLeftReadOnly) {
+        terminal = qsnapper::restore::ManifestState::Failed;
+        const QString rootMessage =
+            QStringLiteral("The root subvolume could not be confirmed writable after restore");
+        finishedStatus.lastError = finishedStatus.lastError.isEmpty()
+                ? rootMessage
+                : finishedStatus.lastError + QStringLiteral("; ") + rootMessage;
+    }
     finishedStatus.id = manifestId;
     finishedStatus.state = terminal;
     if (finishedStatus.lastError.isEmpty()) {
@@ -502,7 +538,9 @@ void SnapshotOperations::handleRestoreOwnerUnregistered(const QString &owner)
 
     for (const QString &manifestId : ownedPlanIds) {
         m_restoreExecutor.abandon(manifestId);
-        cleanupRestoreExecution(manifestId);
+        // 実行中にGUIが終了しても、rootサブボリュームのrw化とディレクトリの時刻の復元を正常な終端と同じ順序で行う
+        // 結果を受け取るownerはもういないため、rw化の失敗はrunRootReadWriteSafetyNetのログだけで知らせる
+        finalizeRestoreExecution(manifestId);
         m_restorePlanOwners.remove(manifestId);
     }
 

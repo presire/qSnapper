@@ -206,6 +206,8 @@ Page {
 
     // 設定の選択と読み込み状態を示すツールバー
     header: ToolBar {
+        topPadding: 8   // FusionのToolBarは上側の余白が0で、上部のTabBarと重なって見えるため下へずらす
+
         RowLayout {
             anchors.fill: parent
             spacing: 8

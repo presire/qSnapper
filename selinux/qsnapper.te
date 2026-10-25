@@ -17,7 +17,8 @@ module qsnapper 1.4.0;
 #                      root_t、default_t、mnt_t、var_tに対する読み書きルール
 #                      D-Busサービスへのメッセージ送信とWebブラウザの起動
 #   qsnapper_dbus_t  : スナップショットの作成・削除・比較・復元・ロールバック
-#                      file_type / exec_type属性に属する型への復元用の読み書きとラベルの付け替え
+#                      file_type / exec_type属性に属する型への復元用の読み書きとsecurity.selinuxの書き戻し
+#                      ラベル変更の制約で拒否された場合は、SELinuxユーザだけを復元先の現在のコンテキストに合わせて再試行する
 #                      ログ(/var/log/qsnapper)への書き込み
 #                      systemd (timerの操作) とsnapperd (configの作成と削除、一括削除) とのD-Bus通信
 #
@@ -145,7 +146,6 @@ require {
     attribute file_type;                  # 基本ポリシーがファイルの型をまとめる属性
     attribute exec_type;                  # 基本ポリシーが実行ファイルの型をまとめる属性
     attribute domain;                     # 全てのプロセスのドメイン
-    attribute can_change_object_identity; # SELinuxユーザの異なるコンテキストへのラベル変更を許す属性
 
     role unconfined_r; # 非制限ユーザのロール
     role system_r;     # システムサービスのロール
@@ -189,13 +189,12 @@ type qsnapper_tmpfs_t;     # tmpfsに作成する共有メモリのファイル
 typeattribute qsnapper_t domain;
 typeattribute qsnapper_dbus_t domain;
 
-# 復元エンジンは、スナップショット側のSELinuxコンテキストをそのままlive側へ書き戻す
-# 基本ポリシーには次の制約がある
-#   constrain file { create relabelfrom relabelto } (u1 == u2 or (t1 == can_change_object_identity));
-# このため、qsnapper_dbus_t (system_u) からunconfined_u等の異なるSELinuxユーザを持つ
-# コンテキストへラベルを付け替えるには、この属性が必要になる (setfiles_t / rpm_t / bootloader_tと同じ扱い)
-# 通常の書き込みの許可だけではこの制約を満たさないため、復元に必要なSELinuxユーザの変更の例外を与える
-typeattribute qsnapper_dbus_t can_change_object_identity;
+# 復元エンジンは、スナップショット側のSELinuxコンテキストをlive側のファイルへ書き戻す
+# 基本ポリシーの制約 (u1 == u2 or t1 == can_change_object_identity) により、SELinuxユーザが異なるラベル変更は拒否される
+# qsnapper_dbus_tは、security.selinuxの書き込みが拒否された場合に
+# SELinuxユーザだけを復元先の現在のコンテキストの値へ置き換えて再試行する
+# この再試行で制約を満たせるため、ラベル変更の例外を与える属性は付与しない
+# 型・ロール・範囲はスナップショット側の値をそのまま使うため、復元後のラベルの意味は失われない
 typeattribute qsnapper_exec_t exec_type, file_type;
 typeattribute qsnapper_dbus_exec_t exec_type, file_type;
 typeattribute qsnapper_tmp_t file_type;
@@ -619,7 +618,9 @@ optional {
 ########################################
 
 # 自プロセスの操作、ケーパビリティ、ソケット
-#   sys_admin                : Btrfsのsubvolumeとスナップショットの操作、マウント
+#   sys_admin                : スナップショットのマウント、Btrfs subvolumeの読み取り専用化
+#                              (btrfs_util_set_subvolume_read_only)、Btrfsのioctl (subvolumeとスナップショットの削除)、
+#                              trusted.*拡張属性の操作に必要
 #   dac_override / dac_read_search : ファイルのアクセス権に関係なく、スナップショットとlive側を読み書きする
 #   fowner / chown / fsetid  : 復元時に、所有者・アクセス権・SUID/SGIDを元に戻す
 #   setfcap                  : 復元時に、スナップショット側のsecurity.capability (file capability) を書き戻す
@@ -710,7 +711,10 @@ allowxperm qsnapper_dbus_t fs_t:dir ioctl { 0x9400-0x94ff };
 #            これらのクラスにrenameが必要になる
 #   setattr (lnk_file) : シンボリックリンク自体の所有者と時刻を、AT_SYMLINK_NOFOLLOWを指定した
 #            fchownat() / utimensat()で復元するために必要
-#   relabelfrom / relabelto : スナップショット側のSELinuxコンテキストをlive側へ書き戻すために必要
+#   relabelfrom / relabelto : 復元エンジンは、スナップショット側のsecurity.selinux拡張属性をlive側の
+#             オブジェクトへbest-effort (失敗しても復元を続ける) で書き戻す
+#             ラベルを書き戻さないと、例えば/etc/shadowは復元後も親ディレクトリのラベル(etc_t)のままになり
+#             本来のshadow_tより広い範囲から読み取れるため機密性が下がる
 allow qsnapper_dbus_t file_type:dir { getattr setattr open read search write add_name remove_name create rmdir rename ioctl relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:file { getattr setattr open read write append create unlink rename link map lock ioctl relabelfrom relabelto };
 allow qsnapper_dbus_t file_type:lnk_file { getattr setattr read create unlink rename relabelfrom relabelto };

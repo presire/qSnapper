@@ -58,6 +58,8 @@ private slots:
     void replaceRegularFileAtDetectsTemporaryNameSwap();
     void replaceRegularFileAtKeepsResolvedParentAfterParentSwap();
     void replaceSymlinkAtAppliesMetadataAndDetectsSwap();
+    void replaceSymlinkAtRequiringMetadataLeavesLiveUntouched();
+    void selinuxContextUserIsReplacedOnlyInUserPart();
 
     // --- beneath-root 宛先解決ハードニング (Todo 2) ---
     void splitDestinationBeneathRootAcceptsNestedDestination();
@@ -88,11 +90,14 @@ private slots:
     void snapshotListFingerprintDetectsLeadingZeroEntries();
     void parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode();
     void beneathRootMissingParentsFollowTrustedParentPolicy();
+    void beneathRootUntrustedParentKeepsSnapshotSearchRestriction();
     void beneathRootSymlinkHelpersApplyWithinRoot();
     void beneathRootStaleResolutionStillRejected();
     void beneathRootRepeatedSwapsDoNotLeakDescriptors();
     void beneathRootHandlesMalformedInputsSafely();
     void beneathRootRejectsSymlinkInRootPathAncestry();
+    void beneathRootRemovalStopsAtDepthLimit();
+    void beneathRootResolutionRefusesMountBoundaries();
 
     // --- dirfd相対ソース解決 (staged restore のsnapshot pin) ---
     void safeLstatAtResolvesRelativeToDirFd();
@@ -106,6 +111,10 @@ private slots:
     void isConfirmedAbsentAtRejectsPathsPresentInSource();
     void isConfirmedAbsentAtConfirmsOnlyDefiniteAbsence();
     void isConfirmedAbsentAtRefusesIntermediateSymlinks();
+
+    // --- 復元計画の検証で使う、木に含まれるかの観測 ---
+    void observePathNoFollowAtClassifiesPresenceLikeComparison();
+    void observePathNoFollowAtRejectsMountBoundaries();
 
     // --- dirfd相対ソース解決の中間成分in-rootハードニング (RESOLVE_IN_ROOT) ---
     void safeOpenRegularFileReadAtKeepsAbsoluteIntermediateSymlinkInsideRoot();

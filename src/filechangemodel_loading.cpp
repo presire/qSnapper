@@ -4,6 +4,9 @@
  *
  * D-Bus経由の非同期読み込みと世代による古い応答の破棄
  * およびComparisonContextの一致検証を担当する
+ *
+ * 利用する側 : FileChangeModel
+ * 依存 : Qt D-Bus、filechangemodel_p.h、filechangemodel_transport_p.h
  */
 
 #include "filechangemodel.h"
@@ -40,20 +43,20 @@ FileChangeModel::FileChangeModel(QObject *parent)
     , m_betweenMode(false)
     , m_flatMode(false)
     , m_rootItem(nullptr)
-    , m_dbusInterface(nullptr)
     , m_hasChanges(false)
     , m_loading(false)
+    , m_totalFilesCount(0)
+    , m_processedFilesCount(0)
+    , m_dbusInterface(nullptr)
     , m_defaultRestorePlanTransport(nullptr)
     , m_restorePlanTransport(nullptr)
     , m_planNextStageIndex(0)
-    , m_planCommitted(false)
-    , m_planActive(false)
-    , m_planSignalsSubscribed(false)
-    , m_planCancelRequested(false)
     , m_planTotalFiles(0)
     , m_planLastProgress(0)
-    , m_totalFilesCount(0)
-    , m_processedFilesCount(0)
+    , m_planActive(false)
+    , m_planCommitted(false)
+    , m_planSignalsSubscribed(false)
+    , m_planCancelRequested(false)
     , m_restoreHasError(false)
     , m_cancelRequested(false)
     , m_restoreBatchSize(100)
@@ -209,10 +212,13 @@ void FileChangeModel::setSnapshotNumber(int number)
 }
 
 /**
- * @brief ファイル変更リストを読み込み (非同期) 
+ * @brief ファイル変更リストを非同期に読み込む
  *
- * D-Bus経由でSnapperからファイル変更リストを非同期で取得し、モデルを構築する
+ * D-Bus経由でqsnapper-dbus-serviceからファイル変更リストを取得し、モデルを構築する
  * 読み込み中はloadingプロパティがtrueになる
+ *
+ * @note 差分が0件の応答はエラーではなく、空の一覧として扱う
+ *       取得した内容が上限を超えた場合は途中までを表示し、truncatedとomittedCountで切り捨てを通知する
  */
 void FileChangeModel::loadChanges()
 {
@@ -272,17 +278,12 @@ void FileChangeModel::loadChanges()
             return;
         }
 
-        if (output.isEmpty()) {
-            qWarning() << "snapper status command returned empty output";
-            m_loading = false;
-            emit loadingChanged();
-            emit errorOccurred("No file changes found");
-            return;
-        }
-
+        // 差分が0件の応答は正常な空の状態であり、エラーにはしない
+        // 画面側はloadedがtrueでhasChangesがfalseの場合に、差分がないことを案内する
         setupModelData(output, requestedContext.flatMode);
-        if (!m_hasChanges) {
-            m_hasChanges = true;
+        const bool hasChanges = m_rootItem != nullptr && m_rootItem->childCount() > 0;
+        if (m_hasChanges != hasChanges) {
+            m_hasChanges = hasChanges;
             emit hasChangesChanged();
         }
         qInfo() << "FileChangeModel timing: dbusWait=" << requestTimer->elapsed() << "ms";
@@ -480,11 +481,15 @@ FileChangeModel::ComparisonContext FileChangeModel::currentComparisonContext() c
  * @brief 公開済みエントリとその由来を無効化する
  *
  * 比較条件を変更した時点、および新しい読み込みを開始した時点で呼び出す
- * これにより、置き換え先の読み込みが失敗しても古いエントリがモデルに残らず、
- * 新しい復元元と古いchangeTypeが結び付いてlive側のファイルを誤って削除する事故を防ぐ
+ * 置き換え先の読み込みが失敗しても古いエントリがモデルに残らないため、
+ * 新しい復元元と古いchangeTypeが結び付いて現在のシステムのファイルを誤って削除する事故を防ぐ
+ *
+ * @note 読み込み済みの状態と省略件数を解除し、必要に応じてloadedChangedとtruncatedChangedを発行する
+ *       進行中の差分要求も世代番号で無効化し、古い向きの差分が新しいビューへ届かないようにする
  */
 void FileChangeModel::invalidateLoadedComparison()
 {
+    const bool wasLoaded = m_loadedComparisonValid;
     m_loadedComparisonValid = false;
     m_loadedComparison      = ComparisonContext();
     ++m_loadRequestGeneration;
@@ -499,6 +504,16 @@ void FileChangeModel::invalidateLoadedComparison()
     if (m_hasChanges) {
         m_hasChanges = false;
         emit hasChangesChanged();
+    }
+
+    // 古い比較の省略表示や読み込み成功の状態を、新しい比較へ持ち越さない
+    if (wasLoaded) {
+        emit loadedChanged();
+    }
+    if (m_truncated || m_omittedCount != 0) {
+        m_truncated = false;
+        m_omittedCount = 0;
+        emit truncatedChanged();
     }
 
     if (m_loading) {
@@ -529,7 +544,7 @@ bool FileChangeModel::hasRestorableLoadedComparison() const
  *
  * モデルが保持するエントリのchangeTypeは、読み込み時の比較の向きでしか正しく解釈できない
  * 2スナップショット比較モードでは、loadChangesBetween()の第1引数 (m_compareNumber1) が復元元となる
- * この向きではcreatedが「比較先にだけ存在する = 復元元には無い」を意味し、live側からの削除と一致する
+ * この向きではcreatedが「比較先にだけ存在する = 復元元には無い」を意味し、現在のファイルシステムからの削除と一致する
  * 対カレント比較モードでは、エントリはm_snapshotNumberと現在のシステムの差分であるため、
  * 復元元はm_snapshotNumber以外にはなり得ない
  *
@@ -545,7 +560,7 @@ int FileChangeModel::currentRestoreSourceNumber() const
  *
  * 呼び出し側が指定した復元元が、実際にモデルへ公開されたエントリの由来と一致するかを確認する
  * 不一致のまま復元するとcreatedとdeletedの意味が反転し、
- * 復元対象外のファイルをlive側から削除する事故につながるため、ここで遮断する
+ * 復元対象外のファイルを現在のファイルシステムから削除する事故につながるため、ここで遮断する
  *
  * @param sourceSnapshotNumber 復元元スナップショット番号
  * @return 復元元として使用できる場合: true

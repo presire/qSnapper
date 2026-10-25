@@ -118,11 +118,15 @@ Page {
 
     // 設定の選択と使用量の再取得を行うツールバー
     header: ToolBar {
+        topPadding: 8   // FusionのToolBarは上側の余白が0で、上部のTabBarと重なって見えるため下へずらす
+
         RowLayout {
             anchors.fill: parent
             spacing: 8
 
+            // 対象の設定名を表示するラベル
             Label {
+                textFormat: Text.PlainText  // 設定名は外部由来の文字列のため、リッチテキストとして解釈させない
                 text: qsTr("Filesystem: %1").arg(root.service.currentConfig || qsTr("(none)"))
                 font.pixelSize: 14
                 font.bold: true
@@ -228,19 +232,39 @@ Page {
                         rowSpacing: 4
 
                         Label { text: qsTr("Size:") }
-                        Label { text: root.formatSize(root.fs.deviceTotal) }
+                        // デバイスの合計サイズを表示するラベル
+                        Label {
+                            text: root.formatSize(root.fs.deviceTotal)  // デバイスの合計サイズ
+                            textFormat: Text.PlainText                  // 外部由来の値を、リッチテキストとして解釈させない
+                        }
 
                         Label { text: qsTr("Allocated:") }
-                        Label { text: root.formatSize(root.fs.deviceAllocated) }
+                        // 割り当て済みのサイズを表示するラベル
+                        Label {
+                            text: root.formatSize(root.fs.deviceAllocated)  // 割り当て済みのサイズ
+                            textFormat: Text.PlainText                      // 外部由来の値を、リッチテキストとして解釈させない
+                        }
 
                         Label { text: qsTr("Unallocated:") }
-                        Label { text: root.formatSize(root.fs.deviceTotal - root.fs.deviceAllocated) }
+                        // 未割り当てのサイズを表示するラベル (合計から割り当て済みを引いて求める)
+                        Label {
+                            text: root.formatSize(root.fs.deviceTotal - root.fs.deviceAllocated)  // 未割り当てのサイズ
+                            textFormat: Text.PlainText                                            // 外部由来の値を、リッチテキストとして解釈させない
+                        }
 
                         Label { text: qsTr("Node size:") }
-                        Label { text: root.formatSize(root.fs.nodesize) }
+                        // ノードサイズを表示するラベル
+                        Label {
+                            text: root.formatSize(root.fs.nodesize)  // ノードサイズ
+                            textFormat: Text.PlainText               // 外部由来の値を、リッチテキストとして解釈させない
+                        }
 
                         Label { text: qsTr("Sector size:") }
-                        Label { text: root.formatSize(root.fs.sectorsize) }
+                        // セクタサイズを表示するラベル
+                        Label {
+                            text: root.formatSize(root.fs.sectorsize)  // セクタサイズ
+                            textFormat: Text.PlainText                 // 外部由来の値を、リッチテキストとして解釈させない
+                        }
                     }
 
                     Label {
@@ -303,10 +327,38 @@ Page {
 
                             Layout.fillWidth: true
 
-                            Label { text: spaceRow.modelData.typeLabel; Layout.preferredWidth: 160; elide: Text.ElideRight }
-                            Label { text: spaceRow.modelData.profileLabel; Layout.preferredWidth: 100; elide: Text.ElideRight }
-                            Label { text: root.formatSize(spaceRow.modelData.total); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: root.formatSize(spaceRow.modelData.used); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            // 割り当ての種別名を表示するラベル
+                            Label {
+                                Layout.preferredWidth: 160          // 列の幅
+                                text: spaceRow.modelData.typeLabel  // 割り当ての種別名
+                                textFormat: Text.PlainText          // 外部由来の値を、リッチテキストとして解釈させない
+                                elide: Text.ElideRight              // 幅を超える部分を省略表示する
+                            }
+
+                            // RAIDなどのプロファイル名を表示するラベル
+                            Label {
+                                Layout.preferredWidth: 100             // 列の幅
+                                text: spaceRow.modelData.profileLabel  // RAIDなどのプロファイル名
+                                textFormat: Text.PlainText             // 外部由来の値を、リッチテキストとして解釈させない
+                                elide: Text.ElideRight                 // 幅を超える部分を省略表示する
+                            }
+
+                            // 割り当て済みの合計サイズを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 110                       // 列の幅
+                                text: root.formatSize(spaceRow.modelData.total)  // 割り当て済みの合計サイズ
+                                textFormat: Text.PlainText                       // 外部由来の値を、リッチテキストとして解釈させない
+                                horizontalAlignment: Text.AlignRight             // 数値を右揃えにする
+                            }
+
+                            // 使用中のサイズを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 110                      // 列の幅
+                                text: root.formatSize(spaceRow.modelData.used)  // 使用中のサイズ
+                                textFormat: Text.PlainText                      // 外部由来の値を、リッチテキストとして解釈させない
+                                horizontalAlignment: Text.AlignRight            // 数値を右揃えにする
+                            }
+
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -346,9 +398,29 @@ Page {
 
                             Layout.fillWidth: true
 
-                            Label { text: deviceRow.modelData.devid; Layout.preferredWidth: 100 }
-                            Label { text: root.formatSize(deviceRow.modelData.size); Layout.preferredWidth: 120; horizontalAlignment: Text.AlignRight }
-                            Label { text: root.formatSize(deviceRow.modelData.allocated); Layout.preferredWidth: 120; horizontalAlignment: Text.AlignRight }
+                            // デバイスIDを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 100       // 列の幅
+                                text: deviceRow.modelData.devid  // デバイスID
+                                textFormat: Text.PlainText       // 外部由来の値を、リッチテキストとして解釈させない
+                            }
+
+                            // デバイスのサイズを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 120                       // 列の幅
+                                text: root.formatSize(deviceRow.modelData.size)  // デバイスのサイズ
+                                textFormat: Text.PlainText                       // 外部由来の値を、リッチテキストとして解釈させない
+                                horizontalAlignment: Text.AlignRight             // 数値を右揃えにする
+                            }
+
+                            // デバイスの割り当て済みサイズを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 120                            // 列の幅
+                                text: root.formatSize(deviceRow.modelData.allocated)  // デバイスの割り当て済みサイズ
+                                textFormat: Text.PlainText                            // 外部由来の値を、リッチテキストとして解釈させない
+                                horizontalAlignment: Text.AlignRight                  // 数値を右揃えにする
+                            }
+
                             Item { Layout.fillWidth: true }
                         }
                     }
@@ -449,19 +521,61 @@ Page {
 
                             Layout.fillWidth: true
 
-                            Label { text: subvolumeRow.modelData.id; Layout.preferredWidth: 70 }
-                            Label { text: subvolumeRow.modelData.parentId; Layout.preferredWidth: 80 }
-                            Label { text: root.formatCreated(subvolumeRow.modelData.created); Layout.preferredWidth: 160 }
-                            Label { text: subvolumeRow.modelData.readOnly ? qsTr("Yes") : qsTr("No"); Layout.preferredWidth: 90 }
+                            // サブボリュームIDを表示するラベル
                             Label {
+                                Layout.preferredWidth: 70        // 列の幅
+                                text: subvolumeRow.modelData.id  // サブボリュームID
+                                textFormat: Text.PlainText       // 外部由来の値を、リッチテキストとして解釈させない
+                            }
+
+                            // 親サブボリュームのIDを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 80              // 列の幅
+                                text: subvolumeRow.modelData.parentId  // 親サブボリュームのID
+                                textFormat: Text.PlainText             // 外部由来の値を、リッチテキストとして解釈させない
+                            }
+
+                            // 作成日時を表示するラベル
+                            Label {
+                                Layout.preferredWidth: 160                                // 列の幅
+                                text: root.formatCreated(subvolumeRow.modelData.created)  // 作成日時
+                                textFormat: Text.PlainText                                // 外部由来の値を、リッチテキストとして解釈させない
+                            }
+
+                            // 読み取り専用かどうかを表示するラベル
+                            Label {
+                                Layout.preferredWidth: 90                                         // 列の幅
+                                text: subvolumeRow.modelData.readOnly ? qsTr("Yes") : qsTr("No")  // 読み取り専用かどうか
+                                textFormat: Text.PlainText                                        // 外部由来の値を、リッチテキストとして解釈させない
+                            }
+
+                            // サブボリュームのパスを表示するラベル
+                            // 長いパスは中央を省略し、全体はツールチップで確認できるようにする
+                            Label {
+                                id: pathLabel
+                                textFormat: Text.PlainText  // パスは外部由来の文字列のため、リッチテキストとして解釈させない
                                 text: subvolumeRow.modelData.path
                                 Layout.fillWidth: true
                                 elide: Text.ElideMiddle
-                                ToolTip.visible: hoverArea.hovered && implicitWidth > width
-                                ToolTip.text: subvolumeRow.modelData.path
-                                ToolTip.delay: 500
 
+                                // ツールチップの表示条件にするため、ポインタが載っているかを検知する
                                 HoverHandler { id: hoverArea }
+
+                                // パスは外部由来の文字列のため、ツールチップの本文もリッチテキストとして解釈させない
+                                // 添付プロパティのToolTip.textは本文の書式を指定できないため、contentItemを明示したToolTipを使う
+                                ToolTip {
+                                    // 省略表示されている場合だけ、全体を確認できるように表示する
+                                    visible: hoverArea.hovered && pathLabel.implicitWidth > pathLabel.width
+                                    delay: 500
+
+                                    // 本文をプレーンテキストで描画するための表示部品
+                                    contentItem: Text {
+                                        text: subvolumeRow.modelData.path
+                                        textFormat: Text.PlainText
+                                        font: pathLabel.font
+                                        color: palette.toolTipText
+                                    }
+                                }
                             }
                         }
                     }

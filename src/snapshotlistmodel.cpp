@@ -1,10 +1,18 @@
 /**
  * @file snapshotlistmodel.cpp
- * @brief スナップショット一覧モデルの実装
+ * @brief スナップショット一覧を取得し、QMLからの操作をSnapperServiceへ中継するリストモデルの実装
+ *
+ * SnapperServiceのシグナルを接続し、取得した一覧を表形式のモデルとして公開する
+ * 一覧の取得と各操作は非同期で行い、古い応答は世代番号で破棄する
+ *
+ * 利用する側 : SnapshotListModelクラスを生成するQML
+ * 出力 : モデルのロール、count、loading、busy、各操作の完了シグナル
+ * 依存 : SnapperService、qsnapper::userdata::parse、Qt D-Bus
  */
 
 #include "snapshotlistmodel.h"
 #include "snapperservice.h"
+#include "userdataparser.h"
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDebug>
@@ -21,6 +29,8 @@ SnapshotListModel::SnapshotListModel(QObject *parent)
     : QAbstractListModel(parent)
     , m_snapperService(SnapperService::instance())
     , m_deletionGeneration(0)
+    , m_refreshGeneration(0)
+    , m_loading(false)
 {
     connect(m_snapperService, &SnapperService::snapshotCreated, this, &SnapshotListModel::onSnapshotCreated);
     connect(m_snapperService, &SnapperService::snapshotCreationFailed, this, &SnapshotListModel::onSnapshotCreationFailed);
@@ -28,6 +38,12 @@ SnapshotListModel::SnapshotListModel(QObject *parent)
     connect(m_snapperService, &SnapperService::rollbackFailed, this, &SnapshotListModel::onRollbackFailed);
     connect(m_snapperService, &SnapperService::snapshotDeleted, this, &SnapshotListModel::onSnapshotDeleted);
     connect(m_snapperService, &SnapperService::snapshotDeletionFailed, this, &SnapshotListModel::onSnapshotDeletionFailed);
+    // 変更は一覧の再取得を伴うため、SnapperServiceからの完了通知を内部ハンドラで受ける
+    connect(m_snapperService, &SnapperService::snapshotModified, this, &SnapshotListModel::onSnapshotModified);
+    // 変更失敗は一覧を変えないが、QMLの編集ダイアログへ理由を返す必要がある
+    connect(m_snapperService, &SnapperService::snapshotModificationFailed, this, &SnapshotListModel::onSnapshotModificationFailed);
+    // 作成・変更・削除・復元の進行状況を、モデルのbusyプロパティとしてQMLへ公開する
+    connect(m_snapperService, &SnapperService::operationBusyChanged, this, &SnapshotListModel::busyChanged);
 }
 
 /**
@@ -129,21 +145,172 @@ QHash<int, QByteArray> SnapshotListModel::roleNames() const
 }
 
 /**
- * @brief スナップショット一覧を再読み込み
+ * @brief 処理中かどうかを取得
  *
- * SnapperServiceから最新のスナップショット一覧を取得し、モデルの内容を更新する
+ * @return SnapperServiceが作成・変更・削除・ロールバックのいずれかを処理中の場合はtrue
+ */
+bool SnapshotListModel::busy() const
+{
+    return m_snapperService->operationBusy();
+}
+
+/**
+ * @brief スナップショット一覧を非同期に再読み込みする
+ *
+ * SnapperServiceへ最新のスナップショット一覧を要求し、応答を受け取ってからモデルの内容を置き換える
  * 既存のスナップショットオブジェクトは全て削除され、新しいデータで置き換えられる
  *
  * QMLから呼び出し可能なメソッド
+ *
+ * @note 同期呼び出しでは、snapperdの応答待ちや認証ダイアログの表示中にGUIが固まるため、応答はQDBusPendingCallWatcherで受け取る
+ *       要求ごとに世代番号 (m_refreshGeneration) を進め、最新の要求の応答だけを反映する
+ *       古い応答を反映すると、設定の切り替え直後に前の設定の一覧が表示されるためである
+ *       エラー応答の場合は一覧を空にし、取得に失敗した内容を現在の一覧として表示しない
+ *       空の一覧だけでは失敗と0件を区別できないため、listLoadFailedシグナルで失敗理由を画面へ伝える
+ *       configを切り替えた場合は、応答を待たずに一覧を空にし、取得元のconfig (m_loadedConfig) を応答の反映時に記録する
+ *       変更・削除・ロールバックは、取得元のconfigが現在のconfigと一致する場合だけ受け付ける
  */
 void SnapshotListModel::refresh()
 {
-    beginResetModel();
-    qDeleteAll(m_snapshots);
-    m_snapshots.clear();
-    m_snapshots = m_snapperService->all();
-    endResetModel();
-    emit countChanged();
+    const quint64 generation = ++m_refreshGeneration;
+    if (!m_loading) {
+        m_loading = true;
+        emit loadingChanged();
+    }
+
+    // configを切り替えた場合は、応答を待つ間に前のconfigの行を選んで操作できないよう、一覧を先に空にする
+    const QString requestedConfig = m_snapperService->currentConfig();
+    if (requestedConfig != m_loadedConfig) {
+        m_loadedConfig.clear();
+        if (!m_snapshots.isEmpty()) {
+            beginResetModel();
+            qDeleteAll(m_snapshots);
+            m_snapshots.clear();
+            endResetModel();
+            emit countChanged();
+        }
+    }
+
+    auto *watcher = new QDBusPendingCallWatcher(m_snapperService->asyncListSnapshots(requestedConfig), this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation, requestedConfig]() {
+        watcher->deleteLater();
+        if (generation != m_refreshGeneration) {
+            return;
+        }
+
+        QList<FsSnapshot*> snapshots;
+        const bool loadFailed = watcher->isError();  // 一覧の取得に失敗したかどうか
+        QString loadError;                           // 利用者へ表示する失敗理由 (成功時は空)
+        if (loadFailed) {
+            qWarning() << "Failed to list snapshots via D-Bus:" << watcher->error().message();
+            loadError = SnapperService::errorText(watcher->error());
+
+            // エラー本文が空の応答でも失敗を通知し、取得の失敗を0件の一覧と区別できるようにする
+            if (loadError.isEmpty()) {
+                loadError = tr("The snapshot list could not be retrieved.");
+            }
+        }
+        else {
+            const QDBusPendingReply<QString> reply = *watcher;
+            snapshots = SnapperService::parseSnapshotList(reply.value());
+        }
+
+        beginResetModel();
+        qDeleteAll(m_snapshots);
+        m_snapshots = snapshots;
+        endResetModel();
+        m_loadedConfig = requestedConfig;
+        emit countChanged();
+
+        m_loading = false;
+        emit loadingChanged();
+
+        // 取得中の表示 (loading) を終えてから失敗を通知し、エラーダイアログの表示中に一覧が取得中のままに見えないようにする
+        if (loadFailed) {
+            emit listLoadFailed(loadError);
+        }
+    });
+}
+
+/**
+ * @brief 表示中の一覧が、現在のconfigから取得し終えたものかを判定する
+ * @return 取得が完了しており、取得元のconfigが現在のconfigと同じ場合true
+ * @note 番号はconfigごとに振られるため、別のconfigの一覧の番号で操作すると、同じ番号の別のスナップショットを変更・削除してしまう
+ */
+bool SnapshotListModel::isListForCurrentConfig() const
+{
+    return !m_loading && m_loadedConfig == m_snapperService->currentConfig();
+}
+
+/**
+ * @brief 一覧が現在のconfigのものではない、または取得中のため操作を受け付けない旨の文言を返す
+ * @return 翻訳済みの文言
+ */
+QString SnapshotListModel::listOutdatedText() const
+{
+    return tr("The snapshot list is being reloaded. Try again after the list has been updated.");
+}
+
+/**
+ * @brief 指定番号のスナップショットの編集用の情報を取得
+ *
+ * 編集ダイアログの初期値を、取得済みの一覧から求める
+ *
+ * @param number スナップショット番号
+ * @return number、description、cleanup、userdataを持つマップ、一覧に無い場合は空のマップ
+ * @note 一覧は取得済みのため、編集ダイアログを開くたびにD-Busで同期取得してGUIを止めないようキャッシュを参照する
+ */
+QVariantMap SnapshotListModel::snapshotInfo(int number) const
+{
+    for (const FsSnapshot *snapshot : std::as_const(m_snapshots)) {
+        if (snapshot->number() != number) {
+            continue;
+        }
+
+        QVariantMap info;
+        info.insert(QStringLiteral("number"), snapshot->number());
+        info.insert(QStringLiteral("description"), snapshot->description());
+        info.insert(QStringLiteral("cleanup"), snapshot->cleanupAlgoString());
+        info.insert(QStringLiteral("userdata"), snapshot->userdata());
+        return info;
+    }
+    return QVariantMap();
+}
+
+/**
+ * @brief ユーザデータの入力文字列を検証し、キーと値のマップへ変換
+ *
+ * 作成ダイアログと編集ダイアログの入力欄が、同じ規則で検証できるようにする
+ *
+ * @param text 改行区切りでkey=valueを並べた文字列
+ * @return ok(成功したか)、userdata(キーと値のマップ)、error(失敗理由の翻訳済み文言)を持つマップ
+ * @note 失敗した場合のuserdataは空である
+ *       エラー文言に含めるキーは利用者が入力した文字列であり、表示側でプレーンテキストとして扱う
+ */
+QVariantMap SnapshotListModel::parseUserdata(const QString &text) const
+{
+    const qsnapper::userdata::ParseResult parsed = qsnapper::userdata::parse(text);
+
+    QString error;
+    switch (parsed.error) {
+    case qsnapper::userdata::ParseError::None:
+        break;
+    case qsnapper::userdata::ParseError::MissingSeparator:
+        error = tr("Line %1 of the user data is not in key=value format.").arg(parsed.line);
+        break;
+    case qsnapper::userdata::ParseError::EmptyKey:
+        error = tr("Line %1 of the user data has an empty key.").arg(parsed.line);
+        break;
+    case qsnapper::userdata::ParseError::DuplicateKey:
+        error = tr("The user data key \"%1\" is specified more than once (line %2).").arg(parsed.key).arg(parsed.line);
+        break;
+    }
+
+    QVariantMap result;
+    result.insert(QStringLiteral("ok"), parsed.ok);
+    result.insert(QStringLiteral("userdata"), parsed.values);
+    result.insert(QStringLiteral("error"), error);
+    return result;
 }
 
 /**
@@ -262,29 +429,30 @@ int SnapshotListModel::pendingPreNumber(const QVariantList &selectedNumbers) con
 }
 
 /**
- * @brief 既存スナップショットを編集する
+ * @brief 既存スナップショットを非同期に編集する
  *
- * 成功時はモデルを更新してsnapshotModified()を、
+ * SnapperServiceへ編集を要求する
+ * 成功時は一覧を取得し直してsnapshotModified()を、
  * 失敗時はsnapshotModificationFailed()を発行する
  *
  * @param number 編集対象のスナップショット番号
  * @param description 新しい説明文
  * @param cleanup 新しいクリーンアップアルゴリズム文字列
  * @param userdata 新しいユーザデータマップ
+ * @note 処理中はbusyがtrueになる
+ *       結果はSnapperServiceのシグナルを受けたonSnapshotModified / onSnapshotModificationFailedが転送する
  */
 void SnapshotListModel::modifySnapshot(int number,
                                        const QString &description,
                                        const QString &cleanup,
                                        const QVariantMap &userdata)
 {
-    bool success = m_snapperService->modifySnapshot(number, description, cleanup, userdata);
-    if (success) {
-        refresh();
-        emit snapshotModified(number);
+    // 番号は表示中の一覧から選ばれるため、一覧が現在のconfigのものと確かめてから要求する
+    if (!isListForCurrentConfig()) {
+        emit snapshotModificationFailed(number, listOutdatedText());
+        return;
     }
-    else {
-        emit snapshotModificationFailed(number, tr("Failed to modify snapshot #%1").arg(number));
-    }
+    m_snapperService->modifySnapshot(number, description, cleanup, userdata);
 }
 
 /**
@@ -301,6 +469,11 @@ void SnapshotListModel::modifySnapshot(int number,
  */
 void SnapshotListModel::rollbackSnapshot(int number)
 {
+    // 別のconfigの一覧の番号でロールバックしないよう、一覧が現在のconfigのものと確かめてから要求する
+    if (!isListForCurrentConfig()) {
+        emit rollbackFailed(listOutdatedText());
+        return;
+    }
     m_snapperService->rollback(number);
 }
 
@@ -317,6 +490,11 @@ void SnapshotListModel::rollbackSnapshot(int number)
  */
 void SnapshotListModel::deleteSnapshot(int number)
 {
+    // 別のconfigにある同じ番号のスナップショットを削除しないよう、一覧が現在のconfigのものと確かめてから要求する
+    if (!isListForCurrentConfig()) {
+        emit snapshotDeletionFailed(number, listOutdatedText());
+        return;
+    }
     m_snapperService->deleteSnapshot(number);
 }
 
@@ -356,12 +534,18 @@ void SnapshotListModel::deleteSnapshots(const QVariantList &numbers)
         return;
     }
 
+    // 別のconfigにある同じ番号のスナップショットを削除しないよう、一覧が現在のconfigのものと確かめてから要求する
+    if (!isListForCurrentConfig()) {
+        emit snapshotsDeletionFailed(listOutdatedText());
+        return;
+    }
+
     const quint64 generation = ++m_deletionGeneration;
     const int requestedCount = requested.size();
     const QString configName = m_snapperService->currentConfig();
 
     // 1件だけの削除には、DeleteSnapshotを使う
-    // DeleteSnapshotは、polkitが認可を一時保持する間は再認証を求めず、snapperdを経由せずに削除する
+    // DeleteSnapshotは、Polkitが認可を一時保持する間は再認証を求めず、snapperdを経由せずに削除する
     // DeleteSnapshotsは、毎回認証を求め、snapperdを経由するため作成直後のスナップショットをSnapshotListOutdatedで拒否する
     // そのため、DeleteSnapshotsは複数件をまとめて削除する場合だけに使う
     const bool single = (requestedCount == 1);
@@ -459,6 +643,35 @@ void SnapshotListModel::onRollbackFailed(const QString &error)
 void SnapshotListModel::onSnapshotDeleted(int number)
 {
     emit snapshotDeleted(number);
+}
+
+/**
+ * @brief スナップショット変更成功時の内部ハンドラ
+ *
+ * SnapperServiceからの変更成功シグナルを受け取り、変更内容を反映するため一覧を取得し直してQMLにシグナルを転送する
+ *
+ * @param number 変更されたスナップショット番号
+ * @note 一覧の再取得は非同期のため、snapshotModifiedは再取得の完了前に発行される
+ *       呼び出し側が一覧の更新を待つ必要がある場合は、loadingの変化を確認する必要がある
+ */
+void SnapshotListModel::onSnapshotModified(int number)
+{
+    refresh();
+    emit snapshotModified(number);
+}
+
+/**
+ * @brief スナップショット変更失敗時の内部ハンドラ
+ *
+ * SnapperServiceからの変更失敗シグナルを受け取り、エラーメッセージをQMLに転送する
+ *
+ * @param number 変更に失敗したスナップショット番号
+ * @param error エラーメッセージ
+ * @note 一覧は変更されていないため、再取得は行わない
+ */
+void SnapshotListModel::onSnapshotModificationFailed(int number, const QString &error)
+{
+    emit snapshotModificationFailed(number, error);
 }
 
 /**

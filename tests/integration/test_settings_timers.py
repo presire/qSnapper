@@ -10,7 +10,8 @@ tests/integration/isolated_root_dbus_env.shが起動する専用root D-Busバス
     - WriteSnapperConfig : 許可リスト外のキーと不正な値の拒否は認可の前、復元中の拒否、本文に情報を含まない失敗
     - GetTimerStates   : 3つの固定unitの状態の取得、systemdのエラー本文を転送しないこと、不正な状態の拒否
     - SetTimerEnabled  : 許可リスト外のunit名の拒否は認可の前、有効化と無効化の呼び出し順序、
-                         ジョブ失敗、JobRemovedの先着、無応答のときの応答性と排他、復元の開始による中断
+                         ジョブ失敗、JobRemovedの先着、無応答のときの応答性と排他、復元の開始による中断、
+                         照会の実行中でも変更を拒否しないこと (照会と変更は別の排他枠で数える)
 
 config名には実在しない名前だけを使う
 WriteSnapperConfigが本体に到達しても、存在しない設定は新規作成されず、/etc/snapper/configsへ書き込まない
@@ -664,8 +665,11 @@ def test_set_timer_in_flight(obj, control: ServiceControl, fake: FakeSystemd) ->
 
     check_error("SETTIMER_INFLIGHT_SECOND_SET", rpc(obj, "SetTimerEnabled", [CLEANUP, False], SHORT_TIMEOUT_S),
                 ERR_LIMITS, "Another timer operation is in progress")
-    check_error("SETTIMER_INFLIGHT_GET_STATES", rpc(obj, "GetTimerStates", [], SHORT_TIMEOUT_S),
-                ERR_LIMITS, "Another timer operation is in progress")
+    # 照会は変更とは別の排他枠のため、変更の応答待ちの間も状態を読み取れる
+    result = rpc(obj, "GetTimerStates", [], LONG_TIMEOUT_S)
+    proof("SETTIMER_INFLIGHT_GET_STATES", result[0])
+    if result[0] != "OK":
+        fail(f"SETTIMER_INFLIGHT_GET_STATES: a query was rejected during a change: {result!r}")
 
     if not first.wait(25.0):
         fail("SETTIMER_INFLIGHT: the in-flight call never received a reply")
@@ -701,6 +705,48 @@ def test_set_timer_in_flight(obj, control: ServiceControl, fake: FakeSystemd) ->
     proof("SETTIMER_RESTORE_DURING_ENABLE_MUTATING_ORDER", fake.mutating())
     if fake.mutating() != ["EnableUnitFiles"]:
         fail(f"SETTIMER_RESTORE_DURING_ENABLE: calls continued after the restore began: {fake.mutating()!r}")
+
+
+def test_query_in_flight_does_not_block_change(obj, fake: FakeSystemd) -> None:
+    """
+    @brief systemdが照会に応答しない間も、timerの変更が拒否されないことを検査する
+
+    GetTimerStatesはパスワードなしで呼べるため、照会が変更と同じ排他枠を占めると、
+    照会を繰り返すだけで管理者のSetTimerEnabledを拒否させられる
+    照会どうしは同時に1件に限ることも合わせて確かめる
+
+    Args:
+        obj: ヘルパーのD-Busオブジェクト
+        fake: 偽のsystemd
+    """
+    fake.reset()
+    fake.set("silent.GetUnitFileState")
+    query = AsyncCall(obj, "GetTimerStates", [], LONG_TIMEOUT_S)
+    fake.wait_for_call("GetUnitFileState")
+
+    check_error("QUERY_INFLIGHT_SECOND_QUERY", rpc(obj, "GetTimerStates", [], SHORT_TIMEOUT_S),
+                ERR_LIMITS, "Another timer operation is in progress")
+
+    # 応答しない照会を残したまま、変更の側は通常どおり応答させる
+    fake.reset()
+    result = rpc(obj, "SetTimerEnabled", [TIMELINE, True], LONG_TIMEOUT_S)
+    check_ok_true("QUERY_INFLIGHT_CHANGE", result)
+    proof("QUERY_INFLIGHT_CHANGE_MUTATING_ORDER", fake.mutating())
+    if fake.mutating() != ["EnableUnitFiles", "Reload", "StartUnit"]:
+        fail(f"QUERY_INFLIGHT_CHANGE: unexpected mutating order {fake.mutating()!r}")
+
+    if not query.wait(25.0):
+        fail("QUERY_INFLIGHT: the silent query never received a reply")
+    pump(0.5)
+    if len(query.replies) != 1:
+        fail(f"QUERY_INFLIGHT: expected exactly one reply, got {query.replies!r}")
+    proof("QUERY_INFLIGHT_REPLY", query.replies[0][0])
+
+    fake.reset()
+    result = rpc(obj, "GetTimerStates", [])
+    proof("QUERY_INFLIGHT_AFTER_RELEASE", result[0])
+    if result[0] != "OK":
+        fail(f"QUERY_INFLIGHT: the query slot was not released: {result!r}")
 
 
 def test_restore_commit_during_timer_job(obj, fake: FakeSystemd) -> None:
@@ -782,6 +828,7 @@ def main() -> int:
         test_get_timer_states(obj, control, fake)
         test_set_timer_basic(obj, control, fake)
         test_set_timer_in_flight(obj, control, fake)
+        test_query_in_flight_does_not_block_change(obj, fake)
         test_restore_commit_during_timer_job(obj, fake)
 
         print("SETTINGS_TIMERS: ALL_OK")

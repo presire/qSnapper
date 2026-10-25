@@ -1,6 +1,19 @@
 #ifndef SNAPPERSERVICE_H
 #define SNAPPERSERVICE_H
 
+/**
+ * @file snapperservice.h
+ * @brief QMLから利用するスナップショット操作の窓口となるサービスクラス
+ *
+ * SnapshotListModelやQMLから呼び出され、D-Bus経由でqsnapper-dbus-serviceへ特権操作を依頼する
+ * 結果はシグナルとQ_PROPERTYの変更通知でQML側へ反映し、処理中の状態をoperationBusyで公開する
+ *
+ * 利用する側 : SnapshotListModel、Main.qml、設定画面とスナップショット一覧ページ
+ * 入力 : QMLからのQ_INVOKABLE呼び出し
+ * 出力 : Q_PROPERTYの変更通知、各操作の完了シグナル
+ * 依存 : Qt D-Bus (com.presire.qsnapper.Operations)、fssnapshot.h
+ */
+
 #include <QObject>
 #include <QList>
 #include <QString>
@@ -8,17 +21,11 @@
 #include <QVariantMap>
 #include <QMap>
 #include <QLoggingCategory>
-#include <QDBusInterface>
 #include <QDBusPendingCall>
 #include <QDBusError>
 #include "fssnapshot.h"
 
 Q_DECLARE_LOGGING_CATEGORY(snapperLog)
-
-/**
- * @file snapperservice.h
- * @brief Snapper操作を集約するサービスクラス
- */
 
 /**
  * @class SnapperService
@@ -32,6 +39,7 @@ class SnapperService : public QObject
     Q_OBJECT
     Q_PROPERTY(QStringList configs READ configs NOTIFY configsChanged)                                      // 利用可能な設定一覧
     Q_PROPERTY(QString currentConfig READ currentConfig WRITE setCurrentConfig NOTIFY currentConfigChanged) // 現在選択中の設定名
+    Q_PROPERTY(bool operationBusy READ operationBusy NOTIFY operationBusyChanged)                           // 作成・変更・削除・ロールバックの処理中かどうか
 
 public:
     // コンストラクタ/デストラクタ/シングルトン
@@ -72,9 +80,34 @@ public:
     Q_INVOKABLE void setCurrentConfig(const QString &name);
 
     /**
-     * @brief 設定一覧を更新する
+     * @brief 作成・変更・削除・ロールバックのいずれかを処理中かどうかを取得する
+     * @return 処理中の操作が1件以上ある場合はtrue
+     */
+    bool operationBusy() const { return m_pendingOperations > 0; }
+
+    /**
+     * @brief 設定一覧を非同期に更新する
+     * @note 結果はconfigsChanged()で通知する
      */
     Q_INVOKABLE void refreshConfigs();
+
+    /**
+     * @brief 指定設定のスナップショット一覧を非同期に取得する (ListSnapshots)
+     * @param configName 対象の設定名
+     * @return 応答がCSV文字列のQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     * @note 応答のCSVはparseSnapshotList()でFsSnapshotのリストへ変換する
+     */
+    QDBusPendingCall asyncListSnapshots(const QString &configName);
+
+    /**
+     * @brief CSV出力を解析してスナップショットリストを生成する
+     *
+     * 返すオブジェクトは呼び出し側が所有する
+     *
+     * @param csvOutput qsnapper-dbus-serviceが返したCSV出力
+     * @return 呼び出し側が所有するスナップショットリスト
+     */
+    static QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput);
 
     // 設定画面向けの非同期D-Bus呼び出し (C++専用)
     // 設定画面はGUIスレッドをブロックしないよう、同期呼び出しを使わずQDBusPendingCallで結果を受け取る
@@ -121,7 +154,7 @@ public:
      * @param configName 作成する設定名 (サーバ側でも同じ規則で検証される)
      * @param subvolume 設定が対象とするBtrfsサブボリュームの絶対パス
      * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
-     * @note polkitは毎回auth_adminで認証を求めるため、認証ダイアログへの入力待ちを見込んで待ち時間を延ばす
+     * @note Polkitは毎回auth_adminで認証を求めるため、認証ダイアログへの入力待ちを見込んで待ち時間を延ばす
      *       サーバ側がfstype=btrfsとtemplate=defaultを固定する
      */
     QDBusPendingCall asyncCreateConfig(const QString &configName, const QString &subvolume);
@@ -151,7 +184,7 @@ public:
      * @param number 削除するスナップショット番号 (1以上)
      * @return 応答の値がboolになるQDBusPendingCall
      *         ヘルパへ接続できない場合は、エラー応答を持つQDBusPendingCall
-     * @note DeleteSnapshotの認可 (delete-snapshot) はauth_admin_keepのため、polkitが認可を一時保持する間は再認証を求めない
+     * @note DeleteSnapshotの認可 (delete-snapshot) はauth_admin_keepのため、Polkitが認可を一時保持する間は再認証を求めない
      *       ヘルパはsnapperdを経由せずlibsnapperで直接削除する
      *       そのため、snapperdが保持する古い一覧が原因の拒否 (SnapshotListOutdated) は発生しない
      */
@@ -178,7 +211,7 @@ public:
      * @param error 特権サービスから返されたD-Busエラー
      * @return 既知の拒否理由であれば翻訳済みの固定文言、それ以外はエラー本文
      * @note エラー本文は特権サービスが返す固定の英語文言であり、設定ファイルの内容は含まない
-     *       拒否は一時的なものが多く、完了後に再実行すれば成功するため、エラー名で判別して理由を翻訳して伝える
+     *       一時的な拒否は再実行で成功し得るが、認可の拒否は管理者認証が必要であるため、エラー名で判別して理由を翻訳して伝える
      *       エラー名はdbus/com.presire.qsnapper.Operations.xmlに記載した名前と一致させる必要がある
      */
     static QString errorText(const QDBusError &error);
@@ -206,10 +239,10 @@ public:
      * @param cleanup クリーンアップアルゴリズム
      * @param important 重要フラグ
      * @param userdata ユーザデータマップ
-     * @return 作成されたスナップショット番号
+     * @note 非同期に作成し、結果はsnapshotCreated / snapshotCreationFailedで通知する
      */
-    Q_INVOKABLE int createSingle(const QString &description,
-                                 FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
+    Q_INVOKABLE void createSingle(const QString &description,
+                                  FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                                  bool important = false,
                                  const QVariantMap &userdata = QVariantMap());
 
@@ -219,9 +252,9 @@ public:
      * @param cleanup クリーンアップアルゴリズム
      * @param important 重要フラグ
      * @param userdata ユーザデータマップ
-     * @return 作成されたスナップショット番号
+     * @note 非同期に作成し、結果はsnapshotCreated / snapshotCreationFailedで通知する
      */
-    Q_INVOKABLE int createPre(const QString &description,
+    Q_INVOKABLE void createPre(const QString &description,
                               FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                               bool important = false,
                               const QVariantMap &userdata = QVariantMap());
@@ -233,59 +266,38 @@ public:
      * @param cleanup クリーンアップアルゴリズム
      * @param important 重要フラグ
      * @param userdata ユーザデータマップ
-     * @return 作成されたスナップショット番号
+     * @note 非同期に作成し、結果はsnapshotCreated / snapshotCreationFailedで通知する
      */
-    Q_INVOKABLE int createPost(const QString &description,
+    Q_INVOKABLE void createPost(const QString &description,
                                int previousNumber,
                                FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
                                bool important = false,
                                const QVariantMap &userdata = QVariantMap());
 
-    // スナップショット取得・操作
+    // スナップショット操作 (すべて非同期で、結果はシグナルで通知する)
     /**
-     * @brief 全スナップショットを取得する
-     *
-     * 返すオブジェクトはparentを持たず、呼び出し側が所有する
-     * all()はリストを返し、QMLの所有権ヒューリスティックはリストの要素には適用されないため、C++からのみ呼ぶ
-     *
-     * @return 呼び出し側が所有するスナップショットリスト
-     */
-    QList<FsSnapshot*> all();
-
-    /**
-     * @brief 指定番号のスナップショットを検索する
-     *
-     * find()はQObjectを直接返すため、QMLから呼んだ場合はJavaScriptOwnershipとなりGCで解放される
-     * 返すオブジェクトはparentを持たず、呼び出し側が所有する
-     *
-     * @param number 検索するスナップショット番号
-     * @return 呼び出し側が所有するスナップショット、見つからない場合はnullptr
-     */
-    Q_INVOKABLE FsSnapshot* find(int number);
-
-    /**
-     * @brief 指定番号へロールバックする
+     * @brief 指定番号へ非同期にロールバックする
      * @param number ロールバック先のスナップショット番号
-     * @return 成功した場合はtrue
+     * @note 結果はrollbackCompleted / rollbackFailedで通知する
      */
-    Q_INVOKABLE bool rollback(int number);
+    Q_INVOKABLE void rollback(int number);
 
     /**
-     * @brief 単一スナップショットを削除する
+     * @brief 単一スナップショットを非同期に削除する
      * @param number 削除するスナップショット番号
-     * @return 成功した場合はtrue
+     * @note 結果はsnapshotDeleted / snapshotDeletionFailedで通知する
      */
-    Q_INVOKABLE bool deleteSnapshot(int number);
+    Q_INVOKABLE void deleteSnapshot(int number);
 
     /**
-     * @brief スナップショット情報を変更する
+     * @brief スナップショット情報を非同期に変更する
      * @param number 変更対象のスナップショット番号
      * @param description 新しい説明文
      * @param cleanup 新しいクリーンアップアルゴリズム文字列
      * @param userdata 新しいユーザデータマップ
-     * @return 成功した場合はtrue
+     * @note 結果はsnapshotModified / snapshotModificationFailedで通知する
      */
-    Q_INVOKABLE bool modifySnapshot(int number, const QString &description,
+    Q_INVOKABLE void modifySnapshot(int number, const QString &description,
                                     const QString &cleanup, const QVariantMap &userdata);
 
 signals:
@@ -298,6 +310,11 @@ signals:
      * @brief 現在設定変更時に発行する
      */
     void currentConfigChanged();
+
+    /**
+     * @brief 作成・変更・削除・ロールバックの処理中かどうかが変わったときに発行する
+     */
+    void operationBusyChanged();
 
     /**
      * @brief スナップショット作成成功時に発行する
@@ -351,48 +368,52 @@ signals:
 private:
     // 内部作成ヘルパー
     /**
-     * @brief スナップショットを作成する内部ヘルパー
+     * @brief スナップショット作成の受付可否を確認し、不可なら失敗を通知する
+     * @param snapshotType DISABLE_SNAPSHOTSの判定に使う種別文字列
+     * @return 作成を続けてよい場合はtrue
+     */
+    bool checkCreateAllowed(const QString &snapshotType);
+
+    /**
+     * @brief スナップショットを非同期に作成する内部ヘルパー
      * @param snapshotType 作成するスナップショット種別
      * @param description 説明文
      * @param previousNumber 紐付け元のPreスナップショット番号
      * @param cleanup クリーンアップアルゴリズム
      * @param important 重要フラグ
      * @param userdata ユーザデータマップ
-     * @return 作成されたスナップショット番号
+     * @param configName 作成先の設定名
      */
-    int create(FsSnapshot::SnapshotType snapshotType,
-               const QString &description, int previousNumber = -1,
-               FsSnapshot::CleanupAlgorithm cleanup = FsSnapshot::CleanupAlgorithm::None,
-               bool important = false,
-               const QVariantMap &userdata = QVariantMap());
-
-    // 解析・実行
-    /**
-     * @brief CSV出力を解析してスナップショットリストを生成する
-     *
-     * 返すオブジェクトは呼び出し側が所有する
-     *
-     * @param csvOutput Snapperが返したCSV出力
-     * @return 呼び出し側が所有するスナップショットリスト
-     */
-    QList<FsSnapshot*> parseSnapshotList(const QString &csvOutput);
+    void create(FsSnapshot::SnapshotType snapshotType,
+                const QString &description, int previousNumber,
+                FsSnapshot::CleanupAlgorithm cleanup,
+                bool important,
+                const QVariantMap &userdata,
+                const QString &configName);
 
     /**
-     * @brief D-Busサービスへ再接続する
-     * @return 接続に成功した場合はtrue
+     * @brief 処理中の操作を1件増やす
+     * @note 0件から1件になった場合はoperationBusyChangedを発行する
      */
-    bool reconnect();
+    void beginOperation();
+
+    /**
+     * @brief 処理中の操作を1件減らす
+     * @note 1件から0件になった場合はoperationBusyChangedを発行する
+     */
+    void endOperation();
 
     // シングルトン
     static SnapperService *s_instance;  // シングルトンインスタンス
 
     // 状態フラグ
-    bool m_configsChecked;      // 設定一覧キャッシュ済みフラグ
+    bool m_configsChecked;          // 設定一覧キャッシュ済みフラグ
+    quint64 m_configsGeneration;    // 設定一覧の取得要求ごとに進める世代番号 (古い応答を捨てるために使う)
+    int m_pendingOperations;        // 処理中の作成・変更・削除・ロールバックの件数
 
-    // 通信・キャッシュ
-    QDBusInterface *m_dbusInterface;    // D-Bus通信インターフェース
-    QStringList m_configs;              // 利用可能なSnapper設定名のキャッシュ
-    QString m_currentConfig;            // 現在選択されている設定名
+    // キャッシュ
+    QStringList m_configs;          // 利用可能なSnapper設定名のキャッシュ
+    QString m_currentConfig;        // 現在選択されている設定名
 };
 
 #endif // SNAPPERSERVICE_H

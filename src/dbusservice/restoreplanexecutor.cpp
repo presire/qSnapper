@@ -297,7 +297,10 @@ void RestorePlanExecutor::processChunk(const QString &id)
         return;
     }
 
+    // appliedCountはスキップを含む処理済み件数で、cursorはこの件数だけ進める
+    // 削除とスキップの内訳は、ロールバックできない復元の結果を利用者へ示すために記録する
     int appliedCount = 0;
+    RestoreChunkTally tally;
     bool applyFailed = false;
     QString failedPath;
     for (const RestoreEntry &entry : *entries) {
@@ -312,21 +315,32 @@ void RestorePlanExecutor::processChunk(const QString &id)
             break;
         }
 
-        bool applied = false;
+        RestoreEntryOutcome outcome = RestoreEntryOutcome::Failed;
         try {
-            applied = m_entryApplier && m_entryApplier(id, entry);
+            if (m_entryApplier) {
+                outcome = m_entryApplier(id, entry);
+            }
         }
         catch (...) {
-            applied = false;
+            // applierの例外は失敗として扱い、計画の終端処理を必ず通す
+            outcome = RestoreEntryOutcome::Failed;
         }
 
         if (!m_activePlans.contains(id)) {
             return;
         }
-        if (!applied) {
+        if (outcome == RestoreEntryOutcome::Failed) {
             applyFailed = true;
             failedPath = entry.path;
             break;
+        }
+
+        if (outcome == RestoreEntryOutcome::Skipped) {
+            tally.skippedPaths.append(entry.path);
+        }
+        else if (entry.changeType == QStringLiteral("created")) {
+            // 変更種別createdは、復元元に存在しないパスをlive側から削除したことを表す
+            ++tally.deletedCount;
         }
         ++appliedCount;
     }
@@ -362,7 +376,7 @@ void RestorePlanExecutor::processChunk(const QString &id)
     }
 
     if (appliedCount > 0
-            && !m_registry.advance(id, owner, appliedCount, &error)) {
+            && !m_registry.advance(id, owner, appliedCount, tally, &error)) {
         finishPlan(id, ManifestState::Failed,
                    QStringLiteral("Failed to record restore progress"));
         return;
@@ -396,9 +410,10 @@ void RestorePlanExecutor::processChunk(const QString &id)
         const QString message = QStringLiteral("Failed to restore path: %1")
                                     .arg(failedPath);
         // Cancelledは直前で処理済みのため、ここに到達するのは非Cancelledのみ
-        // markFailedはmanifestへ失敗理由を残すために呼ぶが、記録できなかった
-        // 場合 (manifest消失など) も終端通知は必ず出す
-        m_registry.markFailed(id, owner, message, &error);
+        // 失敗した位置はcursorを進めた後の値で、利用者がどこまで適用されたかを確認できるよう記録する
+        // 記録できなかった場合 (manifest消失など) も終端通知は必ず出す
+        m_registry.markFailedAt(id, owner, message, before->cursor + appliedCount,
+                                failedPath, &error);
         finishPlan(id, ManifestState::Failed, message);
         return;
     }

@@ -120,25 +120,38 @@
       <arg name="result" type="s" direction="out"/>
     </method>
     <!--
-      Staged restore (single-authorization path).
-      Pre-freeze methods (BeginRestorePlan, StageRestoreEntries) only collect
-      bounded chunks; no Polkit authorization happens until CommitRestorePlan
-      freezes the plan and authorizes exactly once. Post-freeze methods
+      Staged restore (single restore-authorization path).
+      BeginRestorePlan requires the com.presire.qsnapper.view-diff action (the
+      same action the GUI already holds for showing the diff), so callers who
+      cannot view diffs cannot consume plan budgets. When the caller's UID has
+      reached its plan limit, its oldest staging plan is cancelled (reported
+      through restorePlanFinished as "cancelled") to make room.
+      StageRestoreEntries only collects bounded chunks; the restore itself is
+      authorized exactly once, when CommitRestorePlan freezes the plan with
+      com.presire.qsnapper.rollback-snapshot. Post-freeze methods
       (ContinueRestorePlan, GetRestorePlanStatus, CancelRestorePlan) accept
       ONLY a manifest identifier — never a path, change type, config name,
       snapshot number, or restore mode — so a frozen plan cannot be mutated
-      after the single authorization. restoreMode is the string "yast" or
+      after the restore authorization. restoreMode is the string "yast" or
       "direct".
       counterpartSnapshotNumber is the comparison counterpart of the restore
       SOURCE (snapshotNumber): 0 means "the current system", a positive value
-      must differ from snapshotNumber. The server reconstructs the
-      authoritative comparison from (snapshotNumber, counterpartSnapshotNumber)
-      at commit time and re-validates every staged entry against it.
+      must differ from snapshotNumber. At commit time the server
+      re-validates every staged entry directly against the pinned source
+      snapshot tree and the counterpart tree (another snapshot or the live
+      subvolume); the libsnapper comparison cache is not trusted because it
+      stores file names unescaped.
       statusCsv field order is a PUBLIC SUBSET of ManifestStatus in
-      restoremanifest.h (the internal counterpartSnapshotNumber field is
-      intentionally not exposed; positional parsers must not be shifted):
+      restoremanifesttypes.h (the internal counterpartSnapshotNumber field is
+      intentionally not exposed; positional parsers must not be shifted;
+      new fields are only appended):
         id, state, totalEntries, cursor, processed, mode, configName,
-        snapshotNumber, lastError
+        snapshotNumber, lastError, deletedCount, skippedCount, failedIndex,
+        failedPath, skippedPaths
+      processed includes skipped entries. failedIndex is the 0-based entry
+      index that stopped the plan (-1 when none). skippedPaths lists at most
+      100 skipped paths separated by LF (FIFO, socket and device files are
+      skipped instead of failing the plan).
     -->
     <method name="BeginRestorePlan">
       <arg name="configName" type="s" direction="in"/>

@@ -138,7 +138,7 @@ void TestFilesystemHelpers::swapComponentToSymlink(const QTemporaryDir &rootDir,
             + components.join(QLatin1Char('/'));
     QVERIFY(QDir(componentPath).exists());
     // 差し替え前の実ディレクトリを攻撃者が削除する操作の再現
-    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), componentPath));
+    QVERIFY(safeRemoveAllBeneathRoot(rootDir.path(), componentPath));
     QVERIFY(::symlink(outsideDir.path().toUtf8().constData(), componentPath.toUtf8().constData())
             == 0);
 }

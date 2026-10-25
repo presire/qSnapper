@@ -7,8 +7,10 @@
  *
  * 入力 : なし (SnapperServiceとThemeManagerのシングルトンを直接参照)
  * 出力 : なし
- * 依存 : SnapshotListModel (一覧・作成・削除、Post作成の紐付け先を求めるpendingPreNumber)、SnapshotGroupModel (Pre/Postのグループ化)、
- *        SnapperService (設定一覧・現在設定・スナップショット検索)、ThemeManager (テーマ色)
+ * 依存 : SnapshotListModel (一覧・作成・削除・編集、取得中を示すloading、一覧の取得失敗を知らせるlistLoadFailed、
+ *        編集対象の情報を返すsnapshotInfo、ユーザデータを検証するparseUserdata、Post作成の紐付け先を求めるpendingPreNumber)、
+ *        SnapshotGroupModel (Pre/Postのグループ化)、SnapshotEditDialog / CompareSnapshotsDialog (編集と比較)、
+ *        SnapperService (設定一覧・現在設定)、ThemeManager (テーマ色)
  */
 import QtQuick
 import QtQuick.Controls
@@ -23,6 +25,27 @@ Page {
     property var selectedSnapshots: ([])                       // 選択されたスナップショット番号の配列
     property int selectedCount: selectedSnapshots.length       // 選択された項目数
     property alias snapshotDetailDialog: detailDialog          // 詳細ダイアログへのエイリアス
+
+    // listModel / editDialogRef / compareDialogRefは、qmllintがC++側で登録された型のメンバを解決できず警告が増えるため、
+    // var経由で参照する (listModelはsnapshotInfoの呼び出し、2つのダイアログ参照はBindingの対象に使う)
+    readonly property var listModel: snapshotListModel     // SnapshotListModelへの参照
+    readonly property var editDialogRef: editDialog        // 編集ダイアログへの参照
+    readonly property var compareDialogRef: compareDialog  // 比較ダイアログへの参照
+
+    // 編集ダイアログのエラー文言の色を、作成ダイアログの警告ラベルの配色 (ThemeManager.errorColor) に揃える
+    // 子ダイアログはThemeManagerを直接参照しないため、親が配色を渡す
+    Binding {
+        target: root.editDialogRef         // 色を受け取る編集ダイアログ
+        property: "errorTextColor"         // 検証エラーの文言の色
+        value: userdataErrorLabel.color    // 作成ダイアログの警告ラベルと同じ色
+    }
+
+    // 比較ダイアログのエラー文言の色を、作成ダイアログの警告ラベルの配色に揃える (理由は編集ダイアログ向けのBindingと同じ)
+    Binding {
+        target: root.compareDialogRef      // 色を受け取る比較ダイアログ
+        property: "errorTextColor"         // 取得エラーの文言の色
+        value: userdataErrorLabel.color    // 作成ダイアログの警告ラベルと同じ色
+    }
 
     /**
      * @brief グループの選択状態を切り替える
@@ -79,6 +102,13 @@ Page {
             statusBar.showMessage(qsTr("Snapshot created successfully"), 3000)
         }
 
+        // SnapshotListModel::listLoadFailedを受け取り、一覧が空になった理由 (認可の拒否やサービスの停止など) を表示する
+        // 表示しないと、取得の失敗とスナップショットが0件の状態を利用者が区別できない
+        onListLoadFailed: function(error) {
+            errorDialog.text = qsTr("Failed to load the snapshot list: %1").arg(error)
+            errorDialog.open()
+        }
+
         // スナップショット作成失敗時のシグナルハンドラ
         onSnapshotCreationFailed: function(error) {
             errorDialog.text = error
@@ -119,6 +149,21 @@ Page {
             errorDialog.open()
         }
 
+        // SnapshotListModel::snapshotModifiedを受け取ったときのシグナルハンドラ
+        // 反映はD-Busの非同期呼び出しのため、完了で待機表示を閉じて結果を知らせる
+        onSnapshotModified: function(number) {
+            modifyingBusyDialog.close()
+            statusBar.showMessage(qsTr("Snapshot #%1 modified").arg(number), 3000)
+        }
+
+        // SnapshotListModel::snapshotModificationFailedを受け取ったときのシグナルハンドラ
+        // 待機表示は失敗でも閉じないと操作できなくなるため、先に閉じてからエラーを表示する
+        onSnapshotModificationFailed: function(number, error) {
+            modifyingBusyDialog.close()
+            errorDialog.text = qsTr("Failed to modify snapshot #%1: %2").arg(number).arg(error)
+            errorDialog.open()
+        }
+
         // 起動直後に一覧を取得して表示する
         Component.onCompleted: refresh()
     }
@@ -143,6 +188,8 @@ Page {
     // ツールバーヘッダ
     // アプリケーションタイトル、設定切替、操作ボタンを配置
     header: ToolBar {
+        topPadding: 8   // FusionのToolBarは上側の余白が0で、上部のTabBarと重なって見えるため下へずらす
+
         RowLayout {
             anchors.fill: parent
             spacing: 5
@@ -208,6 +255,7 @@ Page {
             // 選択数表示ラベル
             Label {
                 visible: root.selectedCount > 0
+                textFormat: Text.PlainText  // 件数のみの文言だが、他のラベルと表示形式を揃える
                 text: qsTr("%1 selected").arg(root.selectedCount)
                 font.pixelSize: 14
                 color: palette.highlight
@@ -229,7 +277,9 @@ Page {
                 text: qsTr("Delete Selected")
                 icon.name: "edit-delete"
                 icon.color: enabled ? "#ef5350" : palette.buttonText
-                enabled: root.selectedCount > 0
+                // SnapshotListModel::loadingがtrueの間 (一覧の取得中) は削除させない
+                // 表示中の番号が、取得後の一覧と一致する保証がないため
+                enabled: root.selectedCount > 0 && !snapshotListModel.loading
                 opacity: enabled ? 1.0 : 0.45
                 onClicked: deleteConfirmDialog.open()
             }
@@ -247,15 +297,21 @@ Page {
                 text: qsTr("Modify")
                 icon.name: "document-edit"
                 icon.color: palette.buttonText
-                enabled: root.selectedCount === 1
+                // SnapshotListModel::loadingがtrueの間 (一覧の取得中) は編集させない
+                // 表示中の番号が、取得後の一覧と一致する保証がないため
+                enabled: root.selectedCount === 1 && !snapshotListModel.loading
                 opacity: enabled ? 1.0 : 0.45
+                // 選択中の1件を編集ダイアログへ渡して開く
                 onClicked: {
                     var num = root.selectedSnapshots[0]
-                    var snap = SnapperService.find(num)
-                    if (snap) {
+
+                    // 一覧の取得は非同期のため、サービスへ問い合わせず、取得済みの一覧から編集対象の情報を取り出す
+                    // SnapshotListModel::snapshotInfoは、番号が一覧に無い場合は空のマップを返すため、numberの有無で判定する
+                    var snap = root.listModel.snapshotInfo(num)
+                    if (snap.number !== undefined) {
                         editDialog.snapshotNumber = snap.number
                         editDialog.descriptionInitial = snap.description
-                        editDialog.cleanupInitial = snap.cleanupAlgoString()
+                        editDialog.cleanupInitial = snap.cleanup
                         editDialog.userdataInitial = snap.userdata
                         editDialog.open()
                     }
@@ -267,7 +323,9 @@ Page {
                 text: qsTr("Compare")
                 icon.name: "view-visible"
                 icon.color: palette.buttonText
-                enabled: root.selectedCount === 2
+                // SnapshotListModel::loadingがtrueの間 (一覧の取得中) は比較させない
+                // 表示中の番号が、取得後の一覧と一致する保証がないため
+                enabled: root.selectedCount === 2 && !snapshotListModel.loading
                 opacity: enabled ? 1.0 : 0.45
                 onClicked: {
                     compareDialog.num1 = root.selectedSnapshots[0]
@@ -287,6 +345,7 @@ Page {
 
         // スナップショット総数表示
         Label {
+            textFormat: Text.PlainText  // 件数のみの文言だが、他のラベルと表示形式を揃える
             text: qsTr("Total Snapshots: %1").arg(snapshotListModel.count)
             font.bold: true
         }
@@ -353,6 +412,7 @@ Page {
         // ステータスメッセージ表示ラベル
         Label {
             id: statusLabel
+            textFormat: Text.PlainText  // 操作結果にエラー文言などが含まれ得るため、リッチテキストとして解釈させない
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             anchors.margins: 10
@@ -491,6 +551,7 @@ Page {
             // Postの紐付け先の案内
             Label {
                 visible: snapshotTypeCombo.currentIndex === 2 && createSnapshotDialog.pendingPre > 0
+                textFormat: Text.PlainText  // 番号を埋め込む文言だが、他のラベルと表示形式を揃える
                 text: qsTr("This snapshot will be paired with pre snapshot #%1").arg(createSnapshotDialog.pendingPre)
                 font.italic: true
                 wrapMode: Text.WordWrap
@@ -530,7 +591,7 @@ Page {
                 Item { Layout.fillWidth: true }
             }
 
-            // ユーザデータ入力 (key=value, 1 行 1 ペア, カンマ区切りも可)
+            // ユーザデータ入力 (key=value、1行に1ペア)
             Label {
                 text: qsTr("User data (key=value per line):")
             }
@@ -559,27 +620,20 @@ Page {
                     }
                 }
             }
-        }
 
-        /**
-         * @brief ユーザデータの文字列をキーと値のペアへ分解する
-         * @param text key=value形式を改行またはカンマで区切った文字列
-         * @return キーと値を持つオブジェクト、空文字列では空オブジェクト
-         * @note 空行と = を含まない行は無視する
-         */
-        function parseUserdata(text) {
-            var result = ({})
-            var lines = text.split(/[\n,]/)
-            for (var i = 0; i < lines.length; i++) {
-                var line = lines[i].trim()
-                if (line.length === 0) continue
-                var eq = line.indexOf("=")
-                if (eq <= 0) continue
-                var key = line.substring(0, eq).trim()
-                var val = line.substring(eq + 1).trim()
-                if (key.length > 0) result[key] = val
+            // ユーザデータの形式が不正な場合の警告
+            // 重複したキーを黙って上書きすると値が変わってしまうため、原因を示して修正を促す
+            // 色は、編集ダイアログと比較ダイアログのエラー文言にも共有する (ルートのBindingから参照される)
+            Label {
+                id: userdataErrorLabel  // 警告ラベルの参照名 (色を子ダイアログへ渡すために参照される)
+
+                visible: createSnapshotDialog.userdataCheck.ok !== true  // 検証に失敗している間だけ表示する
+                text: createSnapshotDialog.userdataCheck.error           // SnapshotListModel::parseUserdataが返したエラー文言
+                textFormat: Text.PlainText                               // 入力されたキー名を含み得るため、リッチテキストとして解釈させない
+                color: ThemeManager.errorColor                           // エラー色 (Light/Darkに応じてThemeManagerが切り替える)
+                wrapMode: Text.WordWrap                                  // 幅に収まるよう折り返す
+                Layout.fillWidth: true                                   // 折り返しの基準となる幅を確保する
             }
-            return result
         }
 
         /**
@@ -604,6 +658,20 @@ Page {
         // qmllintはC++側で登録された型のメンバを解決できないため、var経由で参照して警告の増加を避ける
         readonly property var createModel: snapshotListModel
 
+        // 入力中のユーザデータの検証結果 (SnapshotListModel::parseUserdataの戻り値: ok / userdata / error)
+        // 入力のたびに評価し直す
+        // 値は入力どおりに保存し、キーは前後の空白だけを取り除く
+        // 同じキーが複数ある場合などは警告を表示し、[OK]を無効にする
+        readonly property var userdataCheck: createModel.parseUserdata(userdataField.text)
+
+        // 形式が不正なユーザデータのまま作成できないよう、[OK]を検証結果に連動させる
+        // standardButtonはフッターのDialogButtonBoxが作られた後でしか取得できないため、構築完了時に結び付ける
+        Component.onCompleted: {
+            createSnapshotDialog.standardButton(Dialog.Ok).enabled = Qt.binding(function() {
+                return createSnapshotDialog.userdataCheck.ok === true
+            })
+        }
+
         // 表示のたびに種別をSingleへ戻す
         // 前回Postを選んだまま、選択の変更でPostが使えなくなった状態が残るのを避ける
         onAboutToShow: snapshotTypeCombo.currentIndex = 0
@@ -616,7 +684,12 @@ Page {
                 return
             }
 
-            var ud = createSnapshotDialog.parseUserdata(userdataField.text)
+            // 検証に失敗している場合は[OK]が無効のため通常は到達しないが、念のため再検証して拒否する
+            if (createSnapshotDialog.userdataCheck.ok !== true) {
+                return
+            }
+
+            var ud = createSnapshotDialog.userdataCheck.userdata
             var cleanup = cleanupCombo.currentValue
             var important = importantCheck.checked
             if (snapshotTypeCombo.currentIndex === 0) {
@@ -645,6 +718,11 @@ Page {
         id: editDialog
         snapshotListModel: snapshotListModel
         anchors.centerIn: Overlay.overlay
+
+        // SnapshotEditDialogが編集内容の反映を依頼したら、完了まで待機ダイアログを開く
+        // 反映はD-Busの非同期呼び出しのため、待機表示を出さないと進行中であることが分からない
+        // 待機ダイアログは、snapshotModified / snapshotModificationFailedの受信時に閉じる
+        onModifySubmitted: modifyingBusyDialog.open()
     }
 
     // 2スナップショット比較ダイアログ
@@ -676,6 +754,7 @@ Page {
             spacing: 15
 
             Label {
+                textFormat: Text.PlainText  // 件数のみの文言だが、他のラベルと表示形式を揃える
                 text: root.selectedCount === 1
                     ? qsTr("Delete selected snapshot?")
                     : qsTr("Delete %1 snapshots?").arg(root.selectedCount)
@@ -748,6 +827,46 @@ Page {
         }
     }
 
+    // スナップショット編集中の待機ダイアログ
+    // SnapshotListModel::modifySnapshotは非同期で、認証や処理に時間がかかるため、完了まで進行中であることを示す
+    // 二重実行を防ぐため操作では閉じられず、snapshotModifiedまたはsnapshotModificationFailedの受信時に閉じる
+    BorderedDialog {
+        id: modifyingBusyDialog  // 待機ダイアログの参照名
+
+        title: qsTr("Please wait")                    // ダイアログのタイトル
+        standardButtons: Dialog.NoButton              // 閉じる操作を与えないためボタンを置かない
+        anchors.centerIn: Overlay.overlay             // ウィンドウ全体の中央に表示する
+        // ウィンドウ幅の30%を基準に、400から600の範囲へクランプする
+        width: {
+            if (!ApplicationWindow.window) return 400
+            var calculated = ApplicationWindow.window.width * 0.3
+            return Math.min(Math.max(calculated, 400), 600)
+        }
+        modal: true                                   // 実行中に背後の画面を操作させない
+        closePolicy: Popup.NoAutoClose                // [Esc]キーや外側のクリックで閉じさせない
+
+        // 進行状況の表示領域
+        ColumnLayout {
+            width: parent.width  // ダイアログの幅いっぱいに配置する
+            spacing: 15          // 要素間の間隔
+
+            // 処理が続いていることを示す回転アニメーション
+            BusyIndicator {
+                running: modifyingBusyDialog.visible  // 表示中だけ回して、非表示時の無駄な描画を避ける
+                Layout.alignment: Qt.AlignHCenter     // 水平方向の中央に配置する
+            }
+
+            // 待機中であることを利用者に伝える文言
+            Label {
+                text: qsTr("Applying changes to the snapshot, please wait...")  // 待機中の案内文
+                font.pixelSize: 14                                              // 文字の大きさ
+                horizontalAlignment: Text.AlignHCenter                          // 水平方向の中央に揃える
+                wrapMode: Text.WordWrap                                         // 幅に収まるよう折り返す
+                Layout.fillWidth: true                                          // 折り返しの基準となる幅を確保する
+            }
+        }
+    }
+
     // エラーダイアログ
     BorderedDialog {
         id: errorDialog
@@ -770,6 +889,7 @@ Page {
 
         Label {
             id: errorLabel
+            textFormat: Text.PlainText  // C++側のエラー文言を表示するため、リッチテキストとして解釈させない
             width: parent.width
             wrapMode: Text.WordWrap
         }

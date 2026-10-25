@@ -4,6 +4,9 @@
  *
  * QAbstractItemModelの上書きとパスと変更タイプの解析
  * およびチェック状態の再帰操作を担当する
+ *
+ * 利用する側 : FileChangeModelのビュー
+ * 依存 : Qt Core、FileChangeItem
  */
 
 #include "filechangemodel.h"
@@ -14,6 +17,7 @@
 #include <QElapsedTimer>
 #include <QDebug>
 #include <algorithm>
+#include <limits>
 
 
 /**
@@ -153,10 +157,13 @@ QHash<int, QByteArray> FileChangeModel::roleNames() const
  * @brief モデルデータの構築
  *
  * ファイル変更リストからツリー構造のモデルデータを構築する
- * 重複を除外し、ディレクトリ階層を適切に生成
+ * 同じパスの重複を除外し、パスの階層から親ディレクトリの項目を生成する
  *
- * @param changeOutput Snapperから返された改行区切りの変更出力
+ * @param changeOutput qsnapper-dbus-serviceから返された改行区切りの変更出力
  * @param flatMode trueの場合はフラット表示用に構築する
+ * @note 取り込む量はm_maxChangeEntriesとm_maxChangeTextCharsで制限する
+ *       上限を超えた場合は途中までを公開し、残りをm_omittedCountに数えてtruncatedChangedで通知する
+ *       省略されたエントリは一覧に存在しないため、復元や削除の対象にもならない
  */
 void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
 {
@@ -167,10 +174,36 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
     QVector<filechangemodel_detail::ChangeInfo> changes;
     QSet<QString> seenPaths;
     QSet<QString> parentPaths;
-    const QStringList lines = changeOutput.split('\n', Qt::SkipEmptyParts);
-    changes.reserve(lines.size());
 
-    for (const QString &line : lines) {
+    // 異常に巨大な応答でメモリとUIを使い切らないよう、エントリ数と文字数の両方に上限を設ける
+    // 全文を行のリストへ分割すると、上限を超える分まで確保してしまうため、位置を進めながら1行ずつ取り出す
+    // 文字数の上限は行の途中で切れないよう、上限を超えた最初の行から後を省略する
+    bool truncated = false;
+    int omittedCount = 0;
+    qsizetype position = 0;
+    const qsizetype outputLength = changeOutput.size();
+    while (position < outputLength) {
+        qsizetype lineEnd = changeOutput.indexOf(QLatin1Char('\n'), position);
+        if (lineEnd < 0) {
+            lineEnd = outputLength;
+        }
+        if (lineEnd == position) {
+            position = lineEnd + 1;
+            continue;
+        }
+
+        if (changes.size() >= m_maxChangeEntries || lineEnd > m_maxChangeTextChars) {
+            truncated = true;
+            const qsizetype remainingLines = changeOutput.mid(position).count(QLatin1Char('\n'));
+            const bool endsWithNewline = changeOutput.endsWith(QLatin1Char('\n'));
+            omittedCount = static_cast<int>(qMin<qsizetype>(remainingLines + (endsWithNewline ? 0 : 1),
+                                                           std::numeric_limits<int>::max()));
+            break;
+        }
+
+        const QString line = changeOutput.mid(position, lineEnd - position);
+        position = lineEnd + 1;
+
         filechangemodel_detail::ChangeInfo info;
         if (!filechangemodel_detail::parseChangeRecord(line, &info) || seenPaths.contains(info.path)) {
             continue;
@@ -256,9 +289,23 @@ void FileChangeModel::setupModelData(const QString &changeOutput, bool flatMode)
     const qint64 modelPublicationMs = modelPublicationTimer.elapsed();
     delete oldRootItem;
 
-    // この関数はロード成功後のモデル公開点であり、ここで初めて復元可能な由来を確定する
+    // ここは読み込み成功後にモデルを公開する地点であり、最初に復元可能な由来を確定する
     m_loadedComparison = currentComparisonContext();
+    const bool wasLoaded = m_loadedComparisonValid;
     m_loadedComparisonValid = true;
+    if (!wasLoaded) {
+        emit loadedChanged();
+    }
+
+    // 省略の有無は、一覧を公開した直後に利用者へ伝える (省略された分は復元の対象にならない)
+    if (m_truncated != truncated || m_omittedCount != omittedCount) {
+        m_truncated = truncated;
+        m_omittedCount = omittedCount;
+        emit truncatedChanged();
+    }
+    if (truncated) {
+        qWarning() << "File change list was truncated: kept=" << changes.size() << "omitted=" << omittedCount;
+    }
 
     qInfo() << "FileChangeModel timing: responseParsePreparation=" << parsePreparationMs
             << "ms detachedTreeConstruction=" << detachedTreeConstructionMs

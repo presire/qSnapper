@@ -6,10 +6,13 @@
  * 復元はFileChangeModelがまとめて行うため、Polkitの認証は1回で済む
  * Pre/Postペアでは、Pre <--> Post間の差分ビューからだけ復元できる (「vs 現在」ビューは閲覧専用)
  *
+ * 復元の確認では、live側から削除されるパスの件数と一覧を必ず見せる
+ * 復元後は、適用・削除・スキップの件数と、失敗した位置を結果として表示する
+ *
  * 入力 : configName、snapshotNumber、preSnapshotNumber、postSnapshotNumber (親からバインド)
  * 出力 : restoreConfirmed()
- * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリーと復元)、BorderedDialog (枠付きダイアログ)、
- *        ThemedGroupBox (枠付きグループ)
+ * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリーと復元、削除対象の一覧、復元結果)、
+ *        BorderedDialog (枠付きダイアログ)、ThemedGroupBox (枠付きグループ)
  */
 import QtQuick
 import QtQuick.Controls
@@ -19,12 +22,12 @@ import QSnapper 1.0
 BorderedDialog {
     id: root
 
-    property string configName: "root"               // Snapper設定名
-    property int snapshotNumber: 0                   // 開いたときに表示するスナップショット番号
-    property int preSnapshotNumber: 0                // Preスナップショット番号 (0 = Pre/Postペアではない)
-    property int postSnapshotNumber: 0               // Postスナップショット番号
+    property string configName: "root"                                                     // Snapper設定名
+    property int snapshotNumber: 0                                                         // 開いたときに表示するスナップショット番号
+    property int preSnapshotNumber: 0                                                      // Preスナップショット番号 (0 = Pre/Postペアではない)
+    property int postSnapshotNumber: 0                                                     // Postスナップショット番号
     // snapshotNumberは親からバインドされており、書き換えるとバインドが外れるため、表示の切り替えにはこちらを使う
-    property int activeSnapshotNumber: 0             // 現在表示中のスナップショット番号
+    property int activeSnapshotNumber: 0                                                   // 現在表示中のスナップショット番号
     readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0  // Pre/Postペアかどうか
 
     // 表示モード
@@ -46,6 +49,18 @@ BorderedDialog {
         if (root.viewMode === root.viewReapplyToPost) return root.postSnapshotNumber
         return 0
     }
+
+    // 差分モデルへの参照 (loaded / truncated / omittedCount / restoreResult / checkedDeletePreviewの参照に使う)
+    // qmllintはC++側で登録された型のメンバを解決できないため、var経由で参照して警告の増加を避ける
+    readonly property var changeModel: fileChangeModel  // FileChangeModelへの参照
+
+    // 警告やエラーの文言の色 (既存のラベルの配色を再利用し、配色の定義をThemeManagerに一本化する)
+    readonly property color errorTextColor: errorLabel.color               // エラー文言の色 (ThemeManager.errorColor)
+    readonly property color warningTextColor: overwriteWarningLabel.color  // 警告文言の色 (ThemeManager.warningColor)
+
+    // 直近の復元計画の結果 (サーバのGetRestorePlanStatusを解析したもの)
+    // 復元の完了通知より後に届くことがあるため、結果ダイアログはこのプロパティのバインディングで更新する
+    readonly property var restoreResult: root.changeModel.restoreResult  // 適用・削除・スキップの件数と失敗位置 (未取得の間は空)
 
     // [選択項目を#Nへ復元]ボタンの有効状態の判定に使い、updateHasCheckedItemsだけが値を更新する
     property bool hasCheckedItems: false  // 差分ツリーで復元するファイルに1つでもチェックが入っているかどうか
@@ -137,6 +152,108 @@ BorderedDialog {
         }
     }
 
+    // 復元結果の件数と失敗位置を表示する部品 (成功ダイアログと失敗ダイアログで共有する)
+    // 外部のidを参照できないため、結果はresultプロパティで受け取る
+    // パスとエラー文言は復元対象に由来するため、全てPlainTextで表示する
+    component RestoreResultSummary: ColumnLayout {
+        id: summary
+
+        required property var result                                 // 復元結果 (restoreResultと同じ形式)
+        required property color errorTextColor                       // 失敗位置の文言の色 (外部のidを参照できないため、親から受け取る)
+        readonly property bool valid: summary.result.valid === true  // 結果を取得できているかどうか
+
+        // 一覧に載っているスキップ済みパスの件数 (サーバは先頭100件までしか返さないため、件数の合計とは一致しないことがある)
+        readonly property int skippedListed: summary.valid && summary.result.skippedPaths ? summary.result.skippedPaths.length : 0
+
+        // 結果を取得できるまでは何も表示しない
+        visible: summary.valid
+        spacing: 6
+
+        // 適用できたエントリ数と全体のエントリ数
+        Label {
+            text: qsTr("Applied: %1 of %2 entries").arg(summary.result.appliedCount).arg(summary.result.totalEntries)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        // 削除の件数は、追加フィールドを返す新しいサーバだけが報告する
+        Label {
+            visible: summary.valid && summary.result.hasExtended === true
+            text: qsTr("Deleted from the current system: %1").arg(summary.result.deletedCount)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        // FIFO・ソケット・デバイスファイルは復元できないためスキップされる
+        Label {
+            visible: summary.valid && summary.result.skippedCount > 0
+            text: qsTr("Skipped: %1 (FIFO, socket and device files cannot be restored)").arg(summary.result.skippedCount)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        // スキップしたパスの一覧 (サーバは先頭100件までしか返さない)
+        ScrollView {
+            visible: summary.skippedListed > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: 90
+            clip: true
+
+            // スキップしたパスは復元対象に由来するため、PlainTextの読み取り専用テキストで表示する
+            TextArea {
+                readOnly: true
+                text: summary.skippedListed > 0 ? summary.result.skippedPaths.join("\n") : ""
+                textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                wrapMode: TextEdit.NoWrap
+                font.family: "monospace"
+                font.pixelSize: 11
+            }
+        }
+
+        // 一覧がサーバの返却上限で打ち切られている場合だけ、残りが見えていないことを示す
+        Label {
+            visible: summary.valid && summary.result.skippedCount > summary.skippedListed && summary.skippedListed > 0
+            text: qsTr("Only the first %1 skipped paths are listed.").arg(summary.skippedListed)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        // 失敗したエントリの位置とパス (失敗が無ければ表示しない)
+        Label {
+            visible: summary.valid && summary.result.failedIndex >= 0
+            text: qsTr("Failed at entry #%1 of %2:").arg(summary.result.failedIndex + 1).arg(summary.result.totalEntries)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+            font.bold: true
+            color: summary.errorTextColor
+        }
+
+        // 失敗したエントリのパス (サーバがパスを返した場合だけ表示する)
+        Label {
+            visible: summary.valid && summary.result.failedIndex >= 0 && summary.result.failedPath !== ""
+            text: summary.result.failedPath
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WrapAnywhere
+            Layout.fillWidth: true
+            font.family: "monospace"
+            font.pixelSize: 11
+        }
+
+        // 最後に記録されたエラーの文言 (サーバが返した場合だけ表示する)
+        Label {
+            visible: summary.valid && summary.result.lastError !== ""
+            text: summary.result.lastError
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+    }
+
     width: {
         if (!ApplicationWindow.window) return 960
         return Math.max(ApplicationWindow.window.width - 50, 960)
@@ -189,6 +306,7 @@ BorderedDialog {
         onModelReset: Qt.callLater(root.updateHasCheckedItems)
 
         // エラーはダイアログ下部のラベルに表示する
+        // errorLabelはPlainTextで表示するため、サーバや差分に由来する文字列がリッチテキストとして解釈されない
         onErrorOccurred: function(message) {
             errorLabel.text = message
             errorLabel.visible = true
@@ -242,6 +360,9 @@ BorderedDialog {
                 successDialog.open()
             }
             else {
+                // 認可の拒否など、復元を始められなかった理由を失敗ダイアログにも表示する
+                // 直前のerrorOccurredで設定された文言を引き継ぐ (errorLabelは復元の開始時に消している)
+                restoreFailDialog.errorMessage = errorLabel.visible ? errorLabel.text : ""
                 restoreFailDialog.open()
             }
         }
@@ -280,12 +401,14 @@ BorderedDialog {
 
         // 対象のSnapper設定 (root以外の設定でも取り違えないように表示する)
         Label {
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
             text: qsTr("Snapper configuration: %1").arg(root.configName)
             font.bold: true
         }
 
         // 現在の表示内容の説明
         Label {
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
             text: root.prePostDiffMode
                   ? qsTr("Shows only the changes made between the Pre and Post snapshots that still differ from the current system.\nEntries already matching the restore target are hidden.\nRestoring reverts just those changes; files modified afterwards are left untouched.")
                   : qsTr("Shows the system state after applying the specified snapshot")
@@ -333,6 +456,16 @@ BorderedDialog {
                     onClicked: root.switchSnapshotView(root.postSnapshotNumber)
                 }
             }
+        }
+
+        // 変更一覧が上限を超えて省略されたことの通知 (省略された分は表示も復元もできないため、必ず見せる)
+        Label {
+            visible: root.changeModel.truncated
+            text: qsTr("The list is too large and was truncated: %1 entries after the limit are omitted. Omitted entries are neither shown nor restored.").arg(root.changeModel.omittedCount)
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+            color: root.warningTextColor
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
         }
 
         // 左にファイルツリー、右に選択したファイルの詳細を表示する
@@ -436,6 +569,7 @@ BorderedDialog {
 
                                             Label {
                                                 anchors.centerIn: parent
+                                                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                                 text: {
                                                     switch(changeType) {
                                                     case 0: return "+"  // 作成
@@ -462,6 +596,7 @@ BorderedDialog {
 
                                         // 名前 (名前の無いルートは(root)と表示する)
                                         Label {
+                                            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                             text: fileName || "(root)"
                                             color: palette.text
                                             font.italic: fileName === ""
@@ -494,10 +629,11 @@ BorderedDialog {
                     }
 
                     // 差分が無い場合のメッセージ
+                    // 読み込みに成功して0件だった場合だけ表示する (失敗時はエラー表示のみとし、差分が無いと誤解させない)
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        visible: !fileChangeModel.hasChanges
+                        visible: root.changeModel.loaded && !fileChangeModel.hasChanges
 
                         Label {
                             anchors.centerIn: parent
@@ -617,6 +753,7 @@ BorderedDialog {
                     // 選択したファイルのパス
                     Label {
                         visible: rightPane.fileSelected
+                        textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                         text: rightPane.selectedFilePath
                         font.bold: true
                         font.pixelSize: 12
@@ -659,6 +796,7 @@ BorderedDialog {
 
                             // 内容の変更
                             Label {
+                                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                 text: rightPane.getContentStatusText()
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
@@ -674,6 +812,7 @@ BorderedDialog {
                             // 権限の変更 (ステータスフラグにpがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('p') !== -1
+                                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                 text: {
                                     var d = rightPane.fileDetails
                                     var from = d["snapshotPerms"] || "?"
@@ -687,6 +826,7 @@ BorderedDialog {
                             // 所有ユーザの変更 (uがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('u') !== -1
+                                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                 text: {
                                     var d = rightPane.fileDetails
                                     var from = d["snapshotOwner"] || "?"
@@ -700,6 +840,7 @@ BorderedDialog {
                             // 所有グループの変更 (gがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('g') !== -1
+                                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                                 text: {
                                     var d = rightPane.fileDetails
                                     var from = d["snapshotGroup"] || "?"
@@ -727,7 +868,7 @@ BorderedDialog {
                             font.pixelSize: 14
                             text: ""
                             wrapMode: TextArea.NoWrap
-                            textFormat: TextEdit.PlainText
+                            textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                             color: palette.text
                             background: Rectangle {
                                 color: palette.base
@@ -761,6 +902,7 @@ BorderedDialog {
         // エラーメッセージ (エラーが起きたときだけ表示する)
         Label {
             id: errorLabel
+            textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
             Layout.fillWidth: true
             visible: false
             color: ThemeManager.errorColor
@@ -807,6 +949,14 @@ BorderedDialog {
                 onClicked: {
                     if (!root.restorable || root.restoreSourceNumber <= 0) return
                     confirmRestoreDialog.restoreTargetNumber = root.restoreSourceNumber
+
+                    // 復元元に存在しないパスは、復元するとlive側から削除される
+                    // 取り返しがつかないため、確認ダイアログを開く前に見せる
+                    // FileChangeModel::checkedDeletePreviewを呼び出し、削除されるパスの総数と先頭からの一覧を取得する
+                    var preview = root.changeModel.checkedDeletePreview(confirmRestoreDialog.maxDeletePathsShown)
+                    confirmRestoreDialog.deleteCount = preview.count
+                    confirmRestoreDialog.deletePaths = preview.paths
+                    confirmRestoreDialog.deleteListed = preview.paths.length
                     confirmRestoreDialog.open()
                 }
             }
@@ -829,14 +979,19 @@ BorderedDialog {
             var calculated = Math.min(Math.max(win.width * 0.6, 700), 1100)
             return Math.min(calculated, win.width - 40)
         }
+        // 削除対象のパスの一覧を表示する領域が必要なため、下限の高さを広げる
         height: {
             if (!ApplicationWindow.window) return 500
             var win = ApplicationWindow.window
-            var calculated = Math.min(Math.max(win.height * 0.6, 500), 950)
+            var calculated = Math.min(Math.max(win.height * 0.6, 600), 950)
             return Math.min(calculated, win.height - 40)
         }
 
-        property int restoreTargetNumber: 0  // 復元元のスナップショット番号 (開く前に設定する)
+        readonly property int maxDeletePathsShown: 2000  // 削除対象の一覧に載せるパスの上限 (一覧の生成と描画の負荷を抑える)
+        property int restoreTargetNumber: 0              // 復元元のスナップショット番号 (開く前に設定する)
+        property int deleteCount: 0                      // 復元でlive側から削除されるパスの総数 (開く前に設定する)
+        property var deletePaths: []                     // 削除されるパスの一覧 (先頭からmaxDeletePathsShown件まで)
+        property int deleteListed: 0                     // deletePathsに載せたパスの件数
 
         // ダイアログの本文 (確認の質問、復元の内容、注意書き、復元オプション)
         // 幅はダイアログいっぱいに広げ、説明文がダイアログの右端まで使って折り返すようにする
@@ -855,6 +1010,7 @@ BorderedDialog {
             }
 
             Label {
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: root.isPrePostPair
                       ? qsTr("Only the selected entries of the Pre #%1 / Post #%2 difference will be restored to the snapshot #%3 state. Files changed outside this range are left untouched.")
                             .arg(root.preSnapshotNumber)
@@ -866,12 +1022,52 @@ BorderedDialog {
                 color: palette.text
             }
 
+            // 上書きの警告 (警告文言の配色を他のラベルへ共有する取得元にもなる)
             Label {
+                id: overwriteWarningLabel
                 text: qsTr("Warning: This may overwrite current files.")
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
                 color: ThemeManager.warningColor
                 font.italic: true
+            }
+
+            // 復元でlive側から削除されるパスの件数 (0件のときは表示しない)
+            Label {
+                visible: confirmRestoreDialog.deleteCount > 0
+                text: qsTr("%1 path(s) will be DELETED from the current system:").arg(confirmRestoreDialog.deleteCount)
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                color: root.errorTextColor
+                font.bold: true
+            }
+
+            // 削除されるパスの一覧 (長い一覧でもダイアログが伸びないよう、スクロールで見せる)
+            // 外部由来の文字列のため、PlainTextの読み取り専用テキストとして表示する
+            ScrollView {
+                visible: confirmRestoreDialog.deleteCount > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: 110
+                clip: true
+
+                TextArea {
+                    readOnly: true
+                    text: confirmRestoreDialog.deletePaths.join("\n")
+                    textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                    wrapMode: TextEdit.NoWrap
+                    font.family: "monospace"
+                    font.pixelSize: 11
+                }
+            }
+
+            // 一覧に載せきれなかった件数
+            Label {
+                visible: confirmRestoreDialog.deleteCount > confirmRestoreDialog.deleteListed
+                text: qsTr("... and %1 more path(s) are not listed.").arg(confirmRestoreDialog.deleteCount - confirmRestoreDialog.deleteListed)
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
             }
 
             // 復元オプション
@@ -935,7 +1131,9 @@ BorderedDialog {
 
         // 復元を始める
         // snapshotNumberを書き換えると比較モードが戻ってしまうため、復元元は引数で渡す
+        // 前回の復元で表示したエラーは、今回の失敗と取り違えないよう先に消す
         onAccepted: {
+            errorLabel.visible = false
             progressDialog.resetProgress()
             progressDialog.open()
             fileChangeModel.restoreCheckedItemsFrom(confirmRestoreDialog.restoreTargetNumber)
@@ -970,6 +1168,15 @@ BorderedDialog {
         property int pendingTotal: 0                 // 最新の全体のファイル数
         property string pendingFile: ""              // 最新の処理中のファイル
         property var pendingLines: []                // 未反映のログ行
+        property bool progressDirty: false           // 未反映の進捗があるかどうか (ログを載せない場合も進捗は反映するため、行数とは別に持つ)
+
+        // ログの上限 (数十万件の復元でTextAreaが肥大化し、描画が止まるのを防ぐ)
+        // 上限を超えた分は載せず、省略した件数を画面に表示する (進捗バーと件数は引き続き更新する)
+        readonly property int maxLogLines: 2000      // ログに載せる行数の上限
+        readonly property int maxLogChars: 1048576   // ログに載せる文字数の上限 (1 MiB)
+        property int logLineCount: 0                 // ログに載せた行数
+        property int logCharCount: 0                 // ログに載せた文字数
+        property int logOmittedCount: 0              // 上限を超えてログに載せなかった件数
 
         // 進捗を100[ms]ごとに画面へ反映する
         // 反映するものが無くなったら止まり、次の進捗が届くと再開する
@@ -978,7 +1185,8 @@ BorderedDialog {
             interval: 100
             repeat: true
             onTriggered: {
-                if (progressDialog.pendingLines.length === 0) {
+                // 反映していない進捗が無ければ止まる (ログを載せない場合も数値は更新するため、行数ではなく進捗の有無で判定する)
+                if (!progressDialog.progressDirty) {
                     flushTimer.stop()
                     return
                 }
@@ -992,12 +1200,22 @@ BorderedDialog {
          * @param total 全体のファイル数
          * @param filePath 処理中のファイルのパス
          * @note 画面への反映はflushTimerがまとめて行う (止まっていれば開始する)
+         *       ログの行数と文字数が上限に達した後は、行を貯めず省略した件数だけを数える
          */
         function queueProgress(current, total, filePath) {
+            const pathLength = String(filePath).length  // 文字数の上限判定に使う (引数は型が不定のため文字列へ変換する)
             pendingProgress = current
             pendingTotal = total
             pendingFile = filePath
-            pendingLines.push(filePath)
+            progressDirty = true
+            if (logLineCount < maxLogLines && logCharCount < maxLogChars) {
+                pendingLines.push(filePath)
+                logLineCount += 1
+                logCharCount += pathLength + 1
+            }
+            else {
+                logOmittedCount += 1
+            }
             if (!flushTimer.running) {
                 flushTimer.start()
             }
@@ -1006,15 +1224,22 @@ BorderedDialog {
         /**
          * @brief 貯めた進捗をまとめて画面に反映する
          * @note ログは追記し、最下行までスクロールする
+         *       ログの上限を超えて載せる行が無い場合も、進捗の数値は更新する
          */
         function flushProgress() {
-            if (pendingLines.length === 0) {
+            if (!progressDirty) {
                 return
             }
             // ProgressBarはvalueをtoの範囲に丸めるため、先にtotalProgressを更新する
             totalProgress = pendingTotal
             currentProgress = pendingProgress
             currentFile = pendingFile
+            progressDirty = false
+
+            // ログの上限を超えている場合は載せる行が無いため、数値の反映だけで終える
+            if (pendingLines.length === 0) {
+                return
+            }
             // textを丸ごと置き換えると全体を作り直して重いため、追記だけにする
             restoreLogArea.append(pendingLines.join("\n"))
             pendingLines = []
@@ -1025,6 +1250,7 @@ BorderedDialog {
         /**
          * @brief 進捗とログを初期状態に戻す
          * @note flushTimerも止める
+         *       ログの行数・文字数・省略した件数も0に戻し、前回の復元の省略表示を引き継がない
          */
         function resetProgress() {
             flushTimer.stop()
@@ -1032,6 +1258,10 @@ BorderedDialog {
             pendingTotal = 0
             pendingFile = ""
             pendingLines = []
+            progressDirty = false
+            logLineCount = 0
+            logCharCount = 0
+            logOmittedCount = 0
             currentProgress = 0
             totalProgress = 0
             currentFile = ""
@@ -1059,6 +1289,7 @@ BorderedDialog {
             // 進捗の件数
             Label {
                 Layout.fillWidth: true
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: qsTr("Progress: %1 / %2").arg(progressDialog.currentProgress).arg(progressDialog.totalProgress)
                 color: palette.text
             }
@@ -1074,6 +1305,7 @@ BorderedDialog {
                 TextArea {
                     id: restoreLogArea
                     readOnly: true
+                    textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                     wrapMode: TextEdit.NoWrap
                     font.pixelSize: 11
                     font.family: "monospace"
@@ -1086,10 +1318,22 @@ BorderedDialog {
                 }
             }
 
+            // ログの上限を超えて省略した件数 (省略が起きたときだけ表示する)
+            Label {
+                visible: progressDialog.logOmittedCount > 0
+                Layout.fillWidth: true
+                text: qsTr("The log shows only the first %1 entries. %2 further entries after that are omitted from the log (the restore itself continues).")
+                          .arg(progressDialog.logLineCount).arg(progressDialog.logOmittedCount)
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                wrapMode: Text.WordWrap
+                color: root.warningTextColor
+            }
+
             // 処理中のファイル
             Label {
                 Layout.fillWidth: true
                 Layout.maximumWidth: 500
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: progressDialog.currentFile
                 wrapMode: Text.WrapAnywhere
                 font.pixelSize: 10
@@ -1125,6 +1369,7 @@ BorderedDialog {
             spacing: 10
 
             Label {
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: rightPane.selectedChangeType === 0
                       ? qsTr("Remove this file from the current system?")
                       : qsTr("Restore this file from snapshot #%1?").arg(root.restoreSourceNumber)
@@ -1134,6 +1379,7 @@ BorderedDialog {
             }
 
             Label {
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: rightPane.selectedFilePath
                 wrapMode: Text.WrapAnywhere
                 Layout.preferredWidth: 450
@@ -1143,6 +1389,7 @@ BorderedDialog {
             }
 
             Label {
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: rightPane.selectedChangeType === 0
                       ? qsTr("Warning: This file will be deleted from the current system.")
                       : qsTr("Warning: The current file will be overwritten.")
@@ -1156,6 +1403,9 @@ BorderedDialog {
         // 進捗ダイアログを1件分の表示にして復元を始める
         onAccepted: {
             if (!root.restorable || root.restoreSourceNumber <= 0) return
+
+            // 前回の復元で表示したエラーは、今回の失敗と取り違えないよう先に消す
+            errorLabel.visible = false
             progressDialog.resetProgress()
             progressDialog.totalProgress = 1
             progressDialog.currentFile = rightPane.selectedFilePath
@@ -1176,10 +1426,11 @@ BorderedDialog {
             var calculated = ApplicationWindow.window.width * 0.4
             return Math.min(Math.max(calculated, 500), 800)
         }
+        // 復元結果の件数と失敗位置を表示する領域が必要なため、他のダイアログより高さを確保する
         height: {
             if (!ApplicationWindow.window) return 220
-            var calculated = ApplicationWindow.window.height * 0.3
-            return Math.min(Math.max(calculated, 220), 600)
+            var calculated = ApplicationWindow.window.height * 0.4
+            return Math.min(Math.max(calculated, 340), 650)
         }
 
         ColumnLayout {
@@ -1194,15 +1445,25 @@ BorderedDialog {
             // Pre/Postペアでは、復元後に表示を切り替えたことを伝える
             Label {
                 visible: root.isPrePostPair
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 text: qsTr("Switched to the differences between snapshot #%1 and the current system.")
                         .arg(root.activeSnapshotNumber)
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 400
             }
 
+            // 適用・削除・スキップの件数 (サーバの状態応答が届いてから表示する)
+            RestoreResultSummary {
+                result: root.restoreResult
+                errorTextColor: root.errorTextColor
+                Layout.fillWidth: true
+                Layout.preferredWidth: 400
+            }
+
             // 再読み込みが終わり、差分が残っていない場合だけ表示する
+            // 読み込みに失敗した場合は差分が無いとは限らないため、読み込みに成功したときだけ表示する
             Label {
-                visible: !fileChangeModel.hasChanges && !fileChangeModel.loading
+                visible: root.changeModel.loaded && !fileChangeModel.hasChanges && !fileChangeModel.loading
                 text: qsTr("No more differences with snapshot.")
                 color: ThemeManager.successColor
                 font.italic: true
@@ -1220,6 +1481,7 @@ BorderedDialog {
     BorderedDialog {
         id: restoreFailDialog
         title: qsTr("Restore Failed")
+        property string errorMessage: ""  // 復元を始められなかった理由や認可の拒否など (開く前に設定する)
         anchors.centerIn: Overlay.overlay
         modal: true
         standardButtons: Dialog.Ok
@@ -1228,10 +1490,11 @@ BorderedDialog {
             var calculated = ApplicationWindow.window.width * 0.4
             return Math.min(Math.max(calculated, 500), 800)
         }
+        // 復元結果の件数と失敗位置を表示する領域が必要なため、他のダイアログより高さを確保する
         height: {
             if (!ApplicationWindow.window) return 220
-            var calculated = ApplicationWindow.window.height * 0.3
-            return Math.min(Math.max(calculated, 220), 600)
+            var calculated = ApplicationWindow.window.height * 0.4
+            return Math.min(Math.max(calculated, 340), 650)
         }
 
         ColumnLayout {
@@ -1244,11 +1507,29 @@ BorderedDialog {
                 Layout.preferredWidth: 400
             }
 
+            // エラーの原因 (認可の拒否など、読める文言が得られた場合だけ表示する)
+            Label {
+                visible: restoreFailDialog.errorMessage !== ""
+                text: restoreFailDialog.errorMessage
+                textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 400
+                color: root.errorTextColor
+            }
+
             Label {
                 text: qsTr("The files may already be in sync with the snapshot, or an error occurred during restoration. Check the system log for details.")
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 400
                 color: ThemeManager.warningColor
+            }
+
+            // 適用・削除・スキップの件数と、失敗したエントリの位置 (サーバの状態応答が届いてから表示する)
+            RestoreResultSummary {
+                result: root.restoreResult
+                errorTextColor: root.errorTextColor
+                Layout.fillWidth: true
+                Layout.preferredWidth: 400
             }
         }
     }

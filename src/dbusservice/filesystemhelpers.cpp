@@ -1,8 +1,9 @@
 /**
  * @file filesystemhelpers.cpp
- * @brief 絶対パス起点とdirfd相対の安全オープン・stat群
+ * @brief 絶対パス起点とdirfd相対の安全オープン・stat・存在観測
  *
  * symlinkを辿らない読み取り専用プリミティブと単体テスト用のdetail入口を提供する
+ * observePathNoFollowAtは、パスがdirfdの木に含まれるかを存在・不在・不明の3値で返す
  */
 #include <QByteArray>
 #include <QCryptographicHash>
@@ -208,6 +209,99 @@ namespace qsnapper::security {
 
         ::close(currentFd);
         return confirmedAbsent;
+    }
+
+    PathPresenceAt observePathNoFollowAt(int dirFd, const QString &relativePath, struct stat *out)
+    {
+        // 判定の規則は、filesystemhelpers.hを参照すること
+        if (!out || dirFd < 0) {
+            errno = EINVAL;
+            return PathPresenceAt::Unknown;
+        }
+
+        if (!validateRelativePathAt(relativePath, nullptr)) {
+            return PathPresenceAt::Unknown;
+        }
+
+        const QStringList components =
+                relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        if (components.isEmpty()) {
+            errno = EINVAL;
+            return PathPresenceAt::Unknown;
+        }
+
+        // 根のst_devを取得できないとmount境界を判定できないため、存在を確定しない
+        struct stat rootInfo;
+        if (::fstat(dirFd, &rootInfo) != 0) {
+            return PathPresenceAt::Unknown;
+        }
+
+        // 走査用のfdを複製できない場合は何も観測できない
+        int currentFd = ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (currentFd < 0) {
+            return PathPresenceAt::Unknown;
+        }
+
+        PathPresenceAt result = PathPresenceAt::Unknown;
+        for (int i = 0; i < components.size(); ++i) {
+            const QByteArray encodedComponent = components.at(i).toUtf8();
+
+            struct stat info;
+            if (::fstatat(currentFd, encodedComponent.constData(), &info, AT_SYMLINK_NOFOLLOW) != 0) {
+                // 不在と断定できるのはENOENTだけで、EACCES等は存在を確認できなかった扱いにする
+                result = errno == ENOENT ? PathPresenceAt::Absent : PathPresenceAt::Unknown;
+                break;
+            }
+
+            if (i == components.size() - 1) {
+                *out = info;
+                result = PathPresenceAt::Present;
+                break;
+            }
+
+            // symlinkを含む非ディレクトリの下は、libsnapperの比較が辿らないため木に含まれない
+            if (!S_ISDIR(info.st_mode)) {
+                result = PathPresenceAt::Absent;
+                break;
+            }
+
+            // 別のファイルシステムの下は、存在しないとは言えないため判定しない (理由はfilesystemhelpers.hを参照)
+            if (info.st_dev != rootInfo.st_dev) {
+                errno = EXDEV;
+                break;
+            }
+
+            const int nextFd = ::openat(currentFd, encodedComponent.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            if (nextFd < 0) {
+                // fstatat()で見えた直後に開けない場合は差し替えか権限変更があり、観測結果を信用できない
+                break;
+            }
+
+            // fstatat()の後に同じ名前が別のディレクトリへ差し替えられていれば、観測結果を信用できない
+            // 同じデバイスのbind mountはst_devでは区別できないため、mountのrootかどうかもstatxで確認する
+            struct statx openedInfo;
+            if (::statx(nextFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO, &openedInfo) != 0
+                    || makedev(openedInfo.stx_dev_major, openedInfo.stx_dev_minor) != info.st_dev
+                    || openedInfo.stx_ino != info.st_ino) {
+                ::close(nextFd);
+                errno = ESTALE;
+                break;
+            }
+
+            if (isMountBoundary(openedInfo, rootInfo.st_dev)) {
+                ::close(nextFd);
+                errno = EXDEV;
+                break;
+            }
+            ::close(currentFd);
+            currentFd = nextFd;
+        }
+
+        // close()がerrnoを上書きするため、判定の理由を呼び出し元へそのまま返す
+        const int savedErrno = errno;
+        ::close(currentFd);
+        errno = savedErrno;
+        return result;
     }
 
     int safeOpenRegularFileReadAt(int dirFd, const QString &relativePath)

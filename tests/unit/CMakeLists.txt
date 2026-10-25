@@ -167,7 +167,7 @@ add_test(NAME tst_restoremanifest COMMAND tst_restoremanifest)
 
 # --- tst_restorevalidation ---
 # commit時のpreflightで使う純粋関数群をlibsnapperなしで検証する
-# 対象は、状態ビットからchangeTypeへの写像、パスの正規化、権威あるmapの構築、凍結済みentryの検証
+# 対象は、復元元と比較相手の観測結果による差分の裏付け、凍結済みentryの検証、復元先の組み立て
 add_executable(tst_restorevalidation
     tst_restorevalidation.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
@@ -258,7 +258,10 @@ target_include_directories(tst_snapshotoperations PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice
     ${CMAKE_SOURCE_DIR}/include
 )
+# QSNAPPER_ENABLE_TEST_HOOKSで、polkitの代わりに即時許可を返すテスト用フックと、復元計画の判定を取り出すフックを有効にする
+# 認可を迂回できるため、インストールしないテスト用ターゲットだけで定義する
 target_compile_definitions(tst_snapshotoperations PRIVATE
+    QSNAPPER_ENABLE_TEST_HOOKS
     LIBSNAPPER_VERSION_MAJOR=${SNAPPER_VERSION_MAJOR}
     LIBSNAPPER_VERSION_MINOR=${SNAPPER_VERSION_MINOR}
 )
@@ -296,6 +299,7 @@ add_test(NAME tst_singleinstanceguard COMMAND tst_singleinstanceguard)
 # --- tst_snapshotdelete ---
 # GUIからスナップショットを削除する処理 (src/snapshotlistmodel.cpp) が、呼び出すD-Busメソッドを件数で使い分けることを確認する
 # 1件ならDeleteSnapshot、複数件ならDeleteSnapshotsを呼び出すことを確認する
+# 一覧を取得し終える前やconfigを切り替えた後に、前の一覧の番号で削除しないことも確認する
 # テスト専用のdbus-daemonと偽のcom.presire.qsnapper.Operationsサービスを使うため、実際のシステムバスとヘルパには接続しない
 # snapperservice.cppがincludeするexternalurlopener.hはQDesktopServicesを使うため、Qt6::Guiもリンクする
 find_package(Qt6 REQUIRED COMPONENTS Gui DBus)
@@ -384,6 +388,71 @@ add_test(NAME tst_configpathvalidation COMMAND tst_configpathvalidation)
 # テストを追加した場合は、下記のターゲット一覧にも追加すること
 if(QSNAPPER_TEST_SANITIZE)
     foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation)
+        target_compile_options(${tgt} PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${tgt} PRIVATE
+            -fsanitize=address,undefined)
+    endforeach()
+endif()
+
+# --- GUI側の追加機能テスト ---
+# 状態CSVとユーザデータの解析はヘッダーオンリー、FileChangeModelのGUI側機能はtst_filechangemodel.hのモックを共有するため、独立した実行ファイルにする
+# tst_restoreplanstatus: GetRestorePlanStatusのCSV応答 (旧9フィールドと拡張14フィールド) の解析を確認する
+# tst_userdataparser: ユーザデータの解析 (値の保持、重複キーの拒否) を確認する
+# tst_filechangemodel_gui: 空の差分、一覧の上限、削除対象の事前表示、復元結果の公開を確認する
+# 前の2つはヘッダーオンリーのため、Qt6::CoreとQt6::Testだけをリンクする
+add_executable(tst_restoreplanstatus
+    tst_restoreplanstatus.cpp
+)
+target_include_directories(tst_restoreplanstatus PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_restoreplanstatus PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_restoreplanstatus PROPERTIES AUTOMOC ON)
+add_test(NAME tst_restoreplanstatus COMMAND tst_restoreplanstatus)
+
+add_executable(tst_userdataparser
+    tst_userdataparser.cpp
+)
+target_include_directories(tst_userdataparser PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_userdataparser PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_userdataparser PROPERTIES AUTOMOC ON)
+add_test(NAME tst_userdataparser COMMAND tst_userdataparser)
+
+# tst_filechangemodelと同じ実装ソースをリンクし、tst_filechangemodel.hのモック (転送層の差し替えなど) を共有する
+add_executable(tst_filechangemodel_gui
+    tst_filechangemodel_gui.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangeitem.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangemodel_loading.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangemodel_model.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangemodel_restore.cpp
+    ${CMAKE_SOURCE_DIR}/src/filechangemodel_transport.cpp
+    ${CMAKE_SOURCE_DIR}/include/filechangeitem.h
+    ${CMAKE_SOURCE_DIR}/include/filechangemodel.h
+    ${CMAKE_SOURCE_DIR}/include/restoreplantransport.h
+)
+target_include_directories(tst_filechangemodel_gui PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_filechangemodel_gui PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Test
+)
+set_target_properties(tst_filechangemodel_gui PROPERTIES AUTOMOC ON)
+add_test(NAME tst_filechangemodel_gui COMMAND tst_filechangemodel_gui)
+
+# ASan / UBSanを新規テストにも適用する (上の一覧は監査前からの差分を小さく保つため並べ替えず、ここで別に指定する)
+if(QSNAPPER_TEST_SANITIZE)
+    foreach(tgt tst_restoreplanstatus tst_userdataparser tst_filechangemodel_gui)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

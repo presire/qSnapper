@@ -4,10 +4,12 @@
  *
  * 一時object作成からrename検証までの差し替え処理とmetadata適用、
  * snapshot一覧指紋を集める
+ * SELinuxユーザが異なるsecurity.selinuxはqsnapper_dbus_tでは書き込めないため、ユーザ部分だけを復元先に合わせる
  */
 #include <QByteArray>
 #include <QCryptographicHash>
 #include <QDebug>
+#include <QRandomGenerator>
 #include <QStringList>
 #include <dirent.h>
 #include <fcntl.h>
@@ -34,6 +36,7 @@ namespace qsnapper::security {
         constexpr const char *kAclAccessXattr = "system.posix_acl_access";
         constexpr const char *kAclDefaultXattr = "system.posix_acl_default";
         constexpr const char *kCapabilityXattr = "security.capability";
+        constexpr const char *kSelinuxXattr = "security.selinux";
 
         /**
          * @brief fdからxattrの値を読み出す
@@ -104,10 +107,39 @@ namespace qsnapper::security {
         }
 
         /**
+         * @brief SELinuxユーザの違いで拒否されたsecurity.selinuxを、ユーザ部分だけ復元先に合わせて書き直す
+         *
+         * qsnapper_dbus_tはcan_change_object_identityを持たないため、SELinuxユーザの異なるコンテキストの書き込みはSELinuxの制約で拒否される
+         * ロール・タイプ・レベルはスナップショットの値を保ち、アクセス制御に効くタイプを失わないようにする
+         *
+         * @param destinationFd 復元先fd
+         * @param snapshotContext スナップショット側のsecurity.selinuxの値
+         * @return 書き直せた場合true
+         */
+        bool writeSelinuxContextWithDestinationUser(int destinationFd, const QByteArray &snapshotContext)
+        {
+            QByteArray destinationContext;
+            if (readXattrFd(destinationFd, kSelinuxXattr, &destinationContext) != 1) {
+                return false;
+            }
+
+            const QByteArray adjusted = selinuxContextWithDestinationUser(snapshotContext, destinationContext);
+            if (adjusted.isEmpty()) {
+                return false;
+            }
+
+            return ::fsetxattr(destinationFd, kSelinuxXattr, adjusted.constData(),
+                               static_cast<size_t>(adjusted.size()), 0) == 0;
+        }
+
+        /**
          * @brief 必須・個別処理のxattr以外を、best-effortでコピーする
+         *
+         * POSIX ACLとsecurity.capabilityはapplyRestoredMetadataが必須項目として別途適用するため、ここでは扱わない
          * @param sourceFd 復元元fd
          * @param destinationFd 復元先fd
          * @return コピーできなかったxattrの件数 (一覧を取得できなかった場合は1)
+         * @note security.selinuxの書き込みがSELinuxに拒否された場合 (EACCES / EPERM) は、ユーザ部分だけを復元先の値にして1回だけ再試行する
          */
         int copyRemainingXattrsBestEffort(int sourceFd, int destinationFd)
         {
@@ -145,9 +177,18 @@ namespace qsnapper::security {
                 if (state == 0) {
                     continue;
                 }
-                if (state < 0
-                        || ::fsetxattr(destinationFd, name.constData(), value.constData(),
-                                       static_cast<size_t>(value.size()), 0) < 0) {
+                if (state < 0) {
+                    ++failures;
+                    continue;
+                }
+
+                if (::fsetxattr(destinationFd, name.constData(), value.constData(),
+                                static_cast<size_t>(value.size()), 0) == 0) {
+                    continue;
+                }
+
+                const bool deniedBySelinux = name == kSelinuxXattr && (errno == EACCES || errno == EPERM);
+                if (!deniedBySelinux || !writeSelinuxContextWithDestinationUser(destinationFd, value)) {
                     ++failures;
                 }
             }
@@ -158,24 +199,20 @@ namespace qsnapper::security {
         /**
          * @brief 宛先leaf名と同じディレクトリに置く一時leaf名を生成する
          *
-         * 形式は "." + leaf + "." + tag + "." + pid + "." + ミリ秒 + "." + attempt
+         * 形式は "." + leaf + "." + tag + "." + 16桁の乱数 (16進)
+         * 宛先の親ディレクトリには他のユーザが書き込める場合があるため、pidや時刻のような推測できる値は使わない
+         * (名前を予測されると、先にsymlinkやFIFOを置かれて作成を妨害される)
          * NAME_MAXを超える場合はleaf部分を文字単位で切り詰める (UTF-8の途中で切らない)
          *
          * @param leafName 宛先の最終成分名
          * @param tag 用途を示すASCIIのタグ
-         * @param attempt 試行番号
          * @return 一時leaf名
          */
-        QByteArray temporarySiblingLeafName(const QByteArray &leafName, const char *tag, int attempt)
+        QByteArray temporarySiblingLeafName(const QByteArray &leafName, const char *tag)
         {
-            struct timespec now;
-            ::clock_gettime(CLOCK_REALTIME, &now);
-            const qint64 milliseconds = static_cast<qint64>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
-
-            const QByteArray suffix = QByteArray(".") + tag
-                    + '.' + QByteArray::number(static_cast<qint64>(::getpid()))
-                    + '.' + QByteArray::number(milliseconds)
-                    + '.' + QByteArray::number(attempt);
+            const QByteArray suffix = QByteArray(".") + tag + '.'
+                    + QByteArray::number(QRandomGenerator::system()->generate64(), 16)
+                          .rightJustified(16, '0');
 
             const qsizetype maxBaseBytes = static_cast<qsizetype>(NAME_MAX) - 1 - suffix.size();
             QString base = QString::fromUtf8(leafName);
@@ -316,6 +353,38 @@ namespace qsnapper::security {
         return openLeafParentBeneathRoot(rootPath, components, false, 0, leafNameOut);
     }
 
+    QByteArray selinuxContextWithDestinationUser(const QByteArray &snapshotContext,
+                                                 const QByteArray &destinationContext)
+    {
+        // xattrの値は末尾にNULを含むことが多いため、解析の前に外し、書き戻すときに元の形へ戻す
+        const auto withoutTerminator = [](const QByteArray &context) {
+            return context.endsWith('\0') ? context.left(context.size() - 1) : context;
+        };
+        const QByteArray snapshotText = withoutTerminator(snapshotContext);
+        const QByteArray destinationText = withoutTerminator(destinationContext);
+
+        // user:role:type[:level]の形だけを扱う (壊れた値を書き戻してSELinuxの解釈を変えないため)
+        const auto isWellFormed = [](const QByteArray &context) {
+            return !context.contains('\0') && context.count(':') >= 2 && context.indexOf(':') > 0;
+        };
+        if (!isWellFormed(snapshotText) || !isWellFormed(destinationText)) {
+            return {};
+        }
+
+        const qsizetype snapshotUserEnd = snapshotText.indexOf(':');
+        const QByteArray destinationUser = destinationText.left(destinationText.indexOf(':'));
+        // ユーザが同じならSELinuxユーザの違いが原因ではないため、書き換えずに失敗として返す
+        if (snapshotText.left(snapshotUserEnd) == destinationUser) {
+            return {};
+        }
+
+        QByteArray adjusted = destinationUser + snapshotText.mid(snapshotUserEnd);
+        if (snapshotContext.endsWith('\0')) {
+            adjusted.append('\0');
+        }
+        return adjusted;
+    }
+
     RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory)
     {
         RestoredMetadataResult result;
@@ -394,10 +463,11 @@ namespace qsnapper::security {
         }
 
         // 権限を絞った状態 (0600) で作成し、所有者とmodeは後からfd経由で設定する
+        // 一時名は予測できないため、EEXISTは偶然の衝突に限られる
         QByteArray temporaryName;
         int rawFd = -1;
         for (int attempt = 0; attempt < 16 && rawFd < 0; ++attempt) {
-            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-copy", attempt);
+            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-copy");
             rawFd = ::openat(destinationParentFd, temporaryName.constData(),
                              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
             if (rawFd < 0 && errno != EEXIST) {
@@ -411,6 +481,8 @@ namespace qsnapper::security {
         UniqueFd destinationFd(rawFd);
         struct stat created;
         if (::fstat(destinationFd.get(), &created) < 0) {
+            // 作成したinodeを識別できないため、同名の別objectを消さないよう一時名は残す
+            // (自分のfdに対するfstatの失敗は実質起きず、残る場合も中身は空で0600・root所有になる)
             return false;
         }
 
@@ -461,7 +533,7 @@ namespace qsnapper::security {
 
     bool replaceSymlinkAt(int destinationParentFd, const QByteArray &leafName,
                           const QByteArray &linkTarget, const struct stat &sourceStat,
-                          bool *metadataApplied)
+                          bool *metadataApplied, bool mustPreserveMetadata)
     {
         if (metadataApplied) {
             *metadataApplied = false;
@@ -471,10 +543,11 @@ namespace qsnapper::security {
             return false;
         }
 
+        // 一時名は予測できないため、EEXISTは偶然の衝突に限られる
         QByteArray temporaryName;
         bool createdLink = false;
         for (int attempt = 0; attempt < 16 && !createdLink; ++attempt) {
-            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-link", attempt);
+            temporaryName = temporarySiblingLeafName(leafName, "qsnapper-link");
             if (::symlinkat(linkTarget.constData(), destinationParentFd, temporaryName.constData()) == 0) {
                 createdLink = true;
             }
@@ -486,31 +559,50 @@ namespace qsnapper::security {
             return false;
         }
 
-        // 作成した一時symlink自体をfdで固定し、以降の操作で名前を再解決しない
-        const UniqueFd linkFd(::openat(destinationParentFd, temporaryName.constData(),
-                                       O_PATH | O_NOFOLLOW | O_CLOEXEC));
-        if (!linkFd.isValid()) {
+        // 失敗時の後始末で他者のobjectを消さないよう、作成直後の一時名のinodeを記録する
+        // euid所有のsymlinkでなければ、作成直後に差し替えられたものとして扱い、記録しない
+        struct stat createdByName;
+        bool cleanupIdentityKnown = ::fstatat(destinationParentFd, temporaryName.constData(),
+                                              &createdByName, AT_SYMLINK_NOFOLLOW) == 0
+                && S_ISLNK(createdByName.st_mode) && createdByName.st_uid == ::geteuid();
+        const auto abortReplace = [&]() {
+            if (cleanupIdentityKnown) {
+                discardTemporaryAt(destinationParentFd, temporaryName, createdByName);
+            }
             return false;
-        }
-
-        struct stat created;
-        if (::fstat(linkFd.get(), &created) < 0) {
-            return false;
-        }
-
-        // 作成直後に差し替えられていないか (symlink、所有者がeuid、targetが一致) を確認する
-        QByteArray currentTarget(linkTarget.size() + 1, '\0');
-        const ssize_t targetLength = ::readlinkat(linkFd.get(), "", currentTarget.data(),
-                                                  static_cast<size_t>(currentTarget.size()));
-        if (!S_ISLNK(created.st_mode) || created.st_uid != ::geteuid()
-                || targetLength != static_cast<ssize_t>(linkTarget.size())
-                || currentTarget.left(targetLength) != linkTarget) {
+        };
+        if (!cleanupIdentityKnown) {
             errno = ESTALE;
             return false;
         }
 
+        // 作成した一時symlink自体をfdで固定し、以降の操作で名前を再解決しない
+        const UniqueFd linkFd(::openat(destinationParentFd, temporaryName.constData(),
+                                       O_PATH | O_NOFOLLOW | O_CLOEXEC));
+        if (!linkFd.isValid()) {
+            return abortReplace();
+        }
+
+        struct stat created;
+        if (::fstat(linkFd.get(), &created) < 0) {
+            return abortReplace();
+        }
+
+        // 作成直後に差し替えられていないか (記録したinode、symlink、所有者がeuid、targetが一致) を確認する
+        QByteArray currentTarget(linkTarget.size() + 1, '\0');
+        const ssize_t targetLength = ::readlinkat(linkFd.get(), "", currentTarget.data(),
+                                                  static_cast<size_t>(currentTarget.size()));
+        if (created.st_dev != createdByName.st_dev || created.st_ino != createdByName.st_ino
+                || !S_ISLNK(created.st_mode) || created.st_uid != ::geteuid()
+                || targetLength != static_cast<ssize_t>(linkTarget.size())
+                || currentTarget.left(targetLength) != linkTarget) {
+            errno = ESTALE;
+            return abortReplace();
+        }
+
         const bool ownerUpdated = ::fchownat(linkFd.get(), "", sourceStat.st_uid, sourceStat.st_gid,
                                        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) == 0;
+        int metadataErrno = ownerUpdated ? 0 : errno;   // 失敗理由をrenameせずに返すため保持する
         const struct timespec times[2] = { sourceStat.st_atim, sourceStat.st_mtim };
         bool timesUpdated = ::utimensat(linkFd.get(), "", times, AT_EMPTY_PATH) == 0;
         if (!timesUpdated && errno == EINVAL) {
@@ -520,8 +612,21 @@ namespace qsnapper::security {
                     && ::utimensat(destinationParentFd, temporaryName.constData(), times, AT_SYMLINK_NOFOLLOW) == 0
                     && isSameInodeAt(destinationParentFd, temporaryName, created);
         }
+        if (!timesUpdated && metadataErrno == 0) {
+            metadataErrno = errno;
+        }
         if (metadataApplied) {
             *metadataApplied = ownerUpdated && timesUpdated;
+        }
+
+        // 所有者を保てないとroot所有のsymlinkが残り、fs.protected_symlinks (sticky付きディレクトリでの追従可否) の判定が変わる
+        // 必須の場合はrenameせず、live側を元のまま残す
+        if (mustPreserveMetadata && !(ownerUpdated && timesUpdated)) {
+            errno = metadataErrno != 0 ? metadataErrno : EPERM;
+            const int savedErrno = errno;
+            abortReplace();
+            errno = savedErrno;
+            return false;
         }
 
         return renameVerifiedAt(destinationParentFd, temporaryName, leafName, created);

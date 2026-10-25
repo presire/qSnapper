@@ -396,7 +396,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsLeafSymlinkToExternalFile()
     const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
 
     // leafを外部センチネルへのsymlinkへ差し替える (parentは実ディレクトリのまま)
-    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), victimPath));
+    QVERIFY(safeRemoveAllBeneathRoot(rootDir.path(), victimPath));
     QVERIFY(::symlink((outsideDir.path() + QStringLiteral("/secret.txt")).toUtf8().constData(),
                       victimPath.toUtf8().constData()) == 0);
 
@@ -413,6 +413,11 @@ void TestFilesystemHelpers::beneathRootWriteRejectsLeafSymlinkToExternalFile()
     verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
 }
 
+/**
+ * @brief 中間成分がdangling symlinkの場合も、不在とみなさず拒否することを確認する
+ *
+ * 不在とみなして新規作成すると、攻撃者が後からlinkの先を作って書き込み先を差し替えられる
+ */
 void TestFilesystemHelpers::beneathRootWriteRejectsDanglingSymlinkComponent()
 {
     QTemporaryDir rootDir;
@@ -425,7 +430,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsDanglingSymlinkComponent()
     const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
 
     // 中間成分をdangling symlinkへ差し替える
-    QVERIFY(safeRemoveAllBeneathRoot(QStringLiteral("/"), rootDir.path() + QStringLiteral("/a")));
+    QVERIFY(safeRemoveAllBeneathRoot(rootDir.path(), rootDir.path() + QStringLiteral("/a")));
     QVERIFY(::symlink(QStringLiteral("/nonexistent/qsnapper-dangling-target").toUtf8().constData(),
                       (rootDir.path() + QStringLiteral("/a")).toUtf8().constData()) == 0);
 

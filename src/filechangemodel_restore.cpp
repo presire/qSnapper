@@ -4,9 +4,13 @@
  *
  * 復元対象の検証とチャンク単位のステージングと確定
  * およびD-Bus復元通知の処理を担当する
+ *
+ * 利用する側 : FileChangeModel
+ * 依存 : Qt D-Bus、restoreplanstatus.h、FileChangeItem
  */
 
 #include "filechangemodel.h"
+#include "restoreplanstatus.h"
 #include <QRegularExpression>
 #include <QFileInfo>
 #include <QDebug>
@@ -45,13 +49,16 @@ void FileChangeModel::onRestorePlanProgress(const QString &manifestId, int curre
 /**
  * @brief 復元計画の完了スロット (staged restore用)
  *
- * サーバ側manifestが送る終端シグナルを受信し、シグナル受信を解除してから復元完了を通知する
+ * qsnapper-dbus-serviceの復元計画 (manifest) が送る終端シグナルを受信し、シグナル受信を解除してから復元完了を通知する
  * terminalStateが"completed"の場合のみ成功扱いになる
  *
  * 実行中の計画以外のマニフェストIDを持つシグナルは無視される
+ * シグナルはsystem busの全接続へ届くため、messageは終端状態ごとの固定文言である
+ * 計画を開始した接続だけが取得できるGetRestorePlanStatusの詳細(復元対象のパスを含み得る)は、終端状態によらずログへ出さない
+ * 件数と失敗位置を結果画面へ表示するため、終端状態によらず完了後にGetRestorePlanStatusを要求する
  *
- * signalはsystem busの全接続へ届くため、messageは終端状態ごとの固定文言である
- * 失敗した場合も、計画のownerだけが取得できるGetRestorePlanStatusの詳細 (復元pathを含み得る) はログへ出さない
+ * @note 状態は画面へ復元完了を通知するより先にリセットするが、GetRestorePlanStatusの応答は通知より後に届くことがある
+ *       そのため応答はrestoreResultの更新として反映し、新しい復元の開始後に届いた古い応答は世代番号で捨てる
  *
  * @param manifestId 完了した計画のマニフェストID
  * @param terminalState 終端状態 ("completed" / "failed" / "cancelled")
@@ -74,17 +81,35 @@ void FileChangeModel::onRestorePlanFinished(const QString &manifestId, const QSt
     if (!completed) {
         qWarning() << "Restore plan finished with state:" << terminalState << message;
     }
-    if (terminalState == QStringLiteral("failed")) {
-        m_restorePlanTransport->requestStatus(manifestId,
-            [](bool ok, const QString &statusCsv, const QString &error) {
-                // statusCsvのlastErrorには復元pathが含まれ得るため、内容はログに出さない
-                Q_UNUSED(statusCsv);
-                Q_UNUSED(error);
-                if (!ok) {
-                    qWarning() << "Failed to get restore plan status";
-                }
-            });
-    }
+
+    // 終端状態によらず、件数と失敗位置を結果画面に表示するためGetRestorePlanStatusを要求する
+    // 応答はrestoreCompletedの通知より後に届くことがあり、restoreResultの更新で画面へ反映する
+    // 新しい復元の開始後に古い応答が届いても上書きしないよう、世代で照合する
+    const quint64 resultGeneration = ++m_restoreResultGeneration;
+    m_restorePlanTransport->requestStatus(manifestId,
+        [this, resultGeneration](bool statusOk, const QString &statusCsv, const QString &statusError) {
+            if (resultGeneration != m_restoreResultGeneration) {
+                return;
+            }
+
+            // 失敗の理由 (statusError) はログに出さず、固定の文言だけを出す
+            // 認可の拒否以外では、D-Busデーモンやサービスの起動処理が返すエラー本文をそのまま受け取るため、パスを含まないとは保証できない
+            if (!statusOk) {
+                Q_UNUSED(statusError);
+                qWarning() << "Failed to get restore plan status";
+                return;
+            }
+
+            // 取得した状態 (statusCsv) は、最後のエラー・失敗したファイル・スキップしたファイルに復元先のパスを含み得るため、ログに出さない
+            // 9フィールドの旧形式も受け付ける (追加の件数は0、失敗位置は-1のままになる)
+            const qsnapper::restore::RestorePlanStatus status = qsnapper::restore::parseRestorePlanStatus(statusCsv);
+            if (!status.valid) {
+                qWarning() << "Restore plan status could not be parsed";
+                return;
+            }
+            m_restoreResult = status.toVariantMap();
+            emit restoreResultChanged();
+        });
 
     // 状態を先にリセットしてから完了を通知する (完了ハンドラからの再開始に備える)
     resetRestorePlanState();
@@ -264,7 +289,7 @@ bool FileChangeModel::isValidRestorePlanEntry(const QString &path, const QString
  * 復元元に存在しないディレクトリ (= Created) の配下にあるパスは、復元元にも存在し得ないため必ずCreatedになる
  * Created配下にModified / Deleted / TypeChangedの実レコードが現れるのは自己矛盾であり、
  * 行指向出力への改行注入によって偽の親ディレクトリが差し込まれた場合に起きる
- * Createdディレクトリは復元時にlive側の再帰削除として扱われるため、矛盾する親をそのまま復元計画へ載せると、意図しない範囲が削除され得る
+ * Createdディレクトリは復元時に現在のファイルシステムでの再帰削除として扱われるため、矛盾する親をそのまま復元計画へ載せると、意図しない範囲が削除され得る
  *
  * @note 本判定はベストエフォートの多層防御であって、完全な防御ではない
  *       偽の親の配下が全てCreatedである変種 (新規ファイルだけが追加された正規のディレクトリと同じ形) は、
@@ -331,7 +356,7 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
 
             if (hasChildren) {
                 // 子要素があるアイテム = ディレクトリ
-                // Createdディレクトリはlive側の再帰削除になるため、配下の実レコードが全てCreatedであるという整合性を満たす場合のみ計画へ載せる
+                // Createdディレクトリは現在のファイルシステムでの再帰削除になるため、配下の実レコードが全てCreatedであるという整合性を満たす場合のみ計画へ載せる
                 // 矛盾する場合も配下の収集は必ず継続し、本物の選択パスは従来どおり載せる
                 const bool createdSubtreeIsConsistent =
                         child->changeType() != FileChangeItem::Created
@@ -360,6 +385,46 @@ void FileChangeModel::collectCheckedItemsWithTypes(FileChangeItem *parent, QStri
             collectCheckedItemsWithTypes(child, paths, changeTypes);
         }
     }
+}
+
+/**
+ * @brief チェック済みの項目のうち、復元で現在のシステムから削除されるパスを返す
+ *
+ * 変更種別がcreatedのエントリは、復元元のスナップショットに存在しないパスであり、復元すると現在のシステムから削除される
+ * 復元計画へ載せるときと同じ収集と正規化の規則を使うため、確認ダイアログの表示と実際の削除対象が食い違わない
+ *
+ * @param maxPaths 返すパスの最大件数 (ダイアログの描画負荷を抑えるため、負の値は0件として扱う)
+ * @return count : 削除されるパスの総数、paths : 先頭から最大maxPaths件のパス (QStringList)
+ */
+QVariantMap FileChangeModel::checkedDeletePreview(int maxPaths) const
+{
+    QStringList checkedPaths;
+    QStringList checkedChangeTypes;
+    if (m_rootItem != nullptr) {
+        collectCheckedItemsWithTypes(m_rootItem, checkedPaths, checkedChangeTypes);
+    }
+
+    QStringList deletePaths;
+    QSet<QString> seenPaths;
+    const int entryCount = qMin(checkedPaths.size(), checkedChangeTypes.size());
+    for (int i = 0; i < entryCount; ++i) {
+        const QString normalized = normalizeRestorePlanPath(checkedPaths.at(i));
+        if (!isValidRestorePlanEntry(normalized, checkedChangeTypes.at(i))
+                || seenPaths.contains(normalized)) {
+            continue;
+        }
+        seenPaths.insert(normalized);
+        if (checkedChangeTypes.at(i) == QStringLiteral("created")) {
+            deletePaths.append(normalized);
+        }
+    }
+
+    const int total = static_cast<int>(deletePaths.size());
+    const int limit = qBound(0, maxPaths, total);
+    QVariantMap preview;
+    preview.insert(QStringLiteral("count"), total);
+    preview.insert(QStringLiteral("paths"), QVariant::fromValue(deletePaths.mid(0, limit)));
+    return preview;
 }
 
 /**
@@ -478,6 +543,13 @@ bool FileChangeModel::startRestorePlan(int sourceSnapshotNumber,
         return false;
     }
 
+    // 前回の復元結果を消し、まだ届いていない前回の状態応答も無効にする
+    ++m_restoreResultGeneration;
+    if (!m_restoreResult.isEmpty()) {
+        m_restoreResult.clear();
+        emit restoreResultChanged();
+    }
+
     // 復元計画の状態を初期化する (前回実行の残留状態を消す)
     m_planManifestId.clear();
     m_planPaths = planPaths;
@@ -532,8 +604,8 @@ void FileChangeModel::onPlanBeginFinished(bool ok, const QString &manifestId, co
     if (!m_planActive) {
         if (m_cancelRequested && !manifestId.isEmpty()) {
             m_restorePlanTransport->cancelPlan(manifestId,
-                                               [](bool ok, const QString &cancelError) {
-                                                   Q_UNUSED(ok);
+                                               [](bool cancelOk, const QString &cancelError) {
+                                                   Q_UNUSED(cancelOk);
                                                    Q_UNUSED(cancelError);
                                                });
         }
@@ -550,8 +622,8 @@ void FileChangeModel::onPlanBeginFinished(bool ok, const QString &manifestId, co
                 m_planSignalsSubscribed = false;
             }
             m_restorePlanTransport->cancelPlan(m_planManifestId,
-                                               [](bool ok, const QString &cancelError) {
-                                                   Q_UNUSED(ok);
+                                               [](bool cancelOk, const QString &cancelError) {
+                                                   Q_UNUSED(cancelOk);
                                                    Q_UNUSED(cancelError);
                                                });
         }
@@ -718,8 +790,8 @@ void FileChangeModel::finishRestorePlanWithError(const QString &message)
     if (!manifestId.isEmpty() && !m_planCancelRequested) {
         m_planCancelRequested = true;
         transport->cancelPlan(manifestId,
-                              [](bool ok, const QString &cancelError) {
-                                  Q_UNUSED(ok);
+                              [](bool cancelOk, const QString &cancelError) {
+                                  Q_UNUSED(cancelOk);
                                   Q_UNUSED(cancelError);
                               });
     }
@@ -821,4 +893,18 @@ void FileChangeModel::cancelRestore()
 void FileChangeModel::setRestorePlanTransportForTesting(RestorePlanTransport *transport)
 {
     m_restorePlanTransport = transport ? transport : m_defaultRestorePlanTransport;
+}
+
+/**
+ * @brief テスト専用に変更一覧の取り込み上限を差し替える
+ *
+ * 実際の上限(50万件と256 MiB)は大きすぎてテストで超えられないため、小さい値へ差し替えて省略の動作を確認する
+ *
+ * @param maxEntries 取り込む変更エントリ数の上限
+ * @param maxTextChars 取り込む変更一覧の文字数の上限
+ */
+void FileChangeModel::setChangeLimitsForTesting(int maxEntries, qsizetype maxTextChars)
+{
+    m_maxChangeEntries = maxEntries;
+    m_maxChangeTextChars = maxTextChars;
 }

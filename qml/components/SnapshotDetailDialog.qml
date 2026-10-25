@@ -106,6 +106,7 @@ BorderedDialog {
                         }
                         // Pre/Postペアの場合は両方の番号を併記する
                         Label {
+                            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                             text: {
                                 if (!snapshot) return ""
                                 if (postSnapshot && postSnapshot.number)
@@ -120,6 +121,7 @@ BorderedDialog {
                         }
                         // 種別名をローカライズして表示する
                         Label {
+                            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                             text: {
                                 if (!snapshot) return ""
                                 switch (snapshot.snapshotTypeString) {
@@ -139,10 +141,12 @@ BorderedDialog {
 
                         // Pre/Postペアでは開始日、それ以外は日時として表示する
                         Label {
+                            textFormat: Text.PlainText  // 固定の文言だが、隣の値のラベルと表示形式を揃える
                             text: postSnapshot ? qsTr("Start Date:") : qsTr("Date/Time:")
                             font.bold: true
                         }
                         Label {
+                            textFormat: Text.PlainText  // 数値や日時の表示でも、他のラベルと表示形式を揃える
                             text: snapshot ? Qt.formatDateTime(snapshot.timestamp, "yyyy-MM-dd HH:mm:ss") : ""
                         }
 
@@ -153,6 +157,7 @@ BorderedDialog {
                             visible: postSnapshot !== null && postSnapshot !== undefined
                         }
                         Label {
+                            textFormat: Text.PlainText  // 数値や日時の表示でも、他のラベルと表示形式を揃える
                             text: postSnapshot ? Qt.formatDateTime(postSnapshot.timestamp, "yyyy-MM-dd HH:mm:ss") : ""
                             visible: postSnapshot !== null && postSnapshot !== undefined
                         }
@@ -163,6 +168,7 @@ BorderedDialog {
                         }
                         // 作成ユーザ名 (空の場合はプレースホルダを表示する)
                         Label {
+                            textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                             text: snapshot ? (snapshot.user || qsTr("Unknown")) : ""
                         }
 
@@ -173,6 +179,7 @@ BorderedDialog {
                             visible: snapshot && snapshot.cleanupAlgoString !== ""
                         }
                         Label {
+                            textFormat: Text.PlainText  // 数値や日時の表示でも、他のラベルと表示形式を揃える
                             text: snapshot ? snapshot.cleanupAlgoString : ""
                             visible: snapshot && snapshot.cleanupAlgoString !== ""
                         }
@@ -184,6 +191,7 @@ BorderedDialog {
                             visible: snapshot && snapshot.previousNumber > 0
                         }
                         Label {
+                            textFormat: Text.PlainText  // 数値や日時の表示でも、他のラベルと表示形式を揃える
                             text: snapshot ? "#" + snapshot.previousNumber : ""
                             visible: snapshot && snapshot.previousNumber > 0
                         }
@@ -198,6 +206,7 @@ BorderedDialog {
                     // 説明文 (空の場合はプレースホルダを表示する)
                     Label {
                         anchors.fill: parent
+                        textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                         text: snapshot ? (snapshot.description || qsTr("(No description)")) : ""
                         wrapMode: Text.WordWrap
                     }
@@ -221,6 +230,7 @@ BorderedDialog {
                             model: (snapshot && snapshot.userdata) ? Object.keys(snapshot.userdata) : []
 
                             Label {
+                                textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                                 text: modelData + ":"
                                 font.bold: true
                                 Layout.row: index
@@ -233,6 +243,7 @@ BorderedDialog {
                             model: (snapshot && snapshot.userdata) ? Object.keys(snapshot.userdata) : []
 
                             Label {
+                                textFormat: Text.PlainText  // スナップショット由来の文字列を、タグ等のリッチテキストとして解釈させない
                                 text: (snapshot && snapshot.userdata) ? snapshot.userdata[modelData] : ""
                                 Layout.row: index
                                 Layout.column: 1
@@ -313,6 +324,7 @@ BorderedDialog {
             spacing: 10
 
             Label {
+                textFormat: Text.PlainText  // 埋め込む値を含む文言のため、リッチテキストとして解釈させない
                 text: snapshot ? qsTr("Rollback to snapshot #%1?").arg(snapshot.number) : ""
                 font.bold: true
             }
@@ -347,6 +359,9 @@ BorderedDialog {
         // [Yes]押下時にSnapshotListModel::rollbackSnapshotを呼び出してロールバックを実行する
         onAccepted: {
             if (snapshot && snapshotListModel) {
+                // ロールバックはD-Busを非同期に呼び出すため、呼び出しはすぐに戻る
+                // 認証や実行に時間がかかる間も進行中だと分かるよう、完了までの待機ダイアログを先に開く
+                rollbackBusyDialog.open()
                 snapshotListModel.rollbackSnapshot(snapshot.number)
             }
             root.close()
@@ -357,18 +372,60 @@ BorderedDialog {
     Connections {
         target: snapshotListModel ?? null
 
-        // SnapshotListModel::rollbackCompleted受信時に成功ダイアログを開く
+        // SnapshotListModel::rollbackCompletedを受け取ったときに待機ダイアログを閉じ、成功ダイアログを開く
         function onRollbackCompleted() {
+            rollbackBusyDialog.close()
             if (snapshotListModel) {
                 successDialog.open()
             }
         }
 
-        // SnapshotListModel::rollbackFailed受信時にエラー内容を表示する
+        // SnapshotListModel::rollbackFailedを受け取ったときに待機ダイアログを閉じ、エラー内容を表示する
         function onRollbackFailed(error) {
+            rollbackBusyDialog.close()
             if (snapshotListModel) {
                 errorDialog.errorText = error
                 errorDialog.open()
+            }
+        }
+    }
+
+    // ロールバック実行中の待機ダイアログ
+    // SnapshotListModel::rollbackSnapshotは非同期で、認証や処理に時間がかかるため、完了まで進行中であることを示す
+    // 二重実行を防ぐため操作では閉じられず、rollbackCompletedまたはrollbackFailedの受信時にConnectionsから閉じる
+    BorderedDialog {
+        id: rollbackBusyDialog  // 待機ダイアログの参照名
+
+        title: qsTr("Please wait")                    // ダイアログのタイトル
+        standardButtons: Dialog.NoButton              // 閉じる操作を与えないためボタンを置かない
+        anchors.centerIn: Overlay.overlay             // ウィンドウ全体の中央に表示する
+        // ウィンドウ幅の30%を基準に、400から600の範囲へクランプする
+        width: {
+            if (!ApplicationWindow.window) return 400
+            var calculated = ApplicationWindow.window.width * 0.3
+            return Math.min(Math.max(calculated, 400), 600)
+        }
+        modal: true                                   // 実行中に背後の画面を操作させない
+        closePolicy: Popup.NoAutoClose                // [Esc]キーや外側のクリックで閉じさせない
+
+        // 進行状況の表示領域
+        ColumnLayout {
+            width: parent.width  // ダイアログの幅いっぱいに配置する
+            spacing: 15          // 要素間の間隔
+
+            // 処理が続いていることを示す回転アニメーション
+            BusyIndicator {
+                running: rollbackBusyDialog.visible  // 表示中だけ回して、非表示時の無駄な描画を避ける
+                Layout.alignment: Qt.AlignHCenter    // 水平方向の中央に配置する
+            }
+
+            // 待機中であることを利用者に伝える文言
+            Label {
+                text: qsTr("Rolling back the snapshot, please wait...")  // 待機中の案内文
+                font.pixelSize: 14                                       // 文字の大きさ
+                horizontalAlignment: Text.AlignHCenter                   // 水平方向の中央に揃える
+                wrapMode: Text.WordWrap                                  // 幅に収まるよう折り返す
+                Layout.fillWidth: true                                   // 折り返しの基準となる幅を確保する
             }
         }
     }
@@ -422,6 +479,7 @@ BorderedDialog {
         property string errorText: ""              // 表示するエラーメッセージ
 
         Label {
+            textFormat: Text.PlainText  // C++側のエラー文言を埋め込むため、リッチテキストとして解釈させない
             text: qsTr("Rollback failed: %1").arg(errorDialog.errorText)
             wrapMode: Text.WordWrap
         }

@@ -2,336 +2,250 @@
  * @file tst_restorevalidation.cpp
  * @brief commit時preflightの純粋関数群の単体テスト
  *
- * 対象は状態ビットからchangeTypeへの写像、path正規化、権威あるmapの構築、
- * 凍結済みentryの検証である
- * libsnapperに依存せず、snapper::File::getPreToPostStatus()と同一のビット値を直接与えて検証する
+ * 対象は復元元と比較相手の観測結果による差分の裏付けと、凍結済みentryの検証、復元先の組み立てである
+ * ファイルシステムの代わりに観測結果を返す関数を与え、libsnapperの比較結果に依存しない検証の規則を確認する
  */
 
 #include "restorevalidation.h"
 
+#include <QHash>
 #include <QTest>
 
+#include <sys/stat.h>
+
 using namespace qsnapper::restore;
+
+namespace {
+
+/**
+ * @brief 実在するパスの観測結果を作る
+ * @param fileType S_IFREGなどの種別ビット
+ * @param inode inode番号
+ * @param mtimeSec 更新時刻 (秒)
+ * @return 実在を表す観測結果
+ */
+RestorePathObservation presentObservation(quint32 fileType, quint64 inode, qint64 mtimeSec)
+{
+    RestorePathObservation observation;
+    observation.presence = RestorePathPresence::Present;
+    observation.fileType = fileType;
+    observation.mode = 0644;
+    observation.inode = inode;
+    observation.uid = 0;
+    observation.gid = 0;
+    observation.size = 10;
+    observation.mtimeSec = mtimeSec;
+    observation.ctimeSec = mtimeSec;
+    return observation;
+}
+
+/**
+ * @brief 存在しないパスの観測結果を作る
+ * @return 不在を表す観測結果
+ */
+RestorePathObservation absentObservation()
+{
+    RestorePathObservation observation;
+    observation.presence = RestorePathPresence::Absent;
+    return observation;
+}
+
+/**
+ * @brief 相対パスと観測結果の表から、観測関数を作る
+ * @param tree 相対パスを鍵とする観測結果の表 (表に無いパスは不在とする)
+ * @param calls 呼び出された相対パスの記録先 (省略可)
+ * @return 観測関数
+ */
+RestorePathObserver observerFor(const QHash<QString, RestorePathObservation> &tree,
+                                QStringList *calls = nullptr)
+{
+    return [tree, calls](const QString &relativePath) {
+        if (calls) {
+            calls->append(relativePath);
+        }
+        return tree.value(relativePath, absentObservation());
+    };
+}
+
+/**
+ * @brief 指定entryを凍結した計画を作る
+ * @param registry 計画を保持するregistry
+ * @param paths 凍結するpath列
+ * @param changeTypes pathsと対応する変更種別列
+ * @return 作成した計画のID (失敗時は空文字列)
+ */
+QString frozenPlan(RestoreManifestRegistry &registry,
+                   const QStringList &paths,
+                   const QStringList &changeTypes)
+{
+    ManifestError error = ManifestError::None;
+    const QString id = registry.createStaging(
+        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
+        RestoreMode::YastCompatible, &error);
+    if (id.isEmpty()
+            || !registry.stageEntries(id, QStringLiteral(":1.1"), paths, changeTypes, &error)
+            || !registry.freeze(id, QStringLiteral(":1.1"), &error)) {
+        return {};
+    }
+    return id;
+}
+
+} // namespace
 
 /**
  * @class TestRestoreValidation
  * @brief commit時preflightの純粋関数群を確認するテストスイート
  *
- * 状態ビット -> changeType写像、path正規化、権威あるmap構築、凍結済みentry検証を確認する
+ * 観測結果による差分の裏付け、凍結済みentryの検証、復元先の組み立てを確認する
  */
 class TestRestoreValidation : public QObject
 {
     Q_OBJECT
 
 private slots:
-    /** @brief CREATEDビットが他の全ビットに優先することを確認する */
-    void createdBitWinsOverEverything();
-    /** @brief DELETEDビットがCREATED以外の全ビットに優先することを確認する */
-    void deletedBitBeatsTypeAndBelow();
-    /** @brief TYPEビットがcontentとmetadataに優先することを確認する */
-    void typeBitBeatsContentAndMetadata();
-    /** @brief content/metadataのみおよび空ビットがmodifiedへ写像されることを確認する */
-    void contentAndMetadataOnlyAndEmptyMapToModified();
-    /** @brief パス正規化が末尾スラッシュを取り除くことを確認する */
-    void canonicalizationStripsTrailingSlashes();
-    /** @brief パス正規化が連続する内部スラッシュを畳むことを確認する */
-    void canonicalizationCollapsesInnerSlashRuns();
-    /** @brief パス正規化がrootを維持しドット要素を折り畳まないことを確認する */
-    void canonicalizationKeepsRootAndDoesNotFoldDotComponents();
-    /** @brief 権威名の復号検証が整形済みパスを受理することを確認する */
-    void authoritativeNameAcceptsWellFormedPaths();
-    /** @brief 権威名の復号検証が制御文字をfail-closedで拒否することを確認する */
-    void authoritativeNameRejectsControlCharacters();
-    /** @brief 権威名の復号検証が不正UTF-8を拒否することを確認する */
-    void authoritativeNameRejectsInvalidUtf8();
-    /** @brief 権威名の復号検証が正当なマルチバイトUTF-8をバイト単位で保存することを確認する */
-    void authoritativeNamePreservesValidMultibyteUtf8();
-    /** @brief 権威mapの衝突が検出されることを確認する */
-    void authoritativeCollisionIsDetected();
-    /** @brief 権威mapへの同一キー同一型の再登録が受理されることを確認する */
-    void authoritativeRedundantIdenticalEntryIsAccepted();
-    /** @brief 権威mapと一致する凍結済みentryが検証を通過することを確認する */
-    void frozenEntriesMatchingAuthoritativeMapPass();
-    /** @brief 未知パスと型不一致の計画がrejectされることを確認する */
-    void unknownPathAndMismatchedTypeAreRejected();
+    /** @brief 正規の各変更種別が、実際の差分に一致する場合に通ることを確認する */
+    void legitimateChangeTypesAreBackedByTrees();
+    /** @brief 実際の差分と食い違う変更種別が拒否されることを確認する */
+    void contradictingChangeTypesAreRejected();
+    /** @brief 両方の木で同一のパスはmodifiedとして拒否されることを確認する */
+    void unchangedPathIsNotAcceptedAsModified();
+    /** @brief 存在を確定できない観測結果と未知の変更種別が拒否されることを確認する */
+    void unknownObservationAndChangeTypeAreRejected();
+    /** @brief statの値が観測結果へ写されることを確認する */
+    void observationFromStatCopiesIdentityFields();
+    /** @brief 正規の凍結済み計画が、木の観測で検証を通ることを確認する */
+    void frozenEntriesBackedByTreesPass();
+    /** @brief 改行を含む名前から生まれた偽entryを模した計画が拒否されることを確認する */
+    void forgedEntriesFromPoisonedComparisonAreRejected();
+    /** @brief 復元先と同じ規則で組み立てた相対パスを観測することを確認する */
+    void observationUsesConfigRelativePath();
     /** @brief 凍結済みentryが上限付きチャンクで漏れなく検証されることを確認する */
     void validationReadsFrozenEntriesInBoundedChunks();
     /** @brief root configの復元先が従来どおりであることを確認する */
     void restoreDestinationForRootConfigIsUnchanged();
-    /** @brief 復元先がconfigのSUBVOLUME基準で決まることを確認する */
+    /** @brief 非root configの復元先がSUBVOLUME基準になることを確認する */
     void restoreDestinationIsBasedOnConfigSubvolume();
-    /** @brief 復元先の構築が安全でない名前を拒否することを確認する */
+    /** @brief 安全でない名前と".snapshots"配下の名前が拒否されることを確認する */
     void restoreDestinationRejectsUnsafeNames();
-    /** @brief 正規化後にスナップショットメタデータ名が検出されることを確認する */
+    /** @brief ".snapshots"配下の判定が正規化後の先頭成分で行われることを確認する */
     void snapshotMetadataNameIsDetectedAfterNormalization();
-    /** @brief root復元後のrw復帰セーフティネットが全条件を要求することを確認する */
+    /** @brief rootサブボリュームのrw安全ネットが全条件を要求することを確認する */
     void rootReadWriteSafetyNetRequiresAllConditions();
 };
 
 /**
- * @brief CREATEDビットが他の全ビットに優先することを確認する
+ * @brief 正規の各変更種別が、実際の差分に一致する場合に通ることを確認する
  */
-void TestRestoreValidation::createdBitWinsOverEverything()
+void TestRestoreValidation::legitimateChangeTypesAreBackedByTrees()
 {
-    // CREATED (1) が他の全ビットに優先する
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusCreated),
-             QStringLiteral("created"));
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusCreated
-                                       | RestoreStatusDeleted
-                                       | RestoreStatusType
-                                       | RestoreStatusContent
-                                       | RestoreStatusPermissions),
-             QStringLiteral("created"));
+    const RestorePathObservation file = presentObservation(S_IFREG, 10, 100);
+    const RestorePathObservation changedFile = presentObservation(S_IFREG, 11, 200);
+    const RestorePathObservation directory = presentObservation(S_IFDIR, 12, 100);
+
+    // createdは比較相手だけに存在し、復元で削除される
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("created"), absentObservation(), file));
+    // deletedは復元元だけに存在し、復元で作り直される
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("deleted"), file, absentObservation()));
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, changedFile));
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("typechanged"), file, directory));
 }
 
 /**
- * @brief DELETEDビットがCREATED以外の全ビットに優先することを確認する
+ * @brief 実際の差分と食い違う変更種別が拒否されることを確認する
  */
-void TestRestoreValidation::deletedBitBeatsTypeAndBelow()
+void TestRestoreValidation::contradictingChangeTypesAreRejected()
 {
-    // DELETED (2) はCREATEDが無い場合に優先する
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusDeleted),
-             QStringLiteral("deleted"));
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusDeleted
-                                       | RestoreStatusType
-                                       | RestoreStatusContent),
-             QStringLiteral("deleted"));
+    const RestorePathObservation file = presentObservation(S_IFREG, 10, 100);
+    const RestorePathObservation changedFile = presentObservation(S_IFREG, 11, 200);
+    const RestorePathObservation directory = presentObservation(S_IFDIR, 12, 100);
+
+    // 復元元に存在するパスをcreatedと偽ると、復元元の実データがあるパスを削除できてしまう
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("created"), file, changedFile));
+    // 両方の木に無いパスは、復元で削除する対象にも作り直す対象にもならない
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("created"), absentObservation(), absentObservation()));
+    // 比較相手に存在するパスをdeletedと偽ると、差分に無いパスを上書きできてしまう
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("deleted"), file, changedFile));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("deleted"), absentObservation(), file));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, absentObservation()));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("modified"), absentObservation(), file));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, directory));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("typechanged"), file, changedFile));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("typechanged"), file, absentObservation()));
 }
 
 /**
- * @brief TYPEビットがcontentとmetadataに優先することを確認する
- */
-void TestRestoreValidation::typeBitBeatsContentAndMetadata()
-{
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusType),
-             QStringLiteral("typechanged"));
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusType
-                                       | RestoreStatusContent
-                                       | RestoreStatusOwner
-                                       | RestoreStatusXattrs
-                                       | RestoreStatusAcl),
-             QStringLiteral("typechanged"));
-}
-
-/**
- * @brief content/metadataのみおよび空ビットがmodifiedへ写像されることを確認する
- */
-void TestRestoreValidation::contentAndMetadataOnlyAndEmptyMapToModified()
-{
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusContent),
-             QStringLiteral("modified"));
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusContent
-                                       | RestoreStatusPermissions
-                                       | RestoreStatusOwner
-                                       | RestoreStatusGroup
-                                       | RestoreStatusXattrs
-                                       | RestoreStatusAcl),
-             QStringLiteral("modified"));
-    QCOMPARE(restoreExpectedChangeType(RestoreStatusPermissions),
-             QStringLiteral("modified"));
-    QCOMPARE(restoreExpectedChangeType(0),
-             QStringLiteral("modified"));
-}
-
-/**
- * @brief パス正規化が末尾スラッシュを取り除くことを確認する
- */
-void TestRestoreValidation::canonicalizationStripsTrailingSlashes()
-{
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/etc/example.conf")),
-             QStringLiteral("/etc/example.conf"));
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/etc/example.conf/")),
-             QStringLiteral("/etc/example.conf"));
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/etc/conf.d///")),
-             QStringLiteral("/etc/conf.d"));
-}
-
-/**
- * @brief パス正規化が連続する内部スラッシュを畳むことを確認する
- */
-void TestRestoreValidation::canonicalizationCollapsesInnerSlashRuns()
-{
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("//etc//conf.d")),
-             QStringLiteral("/etc/conf.d"));
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/a///b/c")),
-             QStringLiteral("/a/b/c"));
-}
-
-/**
- * @brief パス正規化がrootを維持しドット要素を折り畳まないことを確認する
- */
-void TestRestoreValidation::canonicalizationKeepsRootAndDoesNotFoldDotComponents()
-{
-    // root "/" はそのまま維持される
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/")),
-             QStringLiteral("/"));
-
-    // QDir::cleanPath()とは異なり '.' / '..' は折り畳まない
-    // (折り畳みは既存の拒否境界を弱めるため意図的に避けている)
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/a/./b")),
-             QStringLiteral("/a/./b"));
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/a/../b")),
-             QStringLiteral("/a/../b"));
-    QCOMPARE(canonicalizeRestorePlanPathKey(QStringLiteral("/a/./b/")),
-             QStringLiteral("/a/./b"));
-}
-
-/**
- * @brief 権威名の復号検証で、通常のパスが受理されることを検証する
+ * @brief 両方の木で同一のパスはmodifiedとして拒否されることを確認する
  *
- * カンマや空白はパスとして正当であり、拒否対象ではない
+ * Btrfsのスナップショットでは、変更されていないファイルはinode番号・時刻を含めて同一に見える
  */
-void TestRestoreValidation::authoritativeNameAcceptsWellFormedPaths()
+void TestRestoreValidation::unchangedPathIsNotAcceptedAsModified()
 {
-    QString decoded;
+    const RestorePathObservation file = presentObservation(S_IFREG, 10, 100);
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, file));
 
-    QVERIFY(decodeAuthoritativeRestoreName("/etc/motd", &decoded));
-    QCOMPARE(decoded, QStringLiteral("/etc/motd"));
+    // 1項目でも異なれば変更として扱う
+    RestorePathObservation chmodded = file;
+    chmodded.mode = 0600;
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, chmodded));
 
-    QVERIFY(decodeAuthoritativeRestoreName("/etc/a, b/c.txt", &decoded));
-    QCOMPARE(decoded, QStringLiteral("/etc/a, b/c.txt"));
-
-    QVERIFY(decodeAuthoritativeRestoreName("/", &decoded));
-    QCOMPARE(decoded, QStringLiteral("/"));
+    RestorePathObservation touched = file;
+    touched.ctimeNsec = 1;
+    QVERIFY(isRestoreEntryBackedByTrees(QStringLiteral("modified"), file, touched));
 }
 
 /**
- * @brief 制御文字を含む権威名がfail-closedで拒否されることを検証する
- *
- * libsnapperのfilelistキャッシュは無エスケープの行指向形式であるため、
- * 改行を含む名前はキャッシュ再読込時に偽エントリとして混入し得る
+ * @brief 存在を確定できない観測結果と未知の変更種別が拒否されることを確認する
  */
-void TestRestoreValidation::authoritativeNameRejectsControlCharacters()
+void TestRestoreValidation::unknownObservationAndChangeTypeAreRejected()
 {
-    // LF: 偽エントリの注入に直結する
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/car\nrier", nullptr));
-    QVERIFY(!decodeAuthoritativeRestoreName("\n+ /etc/shadow", nullptr));
+    RestorePathObservation unknown;
+    unknown.presence = RestorePathPresence::Unknown;
+    const RestorePathObservation file = presentObservation(S_IFREG, 10, 100);
 
-    // CR: 行指向パーサによっては区切りとして扱われる
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/car\rrier", nullptr));
-
-    // 埋め込みNUL: syscall引数の切り詰めを招く
-    const QByteArray withEmbeddedNul("/etc/a\0b", 8);
-    QVERIFY(!decodeAuthoritativeRestoreName(
-        std::string(withEmbeddedNul.constData(),
-                    static_cast<size_t>(withEmbeddedNul.size())), nullptr));
-
-    // DEL (U+007F)
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/a\x7f" "b", nullptr));
-
-    // C1制御文字 (U+0085 NELは、UTF-8でC2 85)
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/a\xc2\x85" "b", nullptr));
-
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/a\tb", nullptr));
-
-    // 拒否時は出力を書き換えない
-    QString untouched = QStringLiteral("sentinel");
-    QVERIFY(!decodeAuthoritativeRestoreName("/etc/a\nb", &untouched));
-    QCOMPARE(untouched, QStringLiteral("sentinel"));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("created"), unknown, file));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("deleted"), file, unknown));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("modified"), unknown, unknown));
+    QVERIFY(!isRestoreEntryBackedByTrees(QStringLiteral("renamed"), file, absentObservation()));
+    QVERIFY(!isRestoreEntryBackedByTrees(QString(), absentObservation(), file));
 }
 
 /**
- * @brief 不正UTF-8の権威名が拒否されることを検証する
- *
- * 復号でU+FFFDへ潰れると、検証した名前とexecutorが使う名前がズレる
+ * @brief statの値が観測結果へ写されることを確認する
  */
-void TestRestoreValidation::authoritativeNameRejectsInvalidUtf8()
+void TestRestoreValidation::observationFromStatCopiesIdentityFields()
 {
-    // 生バイト列を長さ付きで渡すための補助 (strlenでは埋め込みNUL以降を扱えない)
-    const auto rawName = [](const QByteArray &bytes) {
-        return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
-    };
+    struct stat info = {};
+    info.st_mode = S_IFLNK | 0777;
+    info.st_ino = 42;
+    info.st_uid = 1000;
+    info.st_gid = 100;
+    info.st_size = 7;
+    info.st_mtim.tv_sec = 5;
+    info.st_mtim.tv_nsec = 6;
+    info.st_ctim.tv_sec = 7;
+    info.st_ctim.tv_nsec = 8;
 
-    // 単独の0xFFは、UTF-8として不正
-    QVERIFY(!decodeAuthoritativeRestoreName(rawName(QByteArray("\xff", 1)), nullptr));
-    QVERIFY(!decodeAuthoritativeRestoreName(
-        rawName(QByteArray("/etc/\xff\xfe", 7)), nullptr));
-
-    // 継続バイトが単独で現れる場合も不正
-    QVERIFY(!decodeAuthoritativeRestoreName(
-        rawName(QByteArray("/etc/\x80", 6)), nullptr));
-
-    // 過長符号化 (0xC0 0xAF) も不正
-    QVERIFY(!decodeAuthoritativeRestoreName(
-        rawName(QByteArray("/etc/\xc0\xaf", 7)), nullptr));
-
-    // 空名は比較結果のパスとして意味を持たない
-    QVERIFY(!decodeAuthoritativeRestoreName(std::string(), nullptr));
+    const RestorePathObservation observation = restorePathObservationFromStat(info);
+    QCOMPARE(observation.presence, RestorePathPresence::Present);
+    QCOMPARE(observation.fileType, quint32(S_IFLNK));
+    QCOMPARE(observation.mode, quint32(0777));
+    QCOMPARE(observation.inode, quint64(42));
+    QCOMPARE(observation.uid, quint32(1000));
+    QCOMPARE(observation.gid, quint32(100));
+    QCOMPARE(observation.size, qint64(7));
+    QCOMPARE(observation.mtimeSec, qint64(5));
+    QCOMPARE(observation.mtimeNsec, qint64(6));
+    QCOMPARE(observation.ctimeSec, qint64(7));
+    QCOMPARE(observation.ctimeNsec, qint64(8));
 }
 
 /**
- * @brief 正当なマルチバイトUTF-8名がバイト単位で保存されることを検証する
- *
- * 往復検証が正当な非ASCII名を誤って拒否しないことの確認
+ * @brief 正規の凍結済み計画が、木の観測で検証を通ることを確認する
  */
-void TestRestoreValidation::authoritativeNamePreservesValidMultibyteUtf8()
-{
-    QString decoded;
-
-    const QByteArray utf8Name = QStringLiteral("/etc/日本語ファイル.txt").toUtf8();
-    const std::string rawName(utf8Name.constData(),
-                              static_cast<size_t>(utf8Name.size()));
-
-    QVERIFY(decodeAuthoritativeRestoreName(rawName, &decoded));
-    QCOMPARE(decoded, QStringLiteral("/etc/日本語ファイル.txt"));
-    QCOMPARE(decoded.toUtf8(), utf8Name);
-}
-
-/**
- * @brief 権威mapの衝突が検出されることを確認する
- *
- * 同一raw名で異なる期待型、末尾スラッシュ違い、正規化で同一になるキーを確認する
- */
-void TestRestoreValidation::authoritativeCollisionIsDetected()
-{
-    QHash<QString, QString> expectedTypes;
-
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/dir"), RestoreStatusContent));
-
-    // 同一raw名で異なる期待型 -> 衝突
-    QVERIFY(!registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/dir"), RestoreStatusCreated));
-
-    // 末尾スラッシュの違いは同一キーとして衝突判定される
-    QVERIFY(!registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/dir/"), RestoreStatusDeleted));
-
-    // 正規化して初めて同一になるキーも衝突とみなす
-    QHash<QString, QString> second;
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &second, QStringLiteral("/etc/x"), RestoreStatusContent));
-    QVERIFY(!registerAuthoritativeRestoreEntry(
-        &second, QStringLiteral("//etc//x"), RestoreStatusType));
-}
-
-/**
- * @brief 権威mapへの同一キー同一型の再登録が受理されることを確認する
- */
-void TestRestoreValidation::authoritativeRedundantIdenticalEntryIsAccepted()
-{
-    QHash<QString, QString> expectedTypes;
-
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/dir"), RestoreStatusContent));
-    // 同一キー・同一期待型の再登録は許す (既存mapの不変性を壊さない)
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/dir"), RestoreStatusContent));
-    QCOMPARE(expectedTypes.size(), 1);
-}
-
-/**
- * @brief 権威mapと一致する凍結済みentryが検証を通過することを確認する
- */
-void TestRestoreValidation::frozenEntriesMatchingAuthoritativeMapPass()
+void TestRestoreValidation::frozenEntriesBackedByTreesPass()
 {
     RestoreManifestRegistry registry;
-    ManifestError error = ManifestError::None;
-    const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
-        RestoreMode::YastCompatible, &error);
-    QVERIFY(!id.isEmpty());
-    QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
+    const QString id = frozenPlan(registry,
                                   {QStringLiteral("/etc/added.conf"),
                                    QStringLiteral("/etc/removed.conf"),
                                    QStringLiteral("/etc/changed.conf"),
@@ -339,98 +253,121 @@ void TestRestoreValidation::frozenEntriesMatchingAuthoritativeMapPass()
                                   {QStringLiteral("created"),
                                    QStringLiteral("deleted"),
                                    QStringLiteral("modified"),
-                                   QStringLiteral("typechanged")}, &error));
-    QVERIFY(registry.freeze(id, QStringLiteral(":1.1"), &error));
+                                   QStringLiteral("typechanged")});
+    QVERIFY(!id.isEmpty());
 
-    QHash<QString, QString> expectedTypes;
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/added.conf"), RestoreStatusCreated));
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/removed.conf"), RestoreStatusDeleted));
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/changed.conf"), RestoreStatusContent));
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/retyped.conf"), RestoreStatusType));
+    const QHash<QString, RestorePathObservation> source{
+        {QStringLiteral("etc/removed.conf"), presentObservation(S_IFREG, 1, 100)},
+        {QStringLiteral("etc/changed.conf"), presentObservation(S_IFREG, 2, 100)},
+        {QStringLiteral("etc/retyped.conf"), presentObservation(S_IFREG, 3, 100)}
+    };
+    const QHash<QString, RestorePathObservation> counterpart{
+        {QStringLiteral("etc/added.conf"), presentObservation(S_IFREG, 4, 200)},
+        {QStringLiteral("etc/changed.conf"), presentObservation(S_IFREG, 5, 200)},
+        {QStringLiteral("etc/retyped.conf"), presentObservation(S_IFLNK, 6, 200)}
+    };
 
-    QVERIFY(validateFrozenEntriesAgainstAuthoritative(
-        registry, id, QStringLiteral(":1.1"), expectedTypes, &error));
+    // 成功経路がNoneを書き戻したことを確かめられるよう、失敗値を初期値にして未設定を検出する
+    ManifestError error = ManifestError::InvalidArgument;
+    QVERIFY(validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                              QStringLiteral("/"),
+                                              observerFor(source), observerFor(counterpart),
+                                              &error));
+    QCOMPARE(error, ManifestError::None);
 }
 
 /**
- * @brief 未知パスと型不一致の計画がrejectされることを確認する
+ * @brief 改行を含む名前から生まれた偽entryを模した計画が拒否されることを確認する
+ *
+ * 攻撃者が"/tmp/x\n+..... /etc/passwd"のような名前を作ると、libsnapperのfilelistキャッシュからは
+ * "/etc/passwd"のcreatedが読める
+ * 管理者がその比較結果をそのまま復元すると、復元元に存在するパスが削除される
+ * 実際の木では/etc/passwdは両方に同一で存在するため、どの変更種別でも拒否されなければならない
  */
-void TestRestoreValidation::unknownPathAndMismatchedTypeAreRejected()
+void TestRestoreValidation::forgedEntriesFromPoisonedComparisonAreRejected()
+{
+    const QHash<QString, RestorePathObservation> source{
+        {QStringLiteral("etc/passwd"), presentObservation(S_IFREG, 1, 100)}
+    };
+    const QHash<QString, RestorePathObservation> counterpart = source;
+
+    for (const QString &changeType : {QStringLiteral("created"), QStringLiteral("deleted"),
+                                      QStringLiteral("modified"), QStringLiteral("typechanged")}) {
+        RestoreManifestRegistry registry;
+        const QString id = frozenPlan(registry,
+                                      {QStringLiteral("/etc/changed.conf"), QStringLiteral("/etc/passwd")},
+                                      {QStringLiteral("deleted"), changeType});
+        QVERIFY(!id.isEmpty());
+
+        // 1件目は正当なdeletedとして通るようにし、偽の2件目だけで計画全体が拒否されることを確かめる
+        QHash<QString, RestorePathObservation> sourceWithLegit = source;
+        sourceWithLegit.insert(QStringLiteral("etc/changed.conf"), presentObservation(S_IFREG, 2, 100));
+
+        ManifestError error = ManifestError::None;
+        QVERIFY2(!validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                                    QStringLiteral("/"),
+                                                    observerFor(sourceWithLegit),
+                                                    observerFor(counterpart), &error),
+                 qPrintable(changeType));
+        QCOMPARE(error, ManifestError::InvalidArgument);
+    }
+
+    // 比較相手にだけ存在する偽のパスも、deletedとしては受理しない
+    RestoreManifestRegistry registry;
+    const QString id = frozenPlan(registry, {QStringLiteral("/root/.ssh/authorized_keys")},
+                                  {QStringLiteral("deleted")});
+    QVERIFY(!id.isEmpty());
+    const QHash<QString, RestorePathObservation> liveOnly{
+        {QStringLiteral("root/.ssh/authorized_keys"), presentObservation(S_IFREG, 9, 100)}
+    };
+    ManifestError error = ManifestError::None;
+    QVERIFY(!validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                               QStringLiteral("/"),
+                                               observerFor({}), observerFor(liveOnly), &error));
+}
+
+/**
+ * @brief 復元先と同じ規則で組み立てた相対パスを観測することを確認する
+ *
+ * 非root configでも、計画に載る名前はconfig相対名であり、両方の木の根からの相対で観測する
+ * 空成分は畳み、実行段のapplyRestoreEntryと同じパスを検証する
+ */
+void TestRestoreValidation::observationUsesConfigRelativePath()
 {
     RestoreManifestRegistry registry;
-    ManifestError error = ManifestError::None;
-    const QString id = registry.createStaging(
-        QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
-        RestoreMode::YastCompatible, &error);
+    const QString id = frozenPlan(registry, {QStringLiteral("//alice//notes.txt")},
+                                  {QStringLiteral("created")});
     QVERIFY(!id.isEmpty());
-    QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
-                                  {QStringLiteral("/etc/changed.conf")},
-                                  {QStringLiteral("modified")}, &error));
-    QVERIFY(registry.freeze(id, QStringLiteral(":1.1"), &error));
 
-    QHash<QString, QString> expectedTypes;
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &expectedTypes, QStringLiteral("/etc/changed.conf"), RestoreStatusContent));
+    QStringList sourceCalls;
+    QStringList counterpartCalls;
+    const QHash<QString, RestorePathObservation> counterpart{
+        {QStringLiteral("alice/notes.txt"), presentObservation(S_IFREG, 4, 200)}
+    };
+    ManifestError error = ManifestError::None;
+    QVERIFY(validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                              QStringLiteral("/home"),
+                                              observerFor({}, &sourceCalls),
+                                              observerFor(counterpart, &counterpartCalls),
+                                              &error));
+    QCOMPARE(sourceCalls, QStringList{QStringLiteral("alice/notes.txt")});
+    QCOMPARE(counterpartCalls, QStringList{QStringLiteral("alice/notes.txt")});
 
-    // 権威ある比較に存在するパスは通る
-    QVERIFY(validateFrozenEntriesAgainstAuthoritative(
-        registry, id, QStringLiteral(":1.1"), expectedTypes, &error));
-
-    // --- 比較に存在しないパスは1件でも計画全体をrejectする ---
-    {
-        QHash<QString, QString> withoutUnknown = expectedTypes;
-        QVERIFY(registerAuthoritativeRestoreEntry(
-            &withoutUnknown, QStringLiteral("/etc/foreign.conf"),
-            RestoreStatusContent));
-
-        // /etc/foreign.confを宣言した凍結済み計画を用意する
-        RestoreManifestRegistry tamperedRegistry;
-        const QString tamperedId = tamperedRegistry.createStaging(
-            QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
-            RestoreMode::YastCompatible, &error);
-        QVERIFY(!tamperedId.isEmpty());
-        QVERIFY(tamperedRegistry.stageEntries(
-            tamperedId, QStringLiteral(":1.1"),
-            {QStringLiteral("/etc/foreign.conf")},
-            {QStringLiteral("modified")}, &error));
-        QVERIFY(tamperedRegistry.freeze(tamperedId, QStringLiteral(":1.1"), &error));
-
-        QVERIFY(!validateFrozenEntriesAgainstAuthoritative(
-            tamperedRegistry, tamperedId, QStringLiteral(":1.1"),
-            expectedTypes, &error));
-    }
-
-    // --- 期待型の不一致 (modified -> createdの改ざん) もrejectする ---
-    {
-        RestoreManifestRegistry tamperedRegistry;
-        const QString tamperedId = tamperedRegistry.createStaging(
-            QStringLiteral(":1.1"), 1000, QStringLiteral("root"), 100, 101,
-            RestoreMode::YastCompatible, &error);
-        QVERIFY(!tamperedId.isEmpty());
-        QVERIFY(tamperedRegistry.stageEntries(
-            tamperedId, QStringLiteral(":1.1"),
-            {QStringLiteral("/etc/changed.conf")},
-            {QStringLiteral("created")}, &error));
-        QVERIFY(tamperedRegistry.freeze(tamperedId, QStringLiteral(":1.1"), &error));
-
-        QVERIFY(!validateFrozenEntriesAgainstAuthoritative(
-            tamperedRegistry, tamperedId, QStringLiteral(":1.1"),
-            expectedTypes, &error));
-    }
+    // 観測関数が無い場合は検証できないため拒否する
+    QVERIFY(!validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                               QStringLiteral("/home"),
+                                               RestorePathObserver(), observerFor(counterpart),
+                                               &error));
+    QCOMPARE(error, ManifestError::InvalidArgument);
 }
 
 /**
  * @brief 凍結済みentryが上限付きチャンクで漏れなく検証されることを確認する
  *
- * 200件 (> 64件のslice上限) を与え、末尾1件だけのmapでは全体がrejectされることを確認する
+ * 200件 (> 64件のslice上限) を与え、末尾1件だけが差分に裏付けられない場合も全体が拒否されることを確認する
  */
 void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
 {
-    // 200件 (> 64件のslice上限) の凍結済み計画がchunk分割でも検証される
     RestoreManifestRegistry registry;
     ManifestError error = ManifestError::None;
     const QString id = registry.createStaging(
@@ -438,28 +375,32 @@ void TestRestoreValidation::validationReadsFrozenEntriesInBoundedChunks()
         RestoreMode::YastCompatible, &error);
     QVERIFY(!id.isEmpty());
 
-    QHash<QString, QString> expectedTypes;
+    QHash<QString, RestorePathObservation> source;
+    QHash<QString, RestorePathObservation> counterpart;
     for (int index = 0; index < 200; ++index) {
-        const QString path = QStringLiteral("/data/file-%1").arg(index, 4, 10, QLatin1Char('0'));
+        const QString relative = QStringLiteral("data/file-%1").arg(index, 4, 10, QLatin1Char('0'));
         QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
-                                      {path}, {QStringLiteral("modified")}, &error));
-        QVERIFY(registerAuthoritativeRestoreEntry(
-            &expectedTypes, path, RestoreStatusContent));
+                                      {QLatin1Char('/') + relative},
+                                      {QStringLiteral("modified")}, &error));
+        source.insert(relative, presentObservation(S_IFREG, 1000 + index, 100));
+        counterpart.insert(relative, presentObservation(S_IFREG, 5000 + index, 200));
     }
     QVERIFY(registry.freeze(id, QStringLiteral(":1.1"), &error));
 
-    QVERIFY(validateFrozenEntriesAgainstAuthoritative(
-        registry, id, QStringLiteral(":1.1"), expectedTypes, &error));
+    QStringList calls;
+    QVERIFY(validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                              QStringLiteral("/"),
+                                              observerFor(source, &calls),
+                                              observerFor(counterpart), &error));
+    QCOMPARE(calls.size(), 200);
 
-    // 末尾の1件だけを含むmap (199件分が欠落) では全体としてrejectされる
-    // (= 全entryが検証対象であり、末尾chunkの取りこぼしがあっても検出される)
-    const auto slice = registry.entriesSlice(id, QStringLiteral(":1.1"), 199, 1, &error);
-    QVERIFY(slice.has_value() && slice->size() == 1);
-    QHash<QString, QString> shortMap;
-    QVERIFY(registerAuthoritativeRestoreEntry(
-        &shortMap, slice->first().path, RestoreStatusContent));
-    QVERIFY(!validateFrozenEntriesAgainstAuthoritative(
-        registry, id, QStringLiteral(":1.1"), shortMap, &error));
+    // 末尾のentryだけを両方の木で同一にすると、末尾のchunkまで検証されていれば全体が拒否される
+    counterpart.insert(QStringLiteral("data/file-0199"),
+                       source.value(QStringLiteral("data/file-0199")));
+    QVERIFY(!validateFrozenEntriesAgainstTrees(registry, id, QStringLiteral(":1.1"),
+                                               QStringLiteral("/"),
+                                               observerFor(source), observerFor(counterpart),
+                                               &error));
 }
 
 /**

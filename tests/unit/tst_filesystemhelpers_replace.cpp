@@ -486,3 +486,95 @@ void TestFilesystemHelpers::replaceSymlinkAtAppliesMetadataAndDetectsSwap()
     QVERIFY(::readlink(destination.toUtf8().constData(), target, sizeof(target) - 1) > 0);
     QCOMPARE(QByteArray(target), QByteArray("target/path"));
 }
+
+/**
+ * @brief 所有者と時刻の適用を必須にした場合、適用できなければlive側を差し替えず、一時symlinkも残さないことを検証する
+ *
+ * rootで動作する復元では、所有者を保てないsymlinkへ差し替えると別ユーザ所有のlinkが残るため失敗として扱う
+ * 一般ユーザはroot所有へ変更できないため、その失敗の経路を再現できる
+ */
+void TestFilesystemHelpers::replaceSymlinkAtRequiringMetadataLeavesLiveUntouched()
+{
+    if (::geteuid() == 0) {
+        QSKIP("root can always change the link owner");
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString sourceLink = root + QStringLiteral("/source-link");
+    const QString destination = root + QStringLiteral("/destination");
+    QVERIFY(::symlink("target/path", sourceLink.toUtf8().constData()) == 0);
+    QVERIFY(createFile(destination, "live", 0644));
+
+    struct stat sourceStat;
+    QVERIFY(::lstat(sourceLink.toUtf8().constData(), &sourceStat) == 0);
+    sourceStat.st_uid = 0;
+    sourceStat.st_gid = 0;
+
+    QByteArray leafName;
+    const int parentFd = openDestinationParentBeneathRoot(root, destination, &leafName);
+    QVERIFY(parentFd >= 0);
+
+    bool metadataApplied = true;
+    errno = 0;
+    QVERIFY(!replaceSymlinkAt(parentFd, leafName, "target/path", sourceStat, &metadataApplied, true));
+    QVERIFY(errno != 0);
+    QVERIFY(!metadataApplied);
+    ::close(parentFd);
+
+    struct stat liveStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &liveStat) == 0);
+    QVERIFY(S_ISREG(liveStat.st_mode));
+    QVERIFY(hasNoTemporaryLeftovers(root));
+
+    // 必須にしない場合は、従来どおり所有者を保てなくても差し替える
+    const int retryParentFd = openDestinationParentBeneathRoot(root, destination, &leafName);
+    QVERIFY(retryParentFd >= 0);
+    QVERIFY(replaceSymlinkAt(retryParentFd, leafName, "target/path", sourceStat, &metadataApplied, false));
+    QVERIFY(!metadataApplied);
+    ::close(retryParentFd);
+    QVERIFY(::lstat(destination.toUtf8().constData(), &liveStat) == 0);
+    QVERIFY(S_ISLNK(liveStat.st_mode));
+}
+
+/**
+ * @brief SELinuxコンテキストのユーザ部分だけが復元先の値に置き換わることを確認する
+ *
+ * qsnapper_dbus_tはSELinuxユーザを変更できないため、拒否されたコンテキストはユーザだけを合わせて書き直す
+ * アクセス制御に効くタイプとレベルが変わらないこと、末尾のNULの有無が保たれること、
+ * 置き換える意味がない場合と形式が不正な場合に空を返すことを確かめる
+ */
+void TestFilesystemHelpers::selinuxContextUserIsReplacedOnlyInUserPart()
+{
+    const QByteArray snapshotContext("unconfined_u:object_r:shadow_t:s0", 33);
+    QCOMPARE(selinuxContextWithDestinationUser(snapshotContext, QByteArray("system_u:object_r:etc_t:s0")),
+             QByteArray("system_u:object_r:shadow_t:s0"));
+
+    // xattrの値に多い末尾のNULは、スナップショット側の形に合わせて保つ
+    const QByteArray terminated = snapshotContext + QByteArray(1, '\0');
+    const QByteArray destinationTerminated = QByteArray("system_u:object_r:etc_t:s0") + QByteArray(1, '\0');
+    QCOMPARE(selinuxContextWithDestinationUser(terminated, destinationTerminated),
+             QByteArray("system_u:object_r:shadow_t:s0") + QByteArray(1, '\0'));
+    QCOMPARE(selinuxContextWithDestinationUser(snapshotContext, destinationTerminated),
+             QByteArray("system_u:object_r:shadow_t:s0"));
+
+    // MCSのカテゴリに含まれるコロンも、ユーザ以外の部分としてそのまま保つ
+    QCOMPARE(selinuxContextWithDestinationUser(QByteArray("staff_u:object_r:user_home_t:s0-s0:c0.c1023"),
+                                               QByteArray("system_u:object_r:default_t:s0")),
+             QByteArray("system_u:object_r:user_home_t:s0-s0:c0.c1023"));
+
+    // ユーザが同じなら再試行しても結果は変わらないため、空を返す
+    QVERIFY(selinuxContextWithDestinationUser(QByteArray("system_u:object_r:etc_t:s0"),
+                                              QByteArray("system_u:object_r:var_t:s0")).isEmpty());
+
+    // 形式が不正な値は書き込みに使わない
+    QVERIFY(selinuxContextWithDestinationUser(QByteArray("shadow_t"),
+                                              QByteArray("system_u:object_r:etc_t:s0")).isEmpty());
+    QVERIFY(selinuxContextWithDestinationUser(QByteArray(":object_r:shadow_t:s0"),
+                                              QByteArray("system_u:object_r:etc_t:s0")).isEmpty());
+    QVERIFY(selinuxContextWithDestinationUser(snapshotContext, QByteArray("system_u")).isEmpty());
+    QVERIFY(selinuxContextWithDestinationUser(QByteArray("unconfined_u:object_r:\0shadow_t:s0", 34),
+                                              QByteArray("system_u:object_r:etc_t:s0")).isEmpty());
+    QVERIFY(selinuxContextWithDestinationUser(QByteArray(), QByteArray("system_u:object_r:etc_t:s0")).isEmpty());
+}

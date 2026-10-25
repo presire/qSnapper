@@ -11,6 +11,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QList>
 #include <QMap>
 #include <QVariant>
 #include <QDBusConnection>
@@ -156,6 +157,24 @@ namespace qsnapper::dbusservice {
     inline constexpr char SNAPSHOT_LIST_OUTDATED_ERROR_NAME[] = "com.presire.qsnapper.Error.SnapshotListOutdated";   // エラー名
     inline constexpr char SNAPSHOT_LIST_OUTDATED_ERROR_TEXT[] = "The snapshot list is out of date";                 // エラー本文
 
+    /** @class PendingDirectoryTimes
+     *  @brief 全エントリの適用後にまとめて設定するディレクトリの時刻
+     *
+     * 子エントリを後から作成・削除すると親ディレクトリのmtimeが更新されるため、
+     * ディレクトリを適用した時点では時刻を確定できない
+     * 設定時に別のディレクトリへ差し替えられていないか確認できるよう、適用時のst_devとst_inoも保持する
+     */
+    struct PendingDirectoryTimes {
+        QString rootPath;                                           // 名前解決の基準 (configのSUBVOLUME)
+        QString relativePath;                                       // rootPathからの相対パス
+        quint64 device = 0;                                         // 適用時のst_dev
+        quint64 inode = 0;                                          // 適用時のst_ino
+        qint64 accessSec = 0;                                       // 復元元のatime (秒)
+        qint64 accessNsec = 0;                                      // 復元元のatime (ナノ秒)
+        qint64 modifySec = 0;                                       // 復元元のmtime (秒)
+        qint64 modifyNsec = 0;                                      // 復元元のmtime (ナノ秒)
+    };
+
     /** @class RestoreExecution
      *  @brief 非同期復元計画がchunk間で必要とする固定実行コンテキスト
      */
@@ -174,8 +193,8 @@ namespace qsnapper::dbusservice {
         // 復元後にrootサブボリュームをrwへ戻す安全ネットの実行条件 (commit時に記録する)
         qsnapper::restore::RootReadWriteSafetyNetState rootReadWriteState; // 安全ネット条件
         bool useReflink = false;                                    // reflink複写を使うか
-        bool removeOnTypechanged = false;                           // 種別変化時に削除して作り直すか
         bool mounted = false;                                       // スナップショットをマウント済みか
+        QList<PendingDirectoryTimes> pendingDirectoryTimes;         // 終了時に設定するディレクトリの時刻
     };
 
     /** @class CallReply

@@ -16,7 +16,7 @@
 #
 # | 層 | 実装 |
 # |---|---|
-# | 状態ビット -> changeType写像 / path正規化 / 権威あるmap構築 | qsnapper::restore::restorevalidation |
+# | 復元元と比較相手の木を観測した結果による差分の裏付け | qsnapper::restore::restorevalidation |
 # | 凍結済み計画の保持とbounded slice読み出し | RestoreManifestRegistry |
 # | created削除前の復元元存在確認 | qsnapper::security::isConfirmedAbsentAt() |
 # | 実際の削除 | qsnapper::security::safeRemoveAllBeneathRoot() |

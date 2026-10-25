@@ -334,6 +334,72 @@ void TestFilesystemHelpers::isConfirmedAbsentAtRefusesIntermediateSymlinks()
     QVERIFY(::close(dirFd) == 0);
 }
 
+/**
+ * @brief 木に含まれるかを、libsnapperの比較と同じ意味で判定することを検証する
+ *
+ * 復元計画の検証は、この結果で各entryが実際の差分に裏付けられているかを判定する
+ * 中間symlinkの先や通常ファイルの下を「存在する」と判定すると、比較に現れないパスの削除や上書きを許してしまう
+ * 逆に入出力エラーを「不在」と判定すると、createdの偽装が通ってしまうため、Unknownとして区別する
+ */
+void TestFilesystemHelpers::observePathNoFollowAtClassifiesPresenceLikeComparison()
+{
+    QTemporaryDir treeDir;
+    QVERIFY(treeDir.isValid());
+
+    QVERIFY(QDir().mkpath(treeDir.path() + QStringLiteral("/etc/real-dir")));
+    {
+        QFile file(treeDir.path() + QStringLiteral("/etc/real-dir/file"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("data");
+    }
+    {
+        QFile file(treeDir.path() + QStringLiteral("/etc/plain"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("data");
+    }
+    const QString linkPath = treeDir.path() + QStringLiteral("/etc/link-to-dir");
+    QVERIFY(::symlink("real-dir", linkPath.toUtf8().constData()) == 0);
+
+    const int dirFd = ::open(treeDir.path().toUtf8().constData(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(dirFd >= 0);
+
+    struct stat info = {};
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/real-dir/file"), &info),
+             PathPresenceAt::Present);
+    QVERIFY(S_ISREG(info.st_mode));
+
+    // leafのsymlinkは辿らず、symlinkそのものとして報告する
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/link-to-dir"), &info),
+             PathPresenceAt::Present);
+    QVERIFY(S_ISLNK(info.st_mode));
+
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/missing"), &info),
+             PathPresenceAt::Absent);
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("missing/child"), &info),
+             PathPresenceAt::Absent);
+
+    // 中間のsymlinkと通常ファイルの下は、比較が辿らないため木に含まれない
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/link-to-dir/file"), &info),
+             PathPresenceAt::Absent);
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/plain/child"), &info),
+             PathPresenceAt::Absent);
+
+    // 相対パスとして不正な入力と無効なfdは、存在を確定できない
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("../escape"), &info),
+             PathPresenceAt::Unknown);
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("/etc/plain"), &info),
+             PathPresenceAt::Unknown);
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/car\nrier"), &info),
+             PathPresenceAt::Unknown);
+    QCOMPARE(observePathNoFollowAt(-1, QStringLiteral("etc/plain"), &info),
+             PathPresenceAt::Unknown);
+    QCOMPARE(observePathNoFollowAt(dirFd, QStringLiteral("etc/plain"), nullptr),
+             PathPresenceAt::Unknown);
+
+    QVERIFY(::close(dirFd) == 0);
+}
+
 // ============================================================================
 // dirfd相対ソース解決の中間成分in-rootハードニング (RESOLVE_IN_ROOT)
 // ============================================================================
@@ -792,4 +858,34 @@ void TestFilesystemHelpers::inRootFallbackRejectsSymlinkLoop()
     QCOMPARE(errno, ELOOP);
 
     QVERIFY(::close(rootFd) == 0);
+}
+
+/**
+ * @brief 途中にmountポイントがあるパスを、不在ではなく判定不能として扱うことを検証する
+ *
+ * 不在とすると、mountの先にある実在のファイルを対象にした偽の [deleted] エントリが検証を通ってしまう
+ * mountポイントそのもの (末尾の成分) は存在として扱う
+ */
+void TestFilesystemHelpers::observePathNoFollowAtRejectsMountBoundaries()
+{
+    struct stat rootInfo;
+    struct stat procInfo;
+    QCOMPARE(::stat("/", &rootInfo), 0);
+    if (::stat("/proc/version", &procInfo) != 0 || procInfo.st_dev == rootInfo.st_dev) {
+        QSKIP("/proc is not a separate mount in this environment");
+    }
+
+    const int rootFd = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(rootFd >= 0);
+
+    struct stat observed;
+    errno = 0;
+    const PathPresenceAt beyondMount = observePathNoFollowAt(rootFd, QStringLiteral("proc/version"), &observed);
+    const int beyondError = errno;
+    const PathPresenceAt mountPoint = observePathNoFollowAt(rootFd, QStringLiteral("proc"), &observed);
+    ::close(rootFd);
+
+    QCOMPARE(beyondMount, PathPresenceAt::Unknown);
+    QCOMPARE(beyondError, EXDEV);
+    QCOMPARE(mountPoint, PathPresenceAt::Present);
 }

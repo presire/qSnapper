@@ -43,6 +43,11 @@ namespace qsnapper::restore {
  * m_cursor : 次に処理する0始まりの位置
  * m_lastActivityMs : TTL判定の起点となる最終活動時刻 (ミリ秒)
  * m_lastError : 人間向けの失敗理由
+ * m_deletedCount : live側から削除したエントリ数
+ * m_skippedCount : スキップしたエントリ数
+ * m_skippedPaths : スキップしたエントリのパス (上限まで)
+ * m_failedIndex : 失敗したエントリの位置 (無しは-1)
+ * m_failedPath : 失敗したエントリのパス
  */
 class RestoreManifest
 {
@@ -93,12 +98,39 @@ public:
     bool advanceCursor(int count, ManifestError *err);
 
     /**
+     * @brief Running計画のcursorを進め、同じchunkで削除・スキップした件数を記録する
+     *
+     * cursorと内訳を同時に更新し、途中で失敗した場合も両者が食い違わないようにする
+     *
+     * @param count 進める正のエントリ数 (スキップを含む)
+     * @param tally countに含まれるエントリの内訳 (削除数とスキップ数の合計はcount以下)
+     * @param err 結果エラーの格納先 (省略可)
+     * @return 更新成功時true
+     */
+    bool advanceCursor(int count, const RestoreChunkTally &tally, ManifestError *err);
+
+    /**
      * @brief 非終端計画をFailed状態へ遷移する
      * @param reason 人間向けの失敗理由
      * @param err 結果エラーの格納先 (省略可)
      * @return 遷移成功時true
      */
     bool markFailed(const QString &reason, ManifestError *err);
+
+    /**
+     * @brief 非終端計画を、失敗したエントリの位置を記録してFailed状態へ遷移する
+     *
+     * 復元はロールバックしないため、どこまで適用されたかを利用者が確認できるよう位置とパスを残す
+     *
+     * @param reason 人間向けの失敗理由
+     * @param failedIndex 失敗したエントリの0始まりの位置
+     * @param failedPath 失敗したエントリのパス
+     * @param err 結果エラーの格納先 (省略可)
+     * @return 遷移成功時true
+     * @note 範囲外の位置は拒否し、計画の状態を変えない
+     */
+    bool markFailedAt(const QString &reason, int failedIndex, const QString &failedPath,
+                      ManifestError *err);
 
     /**
      * @brief 非終端計画をCancelled状態へ遷移する
@@ -238,6 +270,11 @@ private:
     int m_cursor = 0;                                            // 次に処理する0始まりの位置
     qint64 m_lastActivityMs;                                     // TTL判定の起点となる最終活動時刻
     QString m_lastError;                                         // 人間向けの失敗理由
+    int m_deletedCount = 0;                                      // live側から削除したエントリ数
+    int m_skippedCount = 0;                                      // スキップしたエントリ数
+    QStringList m_skippedPaths;                                  // スキップしたエントリのパス (上限まで)
+    int m_failedIndex = -1;                                      // 失敗したエントリの位置 (無しは-1)
+    QString m_failedPath;                                        // 失敗したエントリのパス
 
     Q_DISABLE_COPY(RestoreManifest)
 };

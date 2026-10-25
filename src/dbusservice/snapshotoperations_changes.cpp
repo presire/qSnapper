@@ -133,6 +133,12 @@ QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to get file changes: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
+        return QString();
+    }
 }
 
 /**
@@ -232,6 +238,12 @@ QString SnapshotOperations::getFileChangesBetweenAuthorized(
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to get file changes between snapshots";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        return QString();
+    }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to get file changes between snapshots: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
         return QString();
     }
 }

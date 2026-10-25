@@ -10,6 +10,7 @@
 #include <QUuid>
 #include <algorithm>
 #include <utility>
+#include <vector>
 #include "restoremanifest.h"
 
 namespace qsnapper::restore {
@@ -81,13 +82,36 @@ bool RestoreManifest::markRunning(ManifestError *err)
 
 bool RestoreManifest::advanceCursor(int count, ManifestError *err)
 {
+    return advanceCursor(count, RestoreChunkTally{}, err);
+}
+
+bool RestoreManifest::advanceCursor(int count, const RestoreChunkTally &tally, ManifestError *err)
+{
     if (m_state != ManifestState::Running) {
         setError(err, ManifestError::WrongState);
         return false;
     }
+    // cursorを終端より先へ進めると、記録する失敗位置と件数の対応が崩れるため、範囲外の件数を拒否する
     if (count <= 0 || count > totalEntries() - m_cursor) {
         setError(err, ManifestError::InvalidArgument);
         return false;
+    }
+
+    // 削除とスキップは同じエントリで同時には起きないため、合計が進める件数を超える内訳は不正である
+    const qsizetype skipped = tally.skippedPaths.size();
+    if (tally.deletedCount < 0 || tally.deletedCount + skipped > count) {
+        setError(err, ManifestError::InvalidArgument);
+        return false;
+    }
+
+    m_deletedCount += tally.deletedCount;
+    m_skippedCount += static_cast<int>(skipped);
+    // スキップしたパスの一覧は状態通知で返すため、chunk内で件数が多くても記録は上限までにして応答を肥大させない
+    for (const QString &path : tally.skippedPaths) {
+        if (m_skippedPaths.size() >= ManifestStatus::kMaxRecordedSkippedPaths) {
+            break;
+        }
+        m_skippedPaths.append(path);
     }
 
     m_cursor += count;
@@ -111,6 +135,23 @@ bool RestoreManifest::markFailed(const QString &reason, ManifestError *err)
     m_lastError = reason;
     touch(QDateTime::currentMSecsSinceEpoch());
     setError(err, ManifestError::None);
+    return true;
+}
+
+bool RestoreManifest::markFailedAt(const QString &reason, int failedIndex,
+                                   const QString &failedPath, ManifestError *err)
+{
+    // 範囲外の位置を記録すると、利用者が存在しないエントリを失敗位置として確認することになるため拒否する
+    if (failedIndex < 0 || failedIndex >= totalEntries()) {
+        setError(err, ManifestError::InvalidArgument);
+        return false;
+    }
+    if (!markFailed(reason, err)) {
+        return false;
+    }
+
+    m_failedIndex = failedIndex;
+    m_failedPath = failedPath;
     return true;
 }
 
@@ -229,6 +270,11 @@ ManifestStatus RestoreManifest::status() const
     result.snapshotNumber = m_snapshotNumber;
     result.counterpartSnapshotNumber = m_counterpartSnapshotNumber;
     result.lastError = m_lastError;
+    result.deletedCount = m_deletedCount;
+    result.skippedCount = m_skippedCount;
+    result.skippedPaths = m_skippedPaths;
+    result.failedIndex = m_failedIndex;
+    result.failedPath = m_failedPath;
     return result;
 }
 
@@ -305,6 +351,7 @@ QString RestoreManifestRegistry::createStaging(const QString &owner,
         owner, configName, snapshotNumber, counterpartSnapshotNumber, mode,
         id, nowMs, kDefaultTtlMs);
     record.ownerUid = ownerUid;
+    record.creationSequence = m_nextCreationSequence++;
     m_manifests.emplace(id, std::move(record));
     setError(err, ManifestError::None);
     return id;
@@ -363,7 +410,7 @@ bool RestoreManifestRegistry::stageEntries(const QString &id,
     }
 
     // グローバル予算
-    // stagingは認可を要さないため、マニフェスト単位の上限だけでは攻撃者が複数のD-Bus接続 (unique nameごとに別owner) を開いて上限を掛け算できる
+    // stagingは復元の実行の認可を要さないため、マニフェスト単位の上限だけでは攻撃者が複数のD-Bus接続 (unique nameごとに別owner) を開いて上限を掛け算できる
     // プロセス全体の保持量をここで閉じる
     // 変更を加える前に判定し、拒否時はマニフェストを一切変化させない
     if (globalEntries() + paths.size() > m_maxEntriesGlobal) {
@@ -423,6 +470,18 @@ bool RestoreManifestRegistry::advance(const QString &id, const QString &owner,
     return true;
 }
 
+bool RestoreManifestRegistry::advance(const QString &id, const QString &owner,
+                                      int count, const RestoreChunkTally &tally,
+                                      ManifestError *err)
+{
+    RestoreManifest *manifest = findOwned(id, owner, err);
+    if (!manifest || !manifest->advanceCursor(count, tally, err)) {
+        return false;
+    }
+    manifest->touch(m_clock());
+    return true;
+}
+
 bool RestoreManifestRegistry::keepAlive(const QString &id, const QString &owner,
                                         ManifestError *err)
 {
@@ -441,6 +500,21 @@ bool RestoreManifestRegistry::markFailed(const QString &id,
 {
     RestoreManifest *manifest = findOwned(id, owner, err);
     if (!manifest || !manifest->markFailed(reason, err)) {
+        return false;
+    }
+    manifest->touch(m_clock());
+    return true;
+}
+
+bool RestoreManifestRegistry::markFailedAt(const QString &id,
+                                           const QString &owner,
+                                           const QString &reason,
+                                           int failedIndex,
+                                           const QString &failedPath,
+                                           ManifestError *err)
+{
+    RestoreManifest *manifest = findOwned(id, owner, err);
+    if (!manifest || !manifest->markFailedAt(reason, failedIndex, failedPath, err)) {
         return false;
     }
     manifest->touch(m_clock());
@@ -579,6 +653,94 @@ qint64 RestoreManifestRegistry::globalEntries() const
         total += item.second.manifest->totalEntries();
     }
     return total;
+}
+
+bool RestoreManifestRegistry::hasActivePlanForConfig(const QString &configName) const
+{
+    const qint64 nowMs = m_clock();
+    for (const auto &item : m_manifests) {
+        const RestoreManifest &manifest = *item.second.manifest;
+        // 他のconfigの計画とTTLを過ぎた計画は、config操作を妨げる理由にならない
+        if (manifest.configName() != configName || manifest.isExpired(nowMs)) {
+            continue;
+        }
+        if (manifest.state() == ManifestState::Frozen
+                || manifest.state() == ManifestState::Running) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RestoreManifestRegistry::isSnapshotReferencedByActivePlan(const QString &configName,
+                                                               int snapshotNumber) const
+{
+    const qint64 nowMs = m_clock();
+    for (const auto &item : m_manifests) {
+        const RestoreManifest &manifest = *item.second.manifest;
+        // 他のconfigの計画とTTLを過ぎた計画は、参照を保護する対象にしない
+        if (manifest.configName() != configName || manifest.isExpired(nowMs)) {
+            continue;
+        }
+        // Stagingは認可待ちで実行に進まないため保護の対象にせず、終端の計画も参照しない
+        if (manifest.state() != ManifestState::Frozen && manifest.state() != ManifestState::Running) {
+            continue;
+        }
+
+        // 比較相手の0はlive filesystemを表し、スナップショットではないため保護の対象外とする
+        if (manifest.snapshotNumber() == snapshotNumber
+                || (snapshotNumber != 0 && manifest.counterpartSnapshotNumber() == snapshotNumber)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QStringList RestoreManifestRegistry::stagingIdsForUidOldestFirst(uint ownerUid,
+                                                                 const QString &excludeId) const
+{
+    std::vector<std::pair<quint64, QString>> candidates;
+    for (const auto &item : m_manifests) {
+        // 他のUIDの計画、破棄対象の計画自身、Staging以外の計画は、このUIDの枠を空ける対象にならない
+        if (item.second.ownerUid != ownerUid || item.first == excludeId
+                || item.second.manifest->state() != ManifestState::Staging) {
+            continue;
+        }
+        candidates.emplace_back(item.second.creationSequence, item.first);
+    }
+
+    // 作成時刻はミリ秒単位で同じ値になり得るため、作成順に振った通し番号で並べる
+    std::sort(candidates.begin(), candidates.end());
+
+    QStringList ids;
+    ids.reserve(static_cast<qsizetype>(candidates.size()));
+    for (const auto &candidate : candidates) {
+        ids.append(candidate.second);
+    }
+    return ids;
+}
+
+QStringList RestoreManifestRegistry::stagingIdsForConfig(const QString &configName,
+                                                         int snapshotNumber) const
+{
+    const qint64 nowMs = m_clock();
+    QStringList ids;
+    for (const auto &item : m_manifests) {
+        const RestoreManifest &manifest = *item.second.manifest;
+        // 他のconfigの計画、TTLを過ぎた計画、Staging以外の計画は、確定前に破棄する対象にならない
+        if (manifest.configName() != configName || manifest.isExpired(nowMs)
+                || manifest.state() != ManifestState::Staging) {
+            continue;
+        }
+
+        // 比較相手の0はlive filesystemを表すため、番号での絞り込みでは復元元だけを比べる
+        if (snapshotNumber >= 0 && manifest.snapshotNumber() != snapshotNumber
+                && (snapshotNumber == 0 || manifest.counterpartSnapshotNumber() != snapshotNumber)) {
+            continue;
+        }
+        ids.append(item.first);
+    }
+    return ids;
 }
 
 RestoreManifest *RestoreManifestRegistry::findOwned(const QString &id,

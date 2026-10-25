@@ -1,3 +1,18 @@
+/**
+ * @file filesystemhelpers.h
+ * @brief symlinkを辿らない経路でファイルシステムを読み書きするヘルパー
+ *
+ * 復元先 (live filesystem) の絶対パスと、pin済みスナップショットのdirfdに対して、
+ * メタデータの取得、ディレクトリの作成、ファイルの差し替え、削除を行う
+ * 呼び出し元はsnapshotoperations系の復元・差分処理と単体テストである
+ *
+ * 入力 : rootPath (復元先の基点) または基点dirfd、およびdirfdからの相対パス
+ * 出力 : stat、file descriptor、操作の成否 (失敗時はerrno)
+ * 依存 : openat2とstatx (カーネル5.6未満はfdスタックによる同等の代替経路を使う)、Qt Core
+ *
+ * 検証したパスを文字列のまま使い続けず、dirfdを基点に操作するのは、
+ * 検証から使用までの間に親ディレクトリを差し替えられるTOCTOUを避けるため
+ */
 #ifndef QSNAPPER_FILESYSTEMHELPERS_H
 #define QSNAPPER_FILESYSTEMHELPERS_H
 
@@ -94,6 +109,40 @@ namespace qsnapper::security {
      * @return 不在を確定できた場合: true、存在するか確認できなかった場合: false
      */
     bool isConfirmedAbsentAt(int dirFd, const QString &relativePath);
+
+    /**
+     * @brief observePathNoFollowAt()の観測結果
+     *
+     * パスが無い場合と、観測できなかった場合を呼び出し側が区別できるよう3値にしている
+     * 復元計画の検証ではAbsentだけを「復元元に無い」と断定してよい
+     */
+    enum class PathPresenceAt {
+        Present,  // パスが実在し、statを出力済み
+        Absent,   // パスがdirfdを根とする木に含まれない
+        Unknown   // 入出力エラーやmount境界により存在を確定できなかった
+    };
+
+    /**
+     * @brief 指定dirfdを根とする木に、symlinkを辿らずにパスが含まれるかを観測する
+     *
+     * 復元計画の検証で、復元元と比較相手の木にパスが含まれるかを、libsnapperの比較と同じ意味で判定するために使う
+     * libsnapperの比較はsymlinkを辿らないため、次の場合はAbsentとする
+     *   - 成分のどれかがENOENT
+     *   - 中間成分が非ディレクトリ (symlinkを含む)
+     * 中間成分がマウントポイントや別のサブボリューム (st_devが根と異なる、またはmountのroot) の場合は、EXDEVでUnknownとする
+     * 境界の下を「存在しない」と扱うと、境界の先に実在するファイルが偽のdeletedとして検証を通り、
+     * 復元が別のファイルシステムへ書き込んでしまうため
+     * leafはAT_SYMLINK_NOFOLLOWでstatし、leafがsymlinkならsymlinkとして報告する
+     *
+     * 中間成分は、fstatat()で確認したinodeとopenat(O_NOFOLLOW)で開いたinodeを照合しながら辿る
+     * 確認の後に書き込み可能な親の下で差し替えられた場合はESTALEでUnknownとする
+     *
+     * @param dirFd 根とするディレクトリfd (O_DIRECTORYで開いたfd)
+     * @param relativePath dirFdからの相対パス (絶対パス・"." / ".."成分・制御文字は不可)
+     * @param out Presentの場合にleafのstatを書き込む先 (Present以外では変更しない)
+     * @return 観測結果の種類 (Unknownの場合はerrnoに理由が入る)
+     */
+    PathPresenceAt observePathNoFollowAt(int dirFd, const QString &relativePath, struct stat *out);
 
     /**
      * @brief 指定dirfd相対で通常ファイルを安全に読み取りオープンする
@@ -224,8 +273,10 @@ namespace qsnapper::security {
      *
      * 既存の成分はO_NOFOLLOWで辿るだけで、所有者やmodeを変更しない
      * 欠けている成分は0700・作成者所有で作成し、snapshot側の同じ相対パスにディレクトリがあれば、その所有者・mode・ACL・xattrを適用する
-     * 親ディレクトリが他ユーザーに差し替えられ得る場合、metadataは適用せず、他ユーザーに書き込みを与えない0711で作成する
+     * 親ディレクトリが他ユーザーに差し替えられ得る場合、metadataは適用せず、snapshot側が検索 (x) を許していた分だけをgroupとotherに与える (最大0711)
+     * snapshot側が0700で隠していた子孫を、復元によって他ユーザーへ見せないため
      * snapshot側に無い場合 (存在しない・ディレクトリ以外) は、0700・作成者所有のままにする
+     * 既存の成分が別のファイルシステム (mount境界) にある場合は、rootPathの外へ書き込まないようEXDEVで失敗する
      * snapshot側の状態を判定できない場合は、その成分を作成せずに失敗する
      *
      * @param rootPath 基点ルートディレクトリ (snapshot dirfdと同じ相対パスで対応付く)
@@ -304,6 +355,8 @@ namespace qsnapper::security {
      * mount境界 (別mountのroot、または親と異なるst_dev、btrfsのネストしたsubvolumeを含む) を検出した時点で降下を止め
      * errno=EXDEVで失敗する
      * 境界の内側は削除しない
+     * 降下の深さには、ディレクトリのfdとメモリを使い切らないよう上限 (最大256段、RLIMIT_NOFILEの半分以下) を設けている
+     * 超えた場合はerrno=ELOOPで失敗するが、それまでに削除したエントリは戻らないため、呼び出し側は部分削除として扱うこと
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 削除対象の絶対パス (rootPath配下であること)
@@ -391,6 +444,7 @@ namespace qsnapper::security {
      * 3. system.posix_acl_access (ディレクトリはsystem.posix_acl_defaultも) :
      *    復元元にあれば設定し、無ければ復元先から削除する (親のdefault ACLから継承したentryを残さない)
      * 4. その他のxattr (security.selinux、user.*など) : best-effortでコピーし、失敗件数のみを返す
+     *    security.selinuxがSELinuxユーザの違いで拒否された場合は、ユーザ部分だけを復元先の値にして再試行する
      * 5. security.capability (通常ファイルのみ) : 所有者とmodeの変更後に設定する
      *
      * @param sourceFd 復元元のfd
@@ -399,6 +453,22 @@ namespace qsnapper::security {
      * @return 適用結果
      */
     RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory);
+
+    /**
+     * @brief スナップショットのSELinuxコンテキストのユーザ部分だけを、復元先の現在のユーザに置き換える
+     *
+     * SELinuxの制約により、qsnapper_dbus_tはSELinuxユーザの異なるコンテキストを書き込めない
+     * ユーザ部分を変えるにはcan_change_object_identity権限が必要だが、qsnapper_dbus_tのポリシーはこれを持たないため
+     * 例えばunconfined_uのファイルを戻すとき、ユーザ部分だけを復元先の現在の値にすれば、ロール・タイプ・レベルはスナップショットのまま書き込める
+     * タイプを保てば、/etc/shadowのshadow_tのようにアクセス制御に効く部分は失われない
+     *
+     * @param snapshotContext スナップショット側のsecurity.selinuxの値 (末尾のNULを含んでもよい)
+     * @param destinationContext 復元先の現在のsecurity.selinuxの値 (末尾のNULを含んでもよい)
+     * @return 置き換えたコンテキスト (snapshotContextが末尾にNULを持つ場合は同じく付ける)
+     *         形式が不正な場合と、ユーザが既に同じで置き換える意味がない場合は空
+     */
+    QByteArray selinuxContextWithDestinationUser(const QByteArray &snapshotContext,
+                                                 const QByteArray &destinationContext);
 
     /**
      * @brief 親dirfdを保持したまま、通常ファイルを一時名へ書き出して差し替える
@@ -424,6 +494,8 @@ namespace qsnapper::security {
      *
      * 作成した一時symlinkをO_PATH | O_NOFOLLOWで開き、自分が作成したもの (symlink、所有者がeuid、targetが一致) であることを確認してから、
      * 所有者と時刻をAT_EMPTY_PATHでfd経由に設定する
+     * mustPreserveMetadataがtrueで所有者か時刻を適用できない場合は、root所有のsymlinkを残すとfs.protected_symlinksの判定が変わるため、
+     * renameせずに失敗する
      * renameat()の前後の検証と失敗時の後始末はreplaceRegularFileAtと同じ
      *
      * @param destinationParentFd openDestinationParentBeneathRootで開いた親dirfd
@@ -431,11 +503,13 @@ namespace qsnapper::security {
      * @param linkTarget 作成するsymlinkのtarget
      * @param sourceStat 復元元symlinkのstat (所有者と時刻に使う)
      * @param metadataApplied 所有者と時刻を両方適用できたかの返却先 (省略可)
+     * @param mustPreserveMetadata 所有者と時刻を適用できない場合に、renameせず一時symlinkを片付けて失敗させる場合true
      * @return 差し替えに成功した場合true (失敗時はerrno設定)
+     * @note 一時symlinkの作成後に失敗した場合は、作成直後に記録したinodeと一致するときだけ一時名を削除する
      */
     bool replaceSymlinkAt(int destinationParentFd, const QByteArray &leafName,
                           const QByteArray &linkTarget, const struct stat &sourceStat,
-                          bool *metadataApplied = nullptr);
+                          bool *metadataApplied = nullptr, bool mustPreserveMetadata = false);
 
     /**
      * @brief スナップショット一覧の変化を検出するための指紋を計算する

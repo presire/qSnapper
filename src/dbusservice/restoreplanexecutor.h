@@ -38,8 +38,8 @@ namespace qsnapper::restore {
 class RestorePlanExecutor
 {
 public:
-    using EntryApplier = std::function<bool(const QString &id,
-                                             const RestoreEntry &entry)>; // 単一entry適用callback
+    using EntryApplier = std::function<RestoreEntryOutcome(const QString &id,
+                                                            const RestoreEntry &entry)>; // 単一entry適用callback
     using ProgressSink = std::function<void(const QString &id, int current,
                                              int total, const QString &path)>; // 進捗通知callback
     using FinishedSink = std::function<void(const QString &id,
@@ -58,7 +58,7 @@ public:
     // callback設定系
     /**
      * @brief 単一entryを適用するcallbackを設定する
-     * @param applier manifest idとentryを受け取り、適用成功時trueを返すcallback
+     * @param applier manifest idとentryを受け取り、適用・スキップ・失敗のいずれかを返すcallback
      */
     void setEntryApplier(EntryApplier applier);
 

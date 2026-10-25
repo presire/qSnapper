@@ -293,45 +293,55 @@ namespace {
 }
 
 /**
- * @brief 指定したconfigに、終わっていない復元計画があるかを判定する
+ * @brief 指定したconfigに、実行直前または実行中の復元計画があるかを判定する
  *
- * 作成中・凍結済み・実行中の計画は、configとスナップショットが残っていることを前提に進むため、それらがある間は削除しない
- * 期限切れの計画は先に終端させ、残った計画の状態を1件ずつ読む
- * 状態を読めない計画がある場合は、判定できないものとしてuncertainをtrueにする
+ * 凍結済み・実行中の計画は、configとスナップショットが残っていることを前提に進むため、それらがある間は削除しない
+ * 作成中 (Staging) の計画は判定に含めない
+ * 差分を閲覧できる利用者なら誰でも空の計画を作れるため、Staging計画を含めると管理者のconfig操作を止められてしまう
+ * Staging計画は、認可済みのconfig操作の直前にdiscardStagingRestorePlansで取り消す
+ * 同じ名前のconfigや同じ番号のスナップショットが作り直された後に、古い計画が別の内容を指して確定されないようにするため
+ *
+ * 計画の状態はownerを問わずregistryから直接読む
+ * 他のownerの計画を読めないことを理由に判定不能とすると、それだけでconfig操作を拒否することになるため
+ *
+ * @param configName 検証済みの設定名
+ * @return 実行直前または実行中の計画がある場合: true
  */
-bool SnapshotOperations::hasUnfinishedRestorePlan(const QString &configName, bool *uncertain)
+bool SnapshotOperations::hasUnfinishedRestorePlan(const QString &configName)
 {
-    *uncertain = false;
     for (const RestoreExecution &execution : std::as_const(m_restoreExecutions)) {
         if (execution.configName == configName) {
             return true;
         }
     }
 
+    // 期限切れの凍結済み計画を先に終端させ、放置された計画がconfig操作を止め続けないようにする
     purgeExpiredRestorePlans();
-    const QStringList planIds = m_restorePlanOwners.keys();
-    for (const QString &manifestId : planIds) {
-        qsnapper::restore::ManifestError error = qsnapper::restore::ManifestError::None;
-        const auto status = m_restoreRegistry.status(manifestId, m_restorePlanOwners.value(manifestId), &error);
-        if (!status) {
-            *uncertain = true;
+    return m_restoreRegistry.hasActivePlanForConfig(configName);
+}
+
+/**
+ * @brief 指定configのStaging計画を、ownerを問わず取り消して終端させる
+ *
+ * ownerを問わず取り消すため、認可済みのconfig操作の直前でだけ呼ぶ
+ * finishRestorePlanで終端させるため、mountの解除と実行contextの削除も通常の終端と同じ経路で行われる
+ *
+ * @param configName 検証済みの設定名
+ * @param snapshotNumber 参照する計画だけに絞るスナップショット番号 (負の値なら絞らない)
+ */
+void SnapshotOperations::discardStagingRestorePlans(const QString &configName, int snapshotNumber)
+{
+    const QStringList stagingIds = m_restoreRegistry.stagingIdsForConfig(configName, snapshotNumber);
+    for (const QString &id : stagingIds) {
+        // 計画は別の接続が作ったものであるため、registryにはその計画のownerとして取り消しを伝える
+        qsnapper::restore::ManifestError cancelError = qsnapper::restore::ManifestError::None;
+        if (!m_restoreRegistry.cancel(id, m_restorePlanOwners.value(id), &cancelError)) {
+            // 既に終端したか期限切れで消えた計画は、ここで終端させる必要がない
             continue;
         }
-        if (status->configName != configName) {
-            continue;
-        }
-        switch (status->state) {
-        case qsnapper::restore::ManifestState::Staging:   // エントリの受付中
-        case qsnapper::restore::ManifestState::Frozen:    // 実行待ち
-        case qsnapper::restore::ManifestState::Running:   // 実行中
-            return true;
-        case qsnapper::restore::ManifestState::Completed: // 終端した計画はconfigを使わない
-        case qsnapper::restore::ManifestState::Failed:
-        case qsnapper::restore::ManifestState::Cancelled:
-            break;
-        }
+        finishRestorePlan(id, qsnapper::restore::ManifestState::Cancelled,
+                          QStringLiteral("Restore plan was discarded because its configuration changed"));
     }
-    return false;
 }
 
 /**
@@ -494,16 +504,18 @@ bool SnapshotOperations::createConfigAuthorized(const QString &configName, const
     }
     ::close(configsFd);
 
-    // 同じ名前で終わっていない復元計画が残っている場合、作成したconfigを旧configの計画が使ってしまうため拒否する
-    bool uncertain = false;
-    if (hasUnfinishedRestorePlan(configName, &uncertain) || uncertain) {
+    // 同じ名前で実行直前または実行中の復元計画が残っている場合、作成したconfigを旧configの計画が使ってしまうため拒否する
+    if (hasUnfinishedRestorePlan(configName)) {
         replyError(QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_NAME),
                    QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_TEXT));
         return false;
     }
 
-    const auto reply = claimReplyForAsyncCompletion();
-    if (!reply) {
+    // 消えた名前のconfigや番号が作り直された後に、古い作成中の計画が別の内容を指して確定されないよう、変更の直前に破棄する
+    discardStagingRestorePlans(configName, -1);
+
+    const auto claimedReply = claimReplyForAsyncCompletion();
+    if (!claimedReply) {
         return false;
     }
 
@@ -513,7 +525,7 @@ bool SnapshotOperations::createConfigAuthorized(const QString &configName, const
     mutation << configName << subvolume << CreateFstype << CreateTemplate;
 
     startSnapperdOperation(
-        *reply, mutation, QString(), {}, CreateConfigReplyDeadlineMs,
+        *claimedReply, mutation, QString(), {}, CreateConfigReplyDeadlineMs,
         [this, configName, subvolume, target](SnapperdOperation::Outcome outcome, bool stoppedByRestore,
                                               const CallReply &reply, bool replied) {
             // 応答の種類に関わらず、作成されたconfigが要求どおりかを読み直して確かめる
@@ -636,8 +648,7 @@ bool SnapshotOperations::deleteConfigAuthorized(const QString &configName)
         return false;
     }
 
-    bool uncertain = false;
-    if (hasUnfinishedRestorePlan(configName, &uncertain) || uncertain) {
+    if (hasUnfinishedRestorePlan(configName)) {
         replyError(QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_NAME),
                    QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_TEXT));
         return false;
@@ -658,8 +669,11 @@ bool SnapshotOperations::deleteConfigAuthorized(const QString &configName)
         }
     }
 
-    const auto reply = claimReplyForAsyncCompletion();
-    if (!reply) {
+    // 消えた名前のconfigや番号が作り直された後に、古い作成中の計画が別の内容を指して確定されないよう、変更の直前に破棄する
+    discardStagingRestorePlans(configName, -1);
+
+    const auto claimedReply = claimReplyForAsyncCompletion();
+    if (!claimedReply) {
         return false;
     }
 
@@ -669,7 +683,7 @@ bool SnapshotOperations::deleteConfigAuthorized(const QString &configName)
     mutation << configName;
 
     startSnapperdOperation(
-        *reply, mutation, configName, numbers, DeleteConfigReplyDeadlineMs,
+        *claimedReply, mutation, configName, numbers, DeleteConfigReplyDeadlineMs,
         [this, configName](SnapperdOperation::Outcome outcome, bool stoppedByRestore,
                            const CallReply &reply, bool replied) {
             // 一覧から消え、configのファイルも残っていない場合だけ、削除されたとみなす
@@ -757,9 +771,8 @@ QList<uint> SnapshotOperations::deleteSnapshotsAuthorized(const QString &configN
         return {};
     }
 
-    // 終わっていない復元計画は、計画を作った時点のスナップショットが残っていることを前提に進むため、同じconfigでは削除しない
-    bool uncertain = false;
-    if (hasUnfinishedRestorePlan(configName, &uncertain) || uncertain) {
+    // 実行直前または実行中の復元計画は、計画を作った時点のスナップショットが残っていることを前提に進むため、同じconfigでは削除しない
+    if (hasUnfinishedRestorePlan(configName)) {
         replyError(QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_NAME),
                    QString::fromLatin1(qsnapper::dbusservice::RESTORE_PLAN_PENDING_ERROR_TEXT));
         return {};
@@ -809,8 +822,11 @@ QList<uint> SnapshotOperations::deleteSnapshotsAuthorized(const QString &configN
         return {};
     }
 
-    const auto reply = claimReplyForAsyncCompletion();
-    if (!reply) {
+    // 消えた名前のconfigや番号が作り直された後に、古い作成中の計画が別の内容を指して確定されないよう、変更の直前に破棄する
+    discardStagingRestorePlans(configName, -1);
+
+    const auto claimedReply = claimReplyForAsyncCompletion();
+    if (!claimedReply) {
         return {};
     }
 
@@ -820,7 +836,7 @@ QList<uint> SnapshotOperations::deleteSnapshotsAuthorized(const QString &configN
     mutation << configName << QVariant::fromValue(numbers);
 
     startSnapperdOperation(
-        *reply, mutation, configName, numbers, DeleteSnapshotsReplyDeadlineMs,
+        *claimedReply, mutation, configName, numbers, DeleteSnapshotsReplyDeadlineMs,
         [this, numbers, snapshotsPath, snapshotsStat, heldSnapshotsFd](SnapperdOperation::Outcome outcome,
                                                                        bool stoppedByRestore, const CallReply &reply,
                                                                        bool replied) {

@@ -1,9 +1,10 @@
 /**
  * @file tst_restoreplanexecutor.cpp
- * @brief RestorePlanExecutor の owner境界と chunk 状態機械の単体テスト
+ * @brief RestorePlanExecutorのowner境界とchunk状態機械の単体テスト
  *
  * manual scheduler と recording callback を与え、計画の開始・継続・取消・
  * 失効・放棄・実行中消滅の各経路と、終端通知が必ず一度だけ発火することを確認する
+ * あわせて、終端状態に残す適用件数・削除件数・スキップしたpath・失敗位置も確認する
  */
 
 #include <QQueue>
@@ -43,6 +44,7 @@ struct CallbackRecord {
     QVector<ManifestState> finishedStates;   // 終端通知の状態
     QStringList finishedMessages;            // 終端通知のメッセージ
     QString failingPath;                     // このpathの適用だけを失敗させる
+    QString skippedPath;                     // このpathだけをSkippedとして返す
 };
 
 /**
@@ -164,11 +166,18 @@ void configureExecutor(RestorePlanExecutor &executor,
         [&scheduler](std::function<void()> chunk) {
             scheduler.enqueue(std::move(chunk));
         });
+    // テストごとにfailingPathとskippedPathを差し替え、失敗・スキップ・成功の3経路を同じ記録先で観測できるようにする
     executor.setEntryApplier(
         [&record](const QString &id, const RestoreEntry &entry) {
             Q_UNUSED(id)
             record.appliedPaths.append(entry.path);
-            return entry.path != record.failingPath;
+            if (entry.path == record.failingPath) {
+                return RestoreEntryOutcome::Failed;
+            }
+            if (entry.path == record.skippedPath) {
+                return RestoreEntryOutcome::Skipped;
+            }
+            return RestoreEntryOutcome::Applied;
         });
     executor.setProgressSink(
         [&record](const QString &id, int current, int total,
@@ -214,6 +223,8 @@ private slots:
     void cancelAtChunkBoundaryStopsLaterEntries();
     /** @brief applier失敗が後続entryを止めFailedを一度通知することを確認する */
     void applierFailureFailsOnce();
+    /** @brief 失敗位置・削除件数・スキップしたpathが終了状態に残ることを検証する */
+    void terminalStatusRecordsOutcomeCounts();
     /** @brief startされていないFrozen計画へのrequestContinueがWrongStateで拒否されることを確認する */
     void continueOnFrozenPlanIsRejectedAsWrongState();
     /** @brief cancelを2回要求すると2回目がAlreadyTerminalで拒否されfinishedが1回のみ発火することを確認する */
@@ -511,6 +522,51 @@ void TestRestorePlanExecutor::applierFailureFailsOnce()
 }
 
 /**
+ * @brief 失敗位置・削除件数・スキップしたpathが終了状態に残ることを検証する
+ *
+ * 復元はロールバックしないため、管理者がどこまで適用されたかを終端状態から判断できる必要がある
+ * chunkを跨いでも件数と失敗位置が正しく積算されることを確かめる
+ */
+void TestRestorePlanExecutor::terminalStatusRecordsOutcomeCounts()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    RestorePlanExecutor executor(registry);
+    ManualScheduler scheduler;
+    CallbackRecord record;
+    configureExecutor(executor, scheduler, record);
+
+    // 先頭2件をcreatedにして、復元先から削除される件数が2として積算されるようにする
+    // chunk境界を越えた位置で失敗させ、chunkごとの集計が終端状態へ引き継がれることを確かめる
+    const int failingIndex = RestorePlanExecutor::kEntriesPerExecutionChunk + 2;
+    const QStringList paths = makePaths(failingIndex + 3);
+    QStringList changeTypes = makeChangeTypes(paths.size());
+    changeTypes[0] = QStringLiteral("created");
+    changeTypes[1] = QStringLiteral("created");
+    record.skippedPath = paths.at(2);
+    record.failingPath = paths.at(failingIndex);
+
+    const QString id = createFrozenPlan(registry, paths, changeTypes);
+    QVERIFY(!id.isEmpty());
+    ManifestError error = ManifestError::None;
+    QVERIFY(executor.start(id, kOwner, &error));
+
+    scheduler.drainAll();
+
+    const auto failed = registry.status(id, kOwner, &error);
+    QVERIFY(failed.has_value());
+    QCOMPARE(failed->state, ManifestState::Failed);
+    QCOMPARE(failed->cursor, failingIndex);
+    QCOMPARE(failed->deletedCount, 2);
+    QCOMPARE(failed->skippedCount, 1);
+    QCOMPARE(failed->skippedPaths, QStringList({paths.at(2)}));
+    QCOMPARE(failed->failedIndex, failingIndex);
+    QCOMPARE(failed->failedPath, paths.at(failingIndex));
+    QCOMPARE(record.finishedStates, QVector<ManifestState>({ManifestState::Failed}));
+}
+
+/**
  * @brief startされていないFrozen計画へのrequestContinueがWrongStateで拒否されることを検証する
  */
 void TestRestorePlanExecutor::continueOnFrozenPlanIsRejectedAsWrongState()
@@ -731,7 +787,7 @@ void TestRestorePlanExecutor::longRunningEntriesKeepPlanAlive()
             record.appliedPaths.append(entry.path);
             // 単一entryの適用がTTLの半分ほどかかる状況を模擬する
             nowMs += RestoreManifestRegistry::kDefaultTtlMs / 2;
-            return true;
+            return RestoreEntryOutcome::Applied;
         });
     executor.setProgressSink(
         [&record](const QString &id, int current, int total,

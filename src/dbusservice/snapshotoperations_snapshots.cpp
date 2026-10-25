@@ -72,6 +72,11 @@ bool SnapshotOperations::IsConfigured()
         qWarning() << "Failed to check if snapper is configured";
         return false;
     }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to check if snapper is configured: unexpected exception";
+        return false;
+    }
 }
 
 /**
@@ -255,6 +260,11 @@ QStringList SnapshotOperations::listConfigsAuthorized()
         qWarning() << "Failed to list snapper configs";
         return QStringList();
     }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to list snapper configs: unexpected exception";
+        return QStringList();
+    }
 }
 
 /**
@@ -302,6 +312,12 @@ QString SnapshotOperations::listSnapshotsAuthorized(const QString &configName)
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to list snapshots";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        return QString();
+    }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to list snapshots: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
         return QString();
     }
 }
@@ -354,7 +370,7 @@ QString SnapshotOperations::createSnapshotAuthorized(
     int preNumber, const QString &cleanup,
     const QMap<QString, QString> &userdata, bool important)
 {
-    // 本体を実行する直前にも判定し、検証を通らない値を決して保存しない
+    // 即時許可と遅延許可のどちらの経路から本体へ入っても、検証を通らない値を保存しないよう、本体の先頭でも判定する
     if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
         replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
         return QString();
@@ -438,15 +454,15 @@ QString SnapshotOperations::createSnapshotAuthorized(
 #endif
 
         // レコード境界を破壊する値を拒否する理由はformatSnapshotToCSV()側の注記を参照すること
-        const QString cleanup     = QString::fromStdString(newSnapshot->getCleanup());
-        const QString description = QString::fromStdString(newSnapshot->getDescription());
+        const QString createdCleanup     = QString::fromStdString(newSnapshot->getCleanup());
+        const QString createdDescription = QString::fromStdString(newSnapshot->getDescription());
 
         // ユーザデータを key1=value1,key2=value2形式に変換
         // 各ペアは個別のCSVフィールドであるため、formatSnapshotToCSV()と同様にペア単位でクォートする
-        const std::map<std::string, std::string> &userdata = newSnapshot->getUserdata();
+        const std::map<std::string, std::string> &createdUserdata = newSnapshot->getUserdata();
         QStringList userdataPairs;
-        bool recordSafe = qsnapper::security::isRecordSafeText(cleanup) && qsnapper::security::isRecordSafeText(description);
-        for (const auto &pair : userdata) {
+        bool recordSafe = qsnapper::security::isRecordSafeText(createdCleanup) && qsnapper::security::isRecordSafeText(createdDescription);
+        for (const auto &pair : createdUserdata) {
             const QString key   = QString::fromStdString(pair.first);
             const QString value = QString::fromStdString(pair.second);
             if (!qsnapper::security::isRecordSafeText(key) || !qsnapper::security::isRecordSafeText(value)) {
@@ -475,8 +491,8 @@ QString SnapshotOperations::createSnapshotAuthorized(
         csv += dateTime.toString(Qt::ISODate) + ",";
 
         csv += QString::number(newSnapshot->getUid()) + ",";
-        csv += qsnapper::csv::quoteField(cleanup) + ",";
-        csv += qsnapper::csv::quoteField(description) + ",";
+        csv += qsnapper::csv::quoteField(createdCleanup) + ",";
+        csv += qsnapper::csv::quoteField(createdDescription) + ",";
 
         csv += userdataPairs.join(",");
 
@@ -487,6 +503,12 @@ QString SnapshotOperations::createSnapshotAuthorized(
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to create snapshot";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        return QString();
+    }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to create snapshot: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
         return QString();
     }
 }
@@ -502,7 +524,7 @@ QString SnapshotOperations::createSnapshotAuthorized(
  * @param configName Snapper設定名
  * @param number 編集対象のスナップショット番号
  * @param description 新しい説明文 (空文字列も可)
- * @param cleanup 新しいcleanupアルゴリズム名
+ * @param cleanup 新しいcleanupアルゴリズム名 (number / timeline / empty-pre-post / 空文字列のいずれか)
  * @param userdata 新しいuserdataマップ (置換)
  * @return 成功時true、失敗時false
  */
@@ -512,6 +534,13 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
 {
     const auto cfg = resolveConfigOrFail(configName);
     if (!cfg) {
+        return false;
+    }
+
+    // 不正な値のために認可のプロンプトを出さないよう、認可の前にも判定する
+    // 未知の名前を保存すると、そのスナップショットがcleanupの対象から黙って外れるため、作成と同じ許可リストで拒否する
+    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
         return false;
     }
 
@@ -533,6 +562,12 @@ bool SnapshotOperations::modifySnapshotAuthorized(
     const QString &configName, int number, const QString &description,
     const QString &cleanup, const QMap<QString, QString> &userdata)
 {
+    // 即時許可と遅延許可のどちらの経路から本体へ入っても、検証を通らない値を保存しないよう、本体の先頭でも判定する
+    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
+        return false;
+    }
+
     // 格納前にレコード境界を破壊する値を拒否する
     // ここを通過したmetadataはListSnapshots等でそのまま連結されるため、qSnapper自身が一覧取得を不能にする値を保存しない
     // カンマは列をずらすだけでレコード境界を壊さないため対象外とする
@@ -587,6 +622,12 @@ bool SnapshotOperations::modifySnapshotAuthorized(
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return false;
     }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to modify snapshot: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
+        return false;
+    }
 }
 
 /**
@@ -634,6 +675,16 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
         }
     }
 
+    // 認可待ち (Frozen) の計画が参照するスナップショットも削除しない
+    // 管理者が確認した復元元や比較相手が、認可の直前に消えたり別の番号の内容に変わったりしないようにするため
+    // Staging計画は誰でも作れるため、削除を止める理由にしない
+    // 期限切れの計画は先に終端させ、放置された計画で削除を止め続けないようにする
+    purgeExpiredRestorePlans();
+    if (m_restoreRegistry.isSnapshotReferencedByActivePlan(configName, number)) {
+        replyError(QDBusError::Failed, QStringLiteral("Snapshot is in use by an active restore plan"));
+        return false;
+    }
+
     try {
         snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
@@ -651,6 +702,9 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
         m_comparisonCache.clear();
         m_snapshotListFingerprint.clear();
 
+        // 同じ番号が後で別のスナップショットに使われたときに、古い作成中の計画がその内容を指して確定されないよう破棄する
+        discardStagingRestorePlans(configName, number);
+
 #if LIBSNAPPER_VERSION_AT_LEAST(7, 4)
         snapper::Plugins::Report report;
         snapper->deleteSnapshot(snapshot, report);
@@ -666,6 +720,13 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to delete snapshot";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        resetIdleTimer();   // 例外時もタイマリセット
+        return false;
+    }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to delete snapshot: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
         resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
@@ -838,6 +899,12 @@ bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, i
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to rollback snapshot";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        return false;
+    }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
+        qWarning() << "Failed to rollback snapshot: unexpected exception";
+        replyError(QDBusError::Failed, QStringLiteral("Internal error"));
         return false;
     }
 }

@@ -16,6 +16,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -151,13 +152,24 @@ namespace qsnapper::security {
          * @param componentCount 辿る成分数
          * @param createMissing 存在しない成分をmkdirat()で作成するか
          * @param mode createMissing = true時の作成モード
+         * @param sameMountOnly mount境界 (別mountのroot、または親と異なるデバイス) を越える成分をEXDEVで拒否する場合true
          * @return 成功時: 最終ディレクトリのfd、失敗時: -1
          */
         int openDirectoryChainAtNoFollow(int baseFd, const QStringList &components,
-                                         int componentCount, bool createMissing, mode_t mode)
+                                         int componentCount, bool createMissing, mode_t mode,
+                                         bool sameMountOnly)
         {
             int dirFd = ::openat(baseFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             if (dirFd < 0) {
+                return -1;
+            }
+
+            // openat2のRESOLVE_NO_XDEVと同じ制限を、成分ごとのstatxで再現するため、基点のデバイスを控えておく
+            struct stat baseInfo;
+            if (sameMountOnly && ::fstat(dirFd, &baseInfo) != 0) {
+                const int savedErrno = errno;
+                ::close(dirFd);
+                errno = savedErrno;
                 return -1;
             }
 
@@ -185,17 +197,41 @@ namespace qsnapper::security {
 
                 ::close(dirFd);
                 dirFd = nextFd;
+
+                if (sameMountOnly) {
+                    // 境界かどうかを判定できないまま書き込むと復元先の外へ出るため、確認できない場合は失敗させる
+                    struct statx openedInfo;
+                    if (::statx(dirFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO,
+                                &openedInfo) != 0) {
+                        const int savedErrno = errno;
+                        ::close(dirFd);
+                        errno = savedErrno;
+                        return -1;
+                    }
+
+                    if (isMountBoundary(openedInfo, baseInfo.st_dev)) {
+                        // 境界の下は復元先のサブボリュームではないため、EXDEVで拒否する
+                        ::close(dirFd);
+                        errno = EXDEV;
+                        return -1;
+                    }
+                }
             }
 
             return dirFd;
         }
 
         int openDirectoryChainAtOpenat2(int baseFd, const QStringList &components,
-                                        int componentCount, bool createMissing, mode_t mode)
+                                        int componentCount, bool createMissing, mode_t mode,
+                                        bool sameMountOnly)
         {
             struct open_how how = {};
             how.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
             how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+            if (sameMountOnly) {
+                // 復元先の木から別のファイルシステム (bind mountを含む) へ降りて書き込まないようにする
+                how.resolve |= RESOLVE_NO_XDEV;
+            }
 
             auto openBeneathBase = [&how, baseFd](const QByteArray &relativePath) {
                 constexpr int MAX_EAGAIN_RETRIES = 3;
@@ -250,16 +286,17 @@ namespace qsnapper::security {
         }
 
         int openDirectoryChainAt(int baseFd, const QStringList &components, int componentCount,
-                                 bool createMissing, mode_t mode)
+                                 bool createMissing, mode_t mode, bool sameMountOnly)
         {
             const int dirFd = openDirectoryChainAtOpenat2(baseFd, components, componentCount,
-                                                           createMissing, mode);
+                                                           createMissing, mode, sameMountOnly);
             if (dirFd >= 0 || errno != ENOSYS) {
                 return dirFd;
             }
 
+            // openat2が未実装のカーネルでは、同じ制限を成分ごとのstatxとO_NOFOLLOWで再現した経路に切り替える
             return openDirectoryChainAtNoFollow(baseFd, components, componentCount,
-                                                createMissing, mode);
+                                                createMissing, mode, sameMountOnly);
         }
 
         /**
@@ -279,8 +316,9 @@ namespace qsnapper::security {
                 return -1;
             }
 
+            // 絶対パスの解決ではsubvolumeやmount pointを跨ぐことが正当なため、mount境界を制限しない
             const int leafFd = openDirectoryChainAt(rootFd, components, componentCount,
-                                                    createMissing, mode);
+                                                    createMissing, mode, false);
             const int savedErrno = errno;
             ::close(rootFd);
             errno = savedErrno;
@@ -344,7 +382,7 @@ namespace qsnapper::security {
 
             return openDirectoryChainAt(rootFd.get(), relativeComponents,
                                         static_cast<int>(relativeComponents.size()) - 1,
-                                        createMissing, mode);
+                                        createMissing, mode, true);
         }
 
         /**
@@ -392,43 +430,92 @@ namespace qsnapper::security {
         }
 
         /**
-         * @brief 親dirfd配下の1エントリを、symlink非追従かつmount境界を越えずに削除する
+         * @brief 削除処理で1つのエントリをどう扱ったかを表す
+         *
+         * ディレクトリは中身を削除してから本体を消す必要があるため、削除済みと降下を区別する
+         */
+        enum class RemovalStep {
+            Removed,    // 削除した (既に存在しなかった場合を含む)
+            Descend,    // ディレクトリを開いた (中身を削除した後に本体を削除する)
+            Failed      // 失敗した (errno設定済み)
+        };
+
+        /**
+         * @brief 走査中のディレクトリ1段分
+         *
+         * 中身を削除し終えたら、親ディレクトリからnameInParentをAT_REMOVEDIRで削除する
+         */
+        struct RemovalFrame {
+            DIR *dir = nullptr;         // 走査中のディレクトリ (fdを所有する)
+            QByteArray nameInParent;    // 親ディレクトリ上の名前
+        };
+
+        constexpr int kMaxRemovalDepth = 256;   // 明示スタックで降りる深さの上限 (攻撃者が作った深い階層でfdとメモリを使い切らないため)
+
+        /**
+         * @brief 削除処理で同時に開いてよいディレクトリの段数を返す
+         *
+         * 各段のfdは子を削除した後のAT_REMOVEDIRで必要なため、降りている間は閉じられない
+         * プロセスのfd上限の半分までに抑え、D-Bus接続など他の処理が使うfdを残す
+         *
+         * @return 降りてよい深さの上限 (1以上)
+         */
+        int removalDepthLimit()
+        {
+            struct rlimit limit;
+            if (::getrlimit(RLIMIT_NOFILE, &limit) < 0 || limit.rlim_cur == RLIM_INFINITY) {
+                return kMaxRemovalDepth;
+            }
+            const rlim_t half = limit.rlim_cur / 2;
+            if (half < 1) {
+                return 1;
+            }
+            return half < static_cast<rlim_t>(kMaxRemovalDepth) ? static_cast<int>(half)
+                                                                : kMaxRemovalDepth;
+        }
+
+        /**
+         * @brief 親dirfd配下の1エントリを削除するか、ディレクトリなら走査のために開く
          *
          * 削除対象そのものと、降りていく各ディレクトリについてmount境界を確認する
-         * 境界 (USB / NFS / FUSE / bind mount / ネストしたsubvolume等) を見つけた時点で降下を止め、errno=EXDEVで失敗を返す
-         * 境界の内側は1件も削除しない
+         * 境界 (USB / NFS / FUSE / bind mount / ネストしたsubvolume等) を見つけた時点でerrno=EXDEVで失敗を返す
          * 境界を黙ってスキップして成功扱いにすると、呼び出し元は削除が完了したと誤認するため、必ず失敗として返す
          *
          * statxはAT_STATX_DONT_SYNCで呼び、FUSE / NFS等の境界先へ属性取得要求を送らない (応答しないFUSEでサービスが停止するのを防ぐ)
          *
          * @param parentFd 親ディレクトリfd
-         * @param parentDev 親ディレクトリのst_dev
-         * @param entryName 削除対象のleaf名
-         * @return 削除成功時 (対象が存在しない場合を含む): true
+         * @param parentDev 削除をこのデバイス内に限定するための最上位の親デバイス番号
+         * @param entryName 対象のleaf名
+         * @param dirOut Descendを返した場合に、開いたディレクトリを受け取る (呼び出し元がclosedirする)
+         * @return 処理結果
          */
-        bool removeEntryWithinDeviceAt(int parentFd, dev_t parentDev, const QByteArray &entryName)
+        RemovalStep removeOrOpenEntryAt(int parentFd, dev_t parentDev,
+                                        const QByteArray &entryName, DIR **dirOut)
         {
             constexpr int kStatxFlags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_DONT_SYNC;
             struct statx stx;
             if (::statx(parentFd, entryName.constData(), kStatxFlags,
                         STATX_TYPE | STATX_INO, &stx) < 0) {
-                return errno == ENOENT;
+                return errno == ENOENT ? RemovalStep::Removed : RemovalStep::Failed;
             }
 
             if (isMountBoundary(stx, parentDev)) {
                 errno = EXDEV;
-                return false;
+                return RemovalStep::Failed;
             }
 
             // symlink / regular file / fifo / deviceは、unlinkat()側で削除する
             if (!S_ISDIR(stx.stx_mode)) {
-                return ::unlinkat(parentFd, entryName.constData(), 0) == 0 || errno == ENOENT;
+                if (::unlinkat(parentFd, entryName.constData(), 0) == 0 || errno == ENOENT) {
+                    return RemovalStep::Removed;
+                }
+                return RemovalStep::Failed;
             }
 
-            int childFd = ::openat(parentFd, entryName.constData(),
-                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            const int childFd = ::openat(parentFd, entryName.constData(),
+                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
             if (childFd < 0) {
-                return false;
+                return RemovalStep::Failed;
             }
 
             // statxからopenatまでの間に名前を差し替えられていないか、開いたディレクトリ自体が境界でないかを確認する
@@ -438,12 +525,12 @@ namespace qsnapper::security {
                 const int savedErrno = errno;
                 ::close(childFd);
                 errno = savedErrno;
-                return false;
+                return RemovalStep::Failed;
             }
             if (isMountBoundary(opened, parentDev) || opened.stx_ino != stx.stx_ino) {
                 ::close(childFd);
                 errno = EXDEV;
-                return false;
+                return RemovalStep::Failed;
             }
 
             DIR *dir = ::fdopendir(childFd);
@@ -451,30 +538,100 @@ namespace qsnapper::security {
                 const int savedErrno = errno;
                 ::close(childFd);
                 errno = savedErrno;
-                return false;
+                return RemovalStep::Failed;
             }
 
-            while (dirent *entry = ::readdir(dir)) {
-                // "." と ".." は再帰対象から除外する
+            *dirOut = dir;
+            return RemovalStep::Descend;
+        }
+
+        /**
+         * @brief 親dirfd配下の1エントリを、symlink非追従かつmount境界を越えずに削除する
+         *
+         * 攻撃者が深い階層を作ってもスタックを使い切らないよう、再帰呼び出しではなく明示的なスタックで降りる
+         * 深さがremovalDepthLimit()を超える場合は、途中まで削除した状態でerrno=ELOOPの失敗を返す
+         * mount境界を見つけた場合はerrno=EXDEVで失敗し、境界の内側は1件も削除しない
+         *
+         * @param parentFd 親ディレクトリfd
+         * @param parentDev 親ディレクトリのst_dev
+         * @param entryName 削除対象のleaf名
+         * @return 削除成功時 (対象が存在しない場合を含む): true
+         */
+        bool removeEntryWithinDeviceAt(int parentFd, dev_t parentDev, const QByteArray &entryName)
+        {
+            DIR *topDir = nullptr;
+            const RemovalStep topStep = removeOrOpenEntryAt(parentFd, parentDev, entryName, &topDir);
+            if (topStep != RemovalStep::Descend) {
+                return topStep == RemovalStep::Removed;
+            }
+
+            const int maxDepth = removalDepthLimit();
+            std::vector<RemovalFrame> stack;
+            stack.push_back(RemovalFrame{topDir, entryName});
+
+            // 失敗時は開いている全段を閉じ、原因のerrnoを呼び出し元へ返す (closedirがerrnoを上書きするため)
+            const auto abortRemoval = [&stack]() {
+                const int savedErrno = errno;
+                for (RemovalFrame &frame : stack) {
+                    ::closedir(frame.dir);
+                }
+                stack.clear();
+                errno = savedErrno;
+                return false;
+            };
+
+            while (!stack.empty()) {
+                DIR *currentDir = stack.back().dir;
+                errno = 0;
+                const dirent *entry = ::readdir(currentDir);
+                if (!entry) {
+                    if (errno != 0) {
+                        return abortRemoval();
+                    }
+
+                    // 中身を削除し終えたディレクトリを、1段上のディレクトリから削除する
+                    const QByteArray finishedName = stack.back().nameInParent;
+                    const int closeResult = ::closedir(currentDir);
+                    stack.pop_back();
+                    if (closeResult < 0) {
+                        return abortRemoval();
+                    }
+
+                    // 最上位のディレクトリは呼び出し元の親から削除する (1段上を表すfdがスタックに残っていないため)
+                    const int ownerFd = stack.empty() ? parentFd : ::dirfd(stack.back().dir);
+                    if (::unlinkat(ownerFd, finishedName.constData(), AT_REMOVEDIR) < 0
+                            && errno != ENOENT) {
+                        return abortRemoval();
+                    }
+                    continue;
+                }
+
+                // "." と ".." は削除対象から除外する
                 const char *name = entry->d_name;
                 if ((name[0] == '.' && name[1] == '\0')
                         || (name[0] == '.' && name[1] == '.' && name[2] == '\0')) {
                     continue;
                 }
 
-                if (!removeEntryWithinDeviceAt(childFd, parentDev, QByteArray(name))) {
-                    const int savedErrno = errno;
-                    ::closedir(dir);
-                    errno = savedErrno;
-                    return false;
+                const QByteArray childName(name);
+                DIR *childDir = nullptr;
+                const RemovalStep step = removeOrOpenEntryAt(::dirfd(currentDir), parentDev,
+                                                             childName, &childDir);
+                if (step == RemovalStep::Failed) {
+                    return abortRemoval();
+                }
+                if (step == RemovalStep::Descend) {
+                    // fdを使い切る前に止める (ELOOPは呼び出し元が部分削除として扱う)
+                    if (static_cast<int>(stack.size()) >= maxDepth) {
+                        ::closedir(childDir);
+                        errno = ELOOP;
+                        return abortRemoval();
+                    }
+                    stack.push_back(RemovalFrame{childDir, childName});
                 }
             }
 
-            if (::closedir(dir) < 0) {
-                return false;
-            }
-
-            return ::unlinkat(parentFd, entryName.constData(), AT_REMOVEDIR) == 0 || errno == ENOENT;
+            return true;
         }
 
         /**

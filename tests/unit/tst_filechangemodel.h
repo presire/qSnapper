@@ -232,17 +232,26 @@ public:
         m_pending.append(pending);
     }
 
-    bool subscribePlanSignals(QObject *receiver) override
+    /**
+     * @brief 計画のシグナル購読要求を記録し、常に成功を返す
+     * @param signalReceiver シグナルの受け取り先として登録するオブジェクト
+     * @return 常にtrue
+     */
+    bool subscribePlanSignals(QObject *signalReceiver) override
     {
-        this->receiver = receiver;
+        receiver = signalReceiver;
         ++subscribeCount;
         return true;
     }
 
-    void unsubscribePlanSignals(QObject *receiver) override
+    /**
+     * @brief 計画のシグナル購読の解除要求を記録する
+     * @param signalReceiver 解除対象のオブジェクト、登録済みの受け取り先と一致する場合だけ登録を外す
+     */
+    void unsubscribePlanSignals(QObject *signalReceiver) override
     {
-        if (this->receiver == receiver) {
-            this->receiver = nullptr;
+        if (receiver == signalReceiver) {
+            receiver = nullptr;
         }
         ++unsubscribeCount;
     }

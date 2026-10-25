@@ -83,7 +83,7 @@ set_target_properties(qsnapper_restoreplan_test_service PROPERTIES AUTOMOC ON)
 # 復元の実行中に非復元操作を拒否するゲートは、本番のSnapshotOperationsの認可経路に組み込まれているため、
 # 再実装ではなく本番のソースをそのままリンクする
 # QSNAPPER_ENABLE_TEST_HOOKSで、polkitへの問い合わせと復元の実行中の状態だけを差し替える
-# このフックは認可を迂回できるため、本ターゲット以外では定義しない
+# このフックは認可を迂回できるため、本ターゲットとtests/unitのtst_snapshotoperations (いずれもインストールしない) 以外では定義しない
 #
 # インストールせず、add_test()にも登録しない
 # ("run_isolated_restore_plan_test.sh"経由でのみ手動起動する)

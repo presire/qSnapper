@@ -121,10 +121,12 @@ int openRootPathDirectory(const QString &rootPath);
  * @param componentCount 辿る成分数
  * @param createMissing 存在しない成分をmkdirat()で作成するか
  * @param mode createMissingがtrueの場合の作成モード
+ * @param sameMountOnly mount境界を越える成分をEXDEVで拒否する場合true (復元先の木を辿り、別mountの下へ書き込ませないために使う)
  * @return 成功時最終ディレクトリのfd、失敗時-1
  */
 int openDirectoryChainAtNoFollow(int baseFd, const QStringList &components,
-                                 int componentCount, bool createMissing, mode_t mode);
+                                 int componentCount, bool createMissing, mode_t mode,
+                                 bool sameMountOnly);
 
 /**
  * @brief openat2によるin-root解決で成分列を辿る
@@ -135,10 +137,12 @@ int openDirectoryChainAtNoFollow(int baseFd, const QStringList &components,
  * @param componentCount 辿る成分数
  * @param createMissing 存在しない成分をmkdirat()で作成するか
  * @param mode createMissingがtrueの場合の作成モード
+ * @param sameMountOnly mount境界を越える成分をEXDEVで拒否する場合true (復元先の木を辿り、別mountの下へ書き込ませないために使う)
  * @return 成功時最終ディレクトリのfd、失敗時-1
  */
 int openDirectoryChainAtOpenat2(int baseFd, const QStringList &components,
-                                int componentCount, bool createMissing, mode_t mode);
+                                int componentCount, bool createMissing, mode_t mode,
+                                bool sameMountOnly);
 
 /**
  * @brief openat2を試み、非対応時はフォールバックで成分列を辿る
@@ -147,10 +151,11 @@ int openDirectoryChainAtOpenat2(int baseFd, const QStringList &components,
  * @param componentCount 辿る成分数
  * @param createMissing 存在しない成分をmkdirat()で作成するか
  * @param mode createMissingがtrueの場合の作成モード
+ * @param sameMountOnly mount境界を越える成分をEXDEVで拒否する場合true (復元先の木を辿り、別mountの下へ書き込ませないために使う)
  * @return 成功時最終ディレクトリのfd、失敗時-1
  */
 int openDirectoryChainAt(int baseFd, const QStringList &components, int componentCount,
-                         bool createMissing, mode_t mode);
+                         bool createMissing, mode_t mode, bool sameMountOnly);
 
 /**
  * @brief [/]起点で成分列をO_NOFOLLOWで辿りながらディレクトリfdを開く
@@ -212,8 +217,10 @@ bool isMountBoundary(const struct statx &stx, dev_t parentDev);
  * @brief 親dirfd配下の1エントリをsymlink非追従かつmount境界を越えずに削除する
  *
  * 既に存在しない場合は成功扱いとする
+ * 深い階層でスタックとfdを使い切らないよう明示的なスタックで降り、
+ * 深さの上限を超えた場合はerrno=ELOOPで失敗する (それまでに削除したエントリは戻らない)
  * @param parentFd 親ディレクトリfd
- * @param parentDev 削除範囲を閉じるための親デバイス番号
+ * @param parentDev 削除をこのデバイス内に限定するための親のデバイス番号
  * @param entryName 削除対象のleaf名
  * @return 削除成功時true
  */

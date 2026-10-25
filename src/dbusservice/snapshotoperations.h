@@ -1,6 +1,18 @@
 #ifndef SNAPSHOTOPERATIONS_H
 #define SNAPSHOTOPERATIONS_H
 
+/**
+ * @file snapshotoperations.h
+ * @brief rootで動作するスナップショット操作のD-Busサービスの宣言
+ *
+ * SnapshotOperationsは、一覧取得・作成・更新・削除・差分参照と、段階実行する復元計画の操作を
+ * com.presire.qsnapper.Operationsインタフェースのpublic slotsとして公開する
+ * 特権操作はsnapperdとpolkitの認可を経てから実行し、入力はD-Bus境界で検証する
+ *
+ * 呼び出し元: src/dbusservice/main.cppがインスタンスを作り、システムバスへ登録する
+ * 依存: libsnapper (Snapper/Comparison)、snapperdのD-Bus API、PolkitQt6-1、Qt D-Bus、filesystemhelpers
+ */
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -14,6 +26,7 @@
 #include <QPointer>
 #include <QTimer>
 #include <sys/stat.h>
+#include <exception>
 #include <functional>
 #include <string>
 #include <memory>
@@ -48,6 +61,7 @@ private:
     // 復元実行コンテキストと応答退避と認可結果の実体はsnapshotoperations_types.hのqsnapper::dbusserviceに置く
     // 本クラス内では従来どおり非修飾名で参照する
     using RestoreExecution = qsnapper::dbusservice::RestoreExecution;
+    using PendingDirectoryTimes = qsnapper::dbusservice::PendingDirectoryTimes;
     using CallReply = qsnapper::dbusservice::CallReply;
     using AuthorizationOutcome = qsnapper::dbusservice::AuthorizationOutcome;
 
@@ -76,7 +90,8 @@ private:
     std::optional<CallReply> m_deferredReply;               // 遅延応答の継続を実行している間のみ有効
                                                             // replyError()がsendErrorReply()ではなくキャプチャ済みmessageを使う判断に用いる
     qsnapper::security::PendingAuthorizationBudget m_pendingAuthorizations{MaxPendingAuthorizationsPerUid, MaxPendingAuthorizations};  // polkitプロンプト待ちの件数 (呼び出し元UID単位と全体)
-    QPointer<qsnapper::dbusservice::SystemdTimerOperation> m_timerOperation;   // 実行中のtimerの操作 (同時に1件だけ)
+    QPointer<qsnapper::dbusservice::SystemdTimerOperation> m_timerOperation;       // 実行中のtimerの変更 (同時に1件だけ)
+    QPointer<qsnapper::dbusservice::SystemdTimerOperation> m_timerQueryOperation;  // 実行中のtimerの状態の照会 (同時に1件だけ、変更とは別枠)
     QPointer<qsnapper::dbusservice::SnapperdOperation> m_snapperdOperation;    // snapperdへ転送した実行中の変更 (同時に1件だけ、完了まで他の操作を拒否する)
 
 private:
@@ -137,6 +152,34 @@ private:
      */
     void endPendingAuthorization(uint callerUid);
 
+    /** @brief 認可済みの本体で想定外の例外が起きたことを記録し、固定の文言でエラー応答する
+     * @note 例外の内容 (e.what()) には設定名やpathが含まれ得るため、ログにもエラー本文にも載せない
+     */
+    void replyUnexpectedFailure();
+
+    /** @brief 認可済みの本体を実行し、想定外の例外をスロットの外へ出さない
+     * 例外がQtのイベントループまで届くとサービスが異常終了し、実行中の復元や他の呼び出し元の要求も失われるため、ここで止める
+     * @tparam T 対象D-Busメソッドの戻り値型
+     * @param body 認可済みの本体処理
+     * @return 本体の戻り値、例外が起きた場合はT{} (エラー応答は送出済み)
+     */
+    template <typename T, typename Body>
+    T invokeAuthorizedBody(const Body &body)
+    {
+        try {
+            return body();
+        }
+        catch (const std::exception &) {
+            // snapper::Exceptionとbad_allocもここで受ける (どちらもstd::exceptionから派生する)
+            // 原因を応答へ含めず、固定の文言で失敗させる
+            replyUnexpectedFailure();
+        }
+        catch (...) {
+            replyUnexpectedFailure();
+        }
+        return T{};
+    }
+
     /** @brief 遅延応答経路で本体を実行し、戻り値をD-Bus応答として送出する
      *  本体が既にreplyError()でエラーを返している場合は値応答を送らない
      *  @tparam T 対象D-Busメソッドの戻り値型
@@ -156,7 +199,7 @@ private:
         if (granted) {
             if (gatePolicy == RestoreGatePolicy::AllowWhileRestoring
                     || !rejectWhileRestoreRunning()) {
-                result = body();
+                result = invokeAuthorizedBody<T>(body);
             }
         }
         else {
@@ -181,7 +224,7 @@ private:
      *    - polkitへの問い合わせ前 (実行できない操作のためにプロンプトを出さない)
      *    - 即時許可の経路で、本体を実行する直前
      *    - 遅延許可の経路で、本体を実行する直前 (completeDeferredCall)
-     *  復元計画のメソッドはbeginAuthorizationを直接使うため、本ゲートの対象外であり、既存の排他に任せる
+     *  BeginRestorePlan以外の復元計画のメソッドはbeginAuthorizationを直接使うため、本ゲートの対象外であり、既存の排他に任せる
      *  @tparam T 対象D-Busメソッドの戻り値型
      * @param actionId PolkitアクションID
      * @param body 認可済みの本体処理
@@ -207,7 +250,7 @@ private:
             if (gated && rejectWhileRestoreRunning()) {
                 return T{};
             }
-            return body();
+            return invokeAuthorizedBody<T>(body);
         }
         return T{};
     }
@@ -306,10 +349,16 @@ private:
      */
     void sendAsyncError(const CallReply &reply, const QString &errorName, const QString &text);
 
-    /** @brief timerの操作を同時に1件に限るため、実行中の操作があれば拒否する
+    /** @brief timerの変更を同時に1件に限るため、実行中の変更があれば拒否する
      * @return 拒否してエラー応答を送出した場合: true
+     * @note 状態の照会は別枠で数え、照会の実行中でも変更とconfigの操作は拒否しない
      */
     bool rejectWhileTimerOperationRunning();
+
+    /** @brief timerの状態の照会を同時に1件に限るため、実行中の照会があれば拒否する
+     * @return 拒否してエラー応答を送出した場合: true
+     */
+    bool rejectWhileTimerQueryRunning();
 
     /** @brief timerの有効化または無効化、またはsnapperdへ転送した変更の実行中かを判定する
      * @return 変更を伴うtimerの操作、またはsnapperdへ転送した変更が完了していない場合: true
@@ -321,22 +370,34 @@ private:
     bool timerChangeInProgress() const;
 
     /** @brief 認可済みのCommitRestorePlan本体
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name
      * @return 実行開始を受理した場合: true
      */
      bool commitRestorePlanAuthorized(const QString &manifestId, const QString &owner);
-    /** @brief 凍結済み計画をサーバ再構築の権威ある比較と照合して検証する
-     * @param manifestId owner束縛されたマニフェストID
+    /** @brief 認可済みのBeginRestorePlan本体として、同じUIDの古いStaging計画を整理してから空の計画を作る
+     * @param owner 計画を束縛するD-Bus接続名 (直接呼び出しでは空文字列)
+     * @param ownerUid 計画の予算を数えるUID
+     * @param configName 検証済みのSnapper設定名
+     * @param snapshotNumber 復元元snapshot番号
+     * @param counterpartSnapshotNumber 比較相手のsnapshot番号 (0は現在のシステム)
+     * @param mode 検証済みの復元モード
+     * @return 成功時マニフェストID、失敗時はエラー応答済みで空文字列
+     */
+    QString beginRestorePlanAuthorized(const QString &owner, uint ownerUid, const QString &configName,
+                                       int snapshotNumber, int counterpartSnapshotNumber,
+                                       qsnapper::restore::RestoreMode mode);
+
+    /** @brief 凍結済み計画の全entryを、復元元と比較相手の木の直接観測で検証する
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name
-     * @param snapper 検証済み設定のSnapperインスタンス
-     * @param source 復元元スナップショットのiterator
-     * @param counterpart 比較相手スナップショットのiterator (getSnapshotCurrent()含む)
+     * @param counterpart 比較相手スナップショットのiterator (counterpartIsCurrentがtrueなら使用しない)
+     * @param counterpartIsCurrent 比較相手が現在のシステム (live側のSUBVOLUME) か
      * @param snapshotDir pin済みdirfdが指すスナップショット directoryのpath
      * @param pinnedStat pin済みdirfdに対するfstatの結果
-     * @return 計画全体が権威ある比較と一致し同一性確認も通った場合true
+     * @return 全entryが実際の差分に裏付けられ、同一性確認も通った場合true
      */
-     bool validateFrozenRestorePlan(const QString &manifestId, const QString &owner, snapper::Snapper *snapper, const snapper::Snapshots::const_iterator &source, const snapper::Snapshots::const_iterator &counterpart, const QString &snapshotDir, const struct stat &pinnedStat);
+     bool validateFrozenRestorePlan(const QString &manifestId, const QString &owner, const snapper::Snapshots::const_iterator &counterpart, bool counterpartIsCurrent, const QString &snapshotDir, const struct stat &pinnedStat);
     /** @brief commit時preflight失敗を計画のfail-closed終端へ落とし込む
      * @param manifestId 検証に失敗したマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name
@@ -395,12 +456,22 @@ private:
      */
     QString listSubvolumesAuthorized(const QString &configName);
 
-    /** @brief 指定したconfigに、終わっていない復元計画があるかを判定する
+    /** @brief 指定したconfigに、実行直前 (Frozen) または実行中 (Running) の復元計画があるかを判定する
      * @param configName 検証済みの設定名
-     * @param uncertain 計画の状態を読めなかった場合にtrueを受け取る (呼び出し側は拒否として扱う)
-     * @return 終わっていない計画がある場合: true
+     * @return 該当する計画がある場合: true (作成中のStaging計画は含めない)
      */
-    bool hasUnfinishedRestorePlan(const QString &configName, bool *uncertain);
+    bool hasUnfinishedRestorePlan(const QString &configName);
+
+    /**
+     * @brief 指定configのStaging計画を、ownerを問わず取り消して終端させる
+     *
+     * 認可済みのconfig操作の直前だけで呼び、認可のない呼び出しで他人の計画を消せないようにする
+     * 取り消した計画はrestorePlanFinishedシグナル (cancelled) で作成者へ知らせる
+     *
+     * @param configName 検証済みの設定名
+     * @param snapshotNumber 参照する計画だけに絞るスナップショット番号 (負の値なら絞らない)
+     */
+    void discardStagingRestorePlans(const QString &configName, int snapshotNumber);
 
     /** @brief snapperdへ変更を転送し、完了時に結果を読み直して応答する
      * @param reply 非同期に応答するために確保した応答コンテキスト
@@ -438,9 +509,18 @@ private:
      * @param sourceRelativePath snapshotDirからの相対ソースパス
      * @param rootPath 名前解決の基準とする絶対パス (configのSUBVOLUME)
      * @param dst live filesystem上の絶対パス
+     * @param pendingTimes 全エントリの適用後に設定する時刻の返却先 (省略可)
      * @return ディレクトリと必須metadataを適用できた場合: true
      */
-     static bool applyDirectoryBeneathRoot(int sourceDirFd, const QString &sourceRelativePath, const QString &rootPath, const QString &dst);
+     static bool applyDirectoryBeneathRoot(int sourceDirFd, const QString &sourceRelativePath, const QString &rootPath, const QString &dst,
+                                           PendingDirectoryTimes *pendingTimes = nullptr);
+
+    /** @brief 全エントリの適用後に、適用したディレクトリの時刻を復元元に合わせる
+     * @param pendingTimes 適用したディレクトリと設定する時刻の一覧
+     * @return 設定できなかったディレクトリの数
+     * @note 子entryの作成や削除で親ディレクトリの時刻が変わるため、途中では設定せず、全entryの適用後にまとめて設定する
+     */
+     static int applyPendingDirectoryTimes(const QList<PendingDirectoryTimes> &pendingTimes);
     /** @brief live宛先の親ディレクトリを1回だけ解決し、通常ファイルをコピーして差し替える
      * @param sourceDirFd pin済みのスナップショット dirfd
      * @param sourceRelativePath snapshotDirからの相対ソースパス (絶対パス・".."/"."成分は不可)
@@ -506,9 +586,9 @@ private:
     /** @brief executor callbackから単一の凍結済みエントリをlive filesystemへ適用する
      * @param manifestId 実行コンテキストを選択するマニフェストID
      * @param entry 適用対象entry
-     * @return entry全体の適用成功時true
+     * @return Applied = 適用した、Skipped = FIFO等の復元しない種別のためスキップした、Failed = 失敗した
      */
-     bool applyRestoreEntry(const QString &manifestId, const qsnapper::restore::RestoreEntry &entry);
+     qsnapper::restore::RestoreEntryOutcome applyRestoreEntry(const QString &manifestId, const qsnapper::restore::RestoreEntry &entry);
     /** @brief 終端計画の安全ネット・unmount・signal・registry削除を実行する
      * @param manifestId 終端したマニフェストid
      * @param terminal 終端状態
@@ -538,10 +618,19 @@ private:
      */
     void removeUnusedRestoreOwnerWatches();
 
+    /**
+     * @brief 実行を開始した計画の後片付け (安全ネット、ディレクトリの時刻、dirfd、unmount) を行い、実行contextを削除する
+     * @param manifestId 対象のマニフェストID
+     * @return rootサブボリュームがread-onlyのまま残った可能性がある場合true
+     * @note 戻り値がtrueの場合は、呼び出し元が計画を完了として報告しない (write可能でない状態を成功にしないため)
+     */
+    bool finalizeRestoreExecution(const QString &manifestId);
+
     /** @brief 実行を開始した復元計画に限り、rootサブボリュームをrwへ戻す安全ネットを実行する
      * @param state commit時に記録した安全ネットの判定材料
+     * @return 不要だった場合、またはrwであることを確認・回復できた場合true
      */
-    void runRootReadWriteSafetyNet(
+    bool runRootReadWriteSafetyNet(
         const qsnapper::restore::RootReadWriteSafetyNetState &state);
 
 public:
@@ -583,6 +672,12 @@ public:
      */
     int pendingTestAuthorizationCount() const;
 
+    /** @brief テスト用の認可に届いた要求の累計件数を返す
+     *  不正な引数を認可の前に拒否し、利用者にプロンプトを出さないことを確かめるために使う
+     * @return beginAuthorizationが呼ばれた回数
+     */
+    int testAuthorizationRequestCount() const;
+
     /** @brief 保留中のテスト用認可をすべて確定し、各呼び出しの継続を実行する
      * @param granted 許可する場合はtrue
      */
@@ -607,9 +702,63 @@ public:
      */
     void endSnapperdOperationForTesting();
 
+    /** @brief config操作を止める復元計画があるかの判定を、認可とD-Busを介さずに呼び出す
+     *  D-Busを介さない直接呼び出しではエラー応答を送れないため、拒否の経路を本体の呼び出しで検証できない
+     *  判定の部分だけを取り出して検証するために使う
+     * @param configName 判定対象の設定名
+     * @return hasUnfinishedRestorePlanの結果
+     */
+    bool hasUnfinishedRestorePlanForTesting(const QString &configName);
+
+    /**
+     * @brief discardStagingRestorePlansを、config操作を介さずに呼び出す
+     * @param configName 対象の設定名
+     * @param snapshotNumber 参照する計画だけに絞るスナップショット番号 (負の値なら絞らない)
+     */
+    void discardStagingRestorePlansForTesting(const QString &configName, int snapshotNumber);
+
+    /**
+     * @brief ownerの接続が切れたときの処理を、D-Busの通知を介さずに呼び出す
+     * @param owner 切断されたことにするowner
+     */
+    void handleRestoreOwnerUnregisteredForTesting(const QString &owner);
+
+    /** @brief 認可済みのcommitが作る実行状態を、mountせずに作る
+     *  エントリの適用と終了処理 (安全ネット、ディレクトリの時刻) を、実際のスナップショットなしで検証するために使う
+     * @param manifestId 実行状態に対応付けるマニフェストID
+     * @param sourcePath 復元元として扱うディレクトリの絶対パス
+     * @param sourceDirFd sourcePathを開いたfd (所有権を移す)
+     * @param subvolume 復元先の基準とする絶対パス
+     * @param useReflink ダイレクトコピー方式として扱う場合true
+     * @param rootReadWriteState 終了時の安全ネットの判定材料
+     */
+    void beginRestoreApplyForTesting(const QString &manifestId, const QString &sourcePath, int sourceDirFd, const QString &subvolume, bool useReflink,
+                                     const qsnapper::restore::RootReadWriteSafetyNetState &rootReadWriteState);
+
+    /** @brief applyRestoreEntryを、executorとD-Busを介さずに呼び出す
+     * @param manifestId beginRestoreApplyForTestingで作った実行状態のID
+     * @param entry 適用するエントリ
+     * @return applyRestoreEntryの結果
+     */
+    qsnapper::restore::RestoreEntryOutcome applyRestoreEntryForTesting(const QString &manifestId,
+                                                                       const qsnapper::restore::RestoreEntry &entry);
+
+    /** @brief finishRestorePlanを、executorを介さずに呼び出す
+     * @param manifestId 終了させるマニフェストID
+     * @param terminal executorが報告した終端状態
+     */
+    void finishRestorePlanForTesting(const QString &manifestId, qsnapper::restore::ManifestState terminal);
+
+    /** @brief 例外を投げる本体をauthorizeThenで実行し、例外がスロットの外へ出ないかを確かめる
+     * @param body 認可済みの本体として実行する処理 (例外を投げる)
+     * @return authorizeThenの戻り値 (例外を止めた場合はfalse)
+     */
+    bool authorizeThrowingBodyForTesting(const std::function<bool()> &body);
+
 private:
-    TestAuthorization m_testAuthorization = TestAuthorization::Polkit;                                  // 認可の結果
+    TestAuthorization m_testAuthorization = TestAuthorization::Polkit;                                      // 認可の結果
     QList<std::pair<CallReply, std::function<void(const CallReply &, bool)>>> m_testPendingAuthorizations;  // 保留中の認可と継続
+    int m_testAuthorizationRequests = 0;                                                                    // 認可の要求の累計件数
 #endif
 
 public slots:
@@ -663,32 +812,32 @@ public slots:
      */
      QString BeginRestorePlan(const QString &configName, int snapshotNumber, int counterpartSnapshotNumber, const QString &restoreMode);
     /** @brief staging計画へ検証済みentry chunkを原子的に追加する
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @param filePaths 復元対象絶対パス列
      * @param changeTypes パスと対応する変更種別列
      * @return chunk全体を追加できた場合: true
      */
      bool StageRestoreEntries(const QString &manifestId, const QStringList &filePaths, const QStringList &changeTypes);
     /** @brief 計画をfreeze後に1度だけ認可し非同期実行を開始する
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @return 実行開始を受理した場合: true
      */
     bool CommitRestorePlan(const QString &manifestId);
 
     /** @brief owner確認済みRunning計画のidle loopを再開する
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @return nudgeを受理した場合: true
      */
     bool ContinueRestorePlan(const QString &manifestId);
 
     /** @brief owner確認済み計画状態をRFC4180 escaping済みCSVで返す
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @return ManifestStatusフィールド順のCSV、失敗時空文字列
      */
     QString GetRestorePlanStatus(const QString &manifestId);
 
     /** @brief owner確認済み非終端計画へ境界cancellationを要求する
-     * @param manifestId owner束縛されたマニフェストID
+     * @param manifestId 呼び出し元のD-Bus接続 (owner) に結び付けられたマニフェストID
      * @return cancellationを受理した場合: true
      */
     bool CancelRestorePlan(const QString &manifestId);

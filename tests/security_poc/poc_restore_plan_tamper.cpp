@@ -1,14 +1,14 @@
 /**
  * @file poc_restore_plan_tamper.cpp
- * @brief staged restoreのcommit時changeType検証 (権威ある比較照合) のPoC実行体
+ * @brief staged restoreのcommit時changeType検証 (復元元と比較相手の木の直接観測) のPoC実行体
  *
  * 本PoCは本番のルートファイルシステムに対しては絶対に実行しない
  * 全てのファイル操作は引数で与えたscratch root配下に閉じる (引数が"/"の場合は起動を拒否する)
  *
  * シナリオ:
- *   サーバはcommit時に、クライアントが申告したchangeTypeを信頼せず
- *   (source, counterpart) から権威ある比較を再構築して全エントリを照合する
- *   本PoCはpre / postの2つの「スナップショット」木から現実の差分を計算し、
+ *   サーバはcommit時に、クライアントが申告したchangeTypeもlibsnapperの比較結果 (filelistキャッシュ) も信頼せず、
+ *   復元元と比較相手の木を直接観測して、全エントリが実際の差分に裏付けられているかを照合する
+ *   本PoCはpre / postの2つの「スナップショット」木を用意し、
  *   本番と同一の純粋関数群 (restorevalidation) と実security core
  *   (RestoreManifestRegistry / RestorePlanExecutor / qsnapper::security::*) を
  *   用いて以下を証明する:
@@ -19,7 +19,7 @@
  *     - STAGE 4:  正当なRe-apply to Post計画 (post --> preの向き) も検証を通り、CREATED / DELETEDが向きに応じて正しく解釈される
  *
  * 検証対象の実装:
- *   - 状態ビット -> changeType写像とpath正規化: qsnapper::restore::restorevalidation
+ *   - 木の観測による差分の裏付け: qsnapper::restore::restorevalidation と qsnapper::security::observePathNoFollowAt
  *   - 凍結済み計画の保持とbounded slice読み出し: RestoreManifestRegistry
  *   - 検証通過後の実行: RestorePlanExecutor + 実削除プリミティブ
  *     (qsnapper::security::safeRemoveAllBeneathRoot / isConfirmedAbsentAt)
@@ -37,9 +37,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QIODevice>
-#include <QSet>
 #include <QString>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <cstdio>
 #include <optional>
 #include <unistd.h>
@@ -154,115 +154,6 @@ void snapshotTree(const QString &directory, const QString &prefix,
 }
 
 /**
- * @brief diffTrees用の小さな内容読み出しヘルパ
- * @param path 実パス
- * @return 内容のUTF-8文字列
- */
-QString readFileHelper(const QString &path)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return QString();
-    }
-    return QString::fromUtf8(file.readAll());
-}
-
-/**
- * @brief 2つの「スナップショット」木を比較し、snapper::Fileのstatusビット相当を計算する
- *
- * 本番のComparisonが計算するpre_to_post_statusと同じ規則:
- * sourceに無くtargetに在る -> CREATED、逆 -> DELETED、種別相違 -> TYPE、通常ファイルで内容や属性が相違 -> CONTENT (本PoCの対象は通常ファイルのみ)
- * 差分の無いパスは権威あるmapへ登録しない (比較に現れない)
- *
- * @param sourceDir 復元元スナップショット木 (実パス)
- * @param targetDir 比較相手スナップショット木 (実パス)
- * @param prefix 走査中の絶対表現パス ("/etc"等)
- * @param out パス -> statusビットの格納先
- */
-void diffTrees(const QString &sourceDir, const QString &targetDir,
-               const QString &prefix, QHash<QString, unsigned int> *out)
-{
-    const QDir source(sourceDir);
-    const QDir target(targetDir);
-    const QFileInfoList entries = source.entryInfoList(
-        QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    QStringList names;
-    for (const QFileInfo &entry : entries) {
-        names.append(entry.fileName());
-    }
-    for (const QFileInfo &entry : target.entryInfoList(
-             QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)) {
-        if (!names.contains(entry.fileName())) {
-            names.append(entry.fileName());
-        }
-    }
-
-    for (const QString &name : names) {
-        const QString relative = prefix + QLatin1Char('/') + name;
-        const QFileInfo inSource(source.filePath(name));
-        const QFileInfo inTarget(target.filePath(name));
-
-        if (inSource.isDir() || inTarget.isDir()) {
-            if (inSource.isDir() && inTarget.isDir()) {
-                diffTrees(inSource.absoluteFilePath(),
-                          inTarget.absoluteFilePath(), relative, out);
-            }
-            else if (inSource.isDir()) {
-                out->insert(relative, qsnapper::restore::RestoreStatusType);
-            }
-            else {
-                out->insert(relative, qsnapper::restore::RestoreStatusType);
-            }
-            continue;
-        }
-
-        unsigned int bits = 0;
-        if (!inSource.exists()) {
-            bits = qsnapper::restore::RestoreStatusCreated;
-        }
-        else if (!inTarget.exists()) {
-            bits = qsnapper::restore::RestoreStatusDeleted;
-        }
-        else if (inSource.isSymLink() != inTarget.isSymLink()) {
-            bits = qsnapper::restore::RestoreStatusType;
-        }
-        else if (!inSource.isSymLink()
-                 && (inSource.size() != inTarget.size()
-                     || readFileHelper(inSource.absoluteFilePath())
-                         != readFileHelper(inTarget.absoluteFilePath())
-                     || inSource.permissions() != inTarget.permissions())) {
-            bits = qsnapper::restore::RestoreStatusContent;
-        }
-        else if (inSource.isSymLink()
-                 && QFileInfo(inSource.symLinkTarget()).absoluteFilePath()
-                     != QFileInfo(inTarget.symLinkTarget()).absoluteFilePath()) {
-            bits = qsnapper::restore::RestoreStatusContent;
-        }
-
-        if (bits != 0) {
-            out->insert(relative, bits);
-        }
-    }
-}
-
-/**
- * @brief 権威あるmap (パス -> statusビット) を本番と同一の純粋関数群で構築する
- * @param bits diffTreesの結果
- * @param expectedTypes 構築先 (正規化キー -> 期待changeType)
- */
-void buildAuthoritativeMap(const QHash<QString, unsigned int> &bits,
-                           QHash<QString, QString> *expectedTypes)
-{
-    for (auto it = bits.constBegin(); it != bits.constEnd(); ++it) {
-        if (!qsnapper::restore::registerAuthoritativeRestoreEntry(
-                expectedTypes, it.key(), it.value())) {
-            failNow(QStringLiteral("preflight"),
-                    QStringLiteral("authoritative collision for %1").arg(it.key()));
-        }
-    }
-}
-
-/**
  * @brief 計画をstagingから構築してfreezeする
  * @param registry 計画を保持するregistry
  * @param snapshotNumber 復元元スナップショット番号
@@ -296,25 +187,63 @@ QString stageAndFreezePlan(qsnapper::restore::RestoreManifestRegistry &registry,
 }
 
 /**
+ * @brief dirfdを根とする木を、本番と同じ規則で観測する関数を作る
+ * @param rootFd 観測する木の根のdirfd (関数の利用中は開いたままにすること)
+ * @return 相対パスを受け取り観測結果を返す関数
+ */
+qsnapper::restore::RestorePathObserver makeTreeObserver(int rootFd)
+{
+    return [rootFd](const QString &relativePath) {
+        qsnapper::restore::RestorePathObservation observation;
+        struct stat info = {};
+        switch (qsnapper::security::observePathNoFollowAt(rootFd, relativePath, &info)) {
+        case qsnapper::security::PathPresenceAt::Present:
+            observation = qsnapper::restore::restorePathObservationFromStat(info);
+            break;
+        case qsnapper::security::PathPresenceAt::Absent:
+            observation.presence = qsnapper::restore::RestorePathPresence::Absent;
+            break;
+        case qsnapper::security::PathPresenceAt::Unknown:
+            observation.presence = qsnapper::restore::RestorePathPresence::Unknown;
+            break;
+        }
+        return observation;
+    };
+}
+
+/**
  * @brief commit時preflightを本番と同一の手順で実行する
  *
- * 権威あるmapの構築と全エントリの照合のみを行い、認可・変異は行わない
+ * 復元元と比較相手の木を開き、全エントリが実際の差分に裏付けられているかだけを照合する
+ * 認可と変異は行わない
  *
  * @param registry 凍結済み計画を保持するregistry
  * @param manifestId 対象マニフェストID
- * @param bits diffTreesで計算したステータスビット
- * @return 計画全体が権威ある比較と一致した場合: true
+ * @param sourceTree 復元元スナップショット木 (scratch root配下の絶対表現パス)
+ * @param counterpartTree 比較相手スナップショット木 (scratch root配下の絶対表現パス)
+ * @return 計画全体が実際の差分に裏付けられた場合にtrueを返し、それ以外はfalseを返す
  */
 bool runPreflight(qsnapper::restore::RestoreManifestRegistry &registry,
                   const QString &manifestId,
-                  const QHash<QString, unsigned int> &bits)
+                  const QString &sourceTree,
+                  const QString &counterpartTree)
 {
-    QHash<QString, QString> expectedTypes;
-    buildAuthoritativeMap(bits, &expectedTypes);
+    const int sourceFd = ::open(underRoot(sourceTree).toUtf8().constData(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int counterpartFd = ::open(underRoot(counterpartTree).toUtf8().constData(),
+                                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (sourceFd < 0 || counterpartFd < 0) {
+        failNow(QStringLiteral("preflight"), QStringLiteral("failed to open snapshot trees"));
+    }
+
     qsnapper::restore::ManifestError error =
         qsnapper::restore::ManifestError::None;
-    return qsnapper::restore::validateFrozenEntriesAgainstAuthoritative(
-        registry, manifestId, QStringLiteral(":1.poc"), expectedTypes, &error);
+    const bool accepted = qsnapper::restore::validateFrozenEntriesAgainstTrees(
+        registry, manifestId, QStringLiteral(":1.poc"), QStringLiteral("/"),
+        makeTreeObserver(sourceFd), makeTreeObserver(counterpartFd), &error);
+    ::close(sourceFd);
+    ::close(counterpartFd);
+    return accepted;
 }
 
 } // namespace
@@ -345,7 +274,11 @@ int main(int argc, char *argv[])
     writeFile(QStringLiteral("/snapshots/pre/etc/kept.conf"), QStringLiteral("SAME\n"));
     writeFile(QStringLiteral("/snapshots/pre/etc/deleted.conf"), QStringLiteral("EXISTED\n"));
     writeFile(QStringLiteral("/snapshots/post/etc/modified.conf"), QStringLiteral("POST\n"));
-    writeFile(QStringLiteral("/snapshots/post/etc/kept.conf"), QStringLiteral("SAME\n"));
+    // Btrfsのスナップショットと同じく、変更されていないファイルはinode番号と時刻を含めて同一に見えるよう、hard linkで共有する
+    if (::link(underRoot(QStringLiteral("/snapshots/pre/etc/kept.conf")).toUtf8().constData(),
+               underRoot(QStringLiteral("/snapshots/post/etc/kept.conf")).toUtf8().constData()) != 0) {
+        failNow(QStringLiteral("setup"), QStringLiteral("link failed for /snapshots/post/etc/kept.conf"));
+    }
     writeFile(QStringLiteral("/snapshots/post/etc/created.conf"), QStringLiteral("NEW\n"));
 
     // liveは「Post適用後 + ユーザの手違いで差分外ファイルを編集済み」の状態
@@ -353,19 +286,7 @@ int main(int argc, char *argv[])
     writeFile(QStringLiteral("/live/etc/kept.conf"), QStringLiteral("USER-EDITED\n"));
     writeFile(QStringLiteral("/live/etc/created.conf"), QStringLiteral("NEW\n"));
 
-    // --- 権威ある差分を計算する (revert-to-Pre向き: pre --> post) ---
-    QHash<QString, unsigned int> preToPostAbs;
-    diffTrees(underRoot(QStringLiteral("/snapshots/pre")),
-              underRoot(QStringLiteral("/snapshots/post")),
-              QString(), &preToPostAbs);
-
     std::printf("STAGE 1: fixture trees created under scratch root\n");
-    std::printf("STAGE 1: authoritative pre<->post diff entries: %d\n",
-                preToPostAbs.size());
-    if (preToPostAbs.size() != 3) {
-        failNow(QStringLiteral("STAGE 1"),
-                QStringLiteral("unexpected diff size: %1").arg(preToPostAbs.size()));
-    }
 
     // --- STAGE 2a: 差分のmodified エントリをcreatedへ改ざんした計画はcommit時に拒否される ---
     {
@@ -378,12 +299,13 @@ int main(int argc, char *argv[])
         QHash<QString, QString> liveBefore;
         snapshotTree(underRoot(QStringLiteral("/live")), QString(), &liveBefore);
 
-        const bool accepted = runPreflight(registry, id, preToPostAbs);
+        const bool accepted = runPreflight(registry, id, QStringLiteral("/snapshots/pre"),
+                                           QStringLiteral("/snapshots/post"));
         std::printf("STAGE 2a: tampered (modified -> created) plan accepted = %s\n",
                     accepted ? "YES" : "NO");
         if (accepted) {
             failNow(QStringLiteral("STAGE 2a"),
-                    QStringLiteral("tampered plan passed the authoritative validation"));
+                    QStringLiteral("tampered plan passed the commit-time validation"));
         }
 
         QHash<QString, QString> liveAfter;
@@ -407,12 +329,13 @@ int main(int argc, char *argv[])
         QHash<QString, QString> liveBefore;
         snapshotTree(underRoot(QStringLiteral("/live")), QString(), &liveBefore);
 
-        const bool accepted = runPreflight(registry, id, preToPostAbs);
+        const bool accepted = runPreflight(registry, id, QStringLiteral("/snapshots/pre"),
+                                           QStringLiteral("/snapshots/post"));
         std::printf("STAGE 2b: forged out-of-diff modified plan accepted = %s\n",
                     accepted ? "YES" : "NO");
         if (accepted) {
             failNow(QStringLiteral("STAGE 2b"),
-                    QStringLiteral("out-of-diff path passed the authoritative validation"));
+                    QStringLiteral("out-of-diff path passed the commit-time validation"));
         }
 
         QHash<QString, QString> liveAfter;
@@ -443,7 +366,8 @@ int main(int argc, char *argv[])
              QStringLiteral("modified"),
              QStringLiteral("deleted")});
 
-        if (!runPreflight(registry, id, preToPostAbs)) {
+        if (!runPreflight(registry, id, QStringLiteral("/snapshots/pre"),
+                          QStringLiteral("/snapshots/post"))) {
             failNow(QStringLiteral("STAGE 3"),
                     QStringLiteral("legitimate revert-to-Pre plan was rejected"));
         }
@@ -451,8 +375,8 @@ int main(int argc, char *argv[])
 
         // 検証通過後のみexecutorを起動する (本番のcommit順序と同一)
         qsnapper::restore::RestorePlanExecutor executor(registry);
-        executor.setEntryApplier([](const QString &manifestId,
-                                    const qsnapper::restore::RestoreEntry &entry) {
+        const auto applyEntry = [](const QString &manifestId,
+                                   const qsnapper::restore::RestoreEntry &entry) -> bool {
             Q_UNUSED(manifestId)
             if (entry.changeType == QStringLiteral("created")) {
                 // 本番と同一の安全網: 復元元 (pre) スナップショットに存在するパスの削除は拒否される
@@ -489,6 +413,13 @@ int main(int argc, char *argv[])
             }
             QFile::remove(underRoot(QStringLiteral("/live") + entry.path));
             return source.copy(underRoot(QStringLiteral("/live") + entry.path));
+        };
+        // executorは適用結果を3値で受け取るため、bool値のPoC用処理を変換して渡す
+        executor.setEntryApplier([applyEntry](const QString &manifestId,
+                                              const qsnapper::restore::RestoreEntry &entry) {
+            return applyEntry(manifestId, entry)
+                    ? qsnapper::restore::RestoreEntryOutcome::Applied
+                    : qsnapper::restore::RestoreEntryOutcome::Failed;
         });
 
         qsnapper::restore::ManifestError error =
@@ -524,19 +455,9 @@ int main(int argc, char *argv[])
         writeFile(QStringLiteral("/live/etc/deleted.conf"), QStringLiteral("EXISTED\n"));
         writeFile(QStringLiteral("/live/etc/kept.conf"), QStringLiteral("USER-EDITED\n"));
 
-        QHash<QString, unsigned int> postToPre;
-        diffTrees(underRoot(QStringLiteral("/snapshots/post")),
-                  underRoot(QStringLiteral("/snapshots/pre")),
-                  QString(), &postToPre);
-        if (postToPre.size() != 3) {
-            failNow(QStringLiteral("STAGE 4"),
-                    QStringLiteral("unexpected post->pre diff size: %1")
-                        .arg(postToPre.size()));
-        }
-
         qsnapper::restore::RestoreManifestRegistry registry;
-        // post --> preの向きでは: modified.confはCONTENT、deleted.confは「postに在りpreに無い」ため、
-        // CREATED、created.confは「postに無くpreに在る」ため、DELETEDになる (向きでCREATED / DELETEDが反転する)
+        // post --> preの向きでは、modified.confはmodified、deleted.confは「postに無くpreに在る」ためcreated、
+        // created.confは「postに在りpreに無い」ためdeletedになる (向きでcreatedとdeletedが反転する)
         const QString id = stageAndFreezePlan(
             registry, 2, 1,
             {QStringLiteral("/etc/deleted.conf"),
@@ -546,15 +467,16 @@ int main(int argc, char *argv[])
              QStringLiteral("modified"),
              QStringLiteral("deleted")});
 
-        if (!runPreflight(registry, id, postToPre)) {
+        if (!runPreflight(registry, id, QStringLiteral("/snapshots/post"),
+                          QStringLiteral("/snapshots/pre"))) {
             failNow(QStringLiteral("STAGE 4"),
                     QStringLiteral("legitimate re-apply-to-Post plan was rejected"));
         }
         std::printf("STAGE 4: legitimate re-apply-to-Post plan passed validation = YES\n");
 
         qsnapper::restore::RestorePlanExecutor executor(registry);
-        executor.setEntryApplier([](const QString &manifestId,
-                                    const qsnapper::restore::RestoreEntry &entry) {
+        const auto applyEntry = [](const QString &manifestId,
+                                   const qsnapper::restore::RestoreEntry &entry) -> bool {
             Q_UNUSED(manifestId)
             if (entry.changeType == QStringLiteral("created")) {
                 return qsnapper::security::safeRemoveAllBeneathRoot(
@@ -563,6 +485,13 @@ int main(int argc, char *argv[])
             QFile source(underRoot(QStringLiteral("/snapshots/post") + entry.path));
             QFile::remove(underRoot(QStringLiteral("/live") + entry.path));
             return source.copy(underRoot(QStringLiteral("/live") + entry.path));
+        };
+        // executorは適用結果を3値で受け取るため、bool値のPoC用処理を変換して渡す
+        executor.setEntryApplier([applyEntry](const QString &manifestId,
+                                              const qsnapper::restore::RestoreEntry &entry) {
+            return applyEntry(manifestId, entry)
+                    ? qsnapper::restore::RestoreEntryOutcome::Applied
+                    : qsnapper::restore::RestoreEntryOutcome::Failed;
         });
 
         qsnapper::restore::ManifestError error =

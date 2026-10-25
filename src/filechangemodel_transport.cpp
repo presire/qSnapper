@@ -3,10 +3,14 @@
  * @brief 復元計画D-Bus転送の破棄処理とシステムバス実装
  *
  * staged restoreのD-Busメソッドを非同期で発行し、進捗と完了のシグナルを中継する
- * Polkit認証はcommitPlanの呼び出し時にサーバ側で1度だけ行う
+ * Polkit認証はcommitPlanの呼び出し時にqsnapper-dbus-serviceで1度だけ行う
+ *
+ * 利用する側 : FileChangeModel
+ * 依存 : Qt D-Bus、filechangemodel_transport_p.h
  */
 
 #include "filechangemodel_transport_p.h"
+#include <QCoreApplication>
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDBusMessage>
@@ -14,6 +18,29 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+
+namespace {
+    /**
+     * @brief 復元計画のD-Busエラーを、利用者へ表示できる文言へ変換する
+     *
+     * BeginRestorePlanなどはPolkitの認可に失敗するとAccessDeniedを返すため、qsnapper-dbus-serviceが返す生のメッセージではなく読みやすい説明にする
+     * それ以外のエラーはqsnapper-dbus-serviceが返した文言をそのまま使う
+     *
+     * @param error D-Busの応答に含まれるエラー
+     * @return 画面に表示する文言
+     */
+    QString planErrorText(const QDBusError &error)
+    {
+        const QString name = error.name();
+        if (name == QLatin1String("org.freedesktop.DBus.Error.AccessDenied")
+                || name == QLatin1String("com.presire.qsnapper.Error.AccessDenied")
+                || name == QLatin1String("com.presire.qsnapper.Error.NotAuthorized")) {
+            return QCoreApplication::translate("FileChangeModel",
+                "Authorization was denied. Administrator authentication is required to restore files.");
+        }
+        return error.message();
+    }
+} // namespace
 
 
 // ============================================================================
@@ -56,7 +83,7 @@ void SystemBusRestorePlanTransport::beginPlan(const QString &configName, int sna
     callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
         QDBusPendingReply<QString> reply = *watcher;
         if (reply.isError()) {
-            done(false, QString(), reply.error().message());
+            done(false, QString(), planErrorText(reply.error()));
             return;
         }
         // 空のマニフェストIDはサーバ側での計画作成失敗を示す
@@ -88,7 +115,7 @@ void SystemBusRestorePlanTransport::stageEntries(const QString &manifestId, cons
     callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
         QDBusPendingReply<bool> reply = *watcher;
         if (reply.isError()) {
-            done(false, reply.error().message());
+            done(false, planErrorText(reply.error()));
         }
         else if (!reply.value()) {
             done(false, QStringLiteral("Restore entries were rejected"));
@@ -119,7 +146,7 @@ void SystemBusRestorePlanTransport::commitPlan(const QString &manifestId,
     callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
         QDBusPendingReply<bool> reply = *watcher;
         if (reply.isError()) {
-            done(false, reply.error().message());
+            done(false, planErrorText(reply.error()));
         }
         else if (!reply.value()) {
             done(false, QStringLiteral("Restore plan commit was rejected"));
@@ -150,7 +177,7 @@ void SystemBusRestorePlanTransport::cancelPlan(const QString &manifestId,
     callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
         QDBusPendingReply<bool> reply = *watcher;
         if (reply.isError()) {
-            done(false, reply.error().message());
+            done(false, planErrorText(reply.error()));
         }
         else if (!reply.value()) {
             done(false, QStringLiteral("Restore plan cancel was rejected"));
@@ -181,7 +208,7 @@ void SystemBusRestorePlanTransport::requestStatus(const QString &manifestId,
     callPlanMethod(message, [done](QDBusPendingCallWatcher *watcher) {
         QDBusPendingReply<QString> reply = *watcher;
         if (reply.isError()) {
-            done(false, QString(), reply.error().message());
+            done(false, QString(), planErrorText(reply.error()));
             return;
         }
         // 空の返り値はサーバ側での問い合わせ失敗を示す

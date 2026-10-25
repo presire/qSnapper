@@ -276,7 +276,7 @@ void TestFilesystemHelpers::beneathRootMissingParentsFollowTrustedParentPolicy()
         QCOMPARE(st.st_uid, ::geteuid());
     }
 
-    // 他ユーザーが書き込める親ではmetadataを適用せず、他ユーザー書き込み不可の0711で作成する
+    // 他ユーザーが書き込める親ではmetadataを適用せず、snapshot側の検索権 (0751のx) だけを与えた0711で作成する
     {
         QTemporaryDir liveDir;
         QVERIFY(liveDir.isValid());
@@ -296,6 +296,57 @@ void TestFilesystemHelpers::beneathRootMissingParentsFollowTrustedParentPolicy()
     }
 
     ::close(snapshotFd);
+}
+
+/**
+ * @brief 差し替え可能な親の下で作り直す親ディレクトリが、snapshot側より緩い検索権を持たないことを確認する
+ *
+ * snapshot側で0700の親が0644の子を隠していた場合、子だけを復元しても親を0711で作ると他ユーザーが子を読めてしまう
+ * 復元先の一時ディレクトリはsticky bitなしで誰でも書き込める (0777) ようにし、rootで実行しても差し替え可能な親として扱わせる
+ */
+void TestFilesystemHelpers::beneathRootUntrustedParentKeepsSnapshotSearchRestriction()
+{
+    QTemporaryDir snapshotDir;
+    QVERIFY(snapshotDir.isValid());
+    const QString snapshotPath = snapshotDir.path();
+    QVERIFY(QDir(snapshotPath).mkpath(QStringLiteral("secret")));
+    QVERIFY(QDir(snapshotPath).mkpath(QStringLiteral("public")));
+    {
+        QFile child(snapshotPath + QStringLiteral("/secret/child"));
+        QVERIFY(child.open(QIODevice::WriteOnly));
+        QCOMPARE(child.write("hidden"), qint64(6));
+    }
+    QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/secret/child")).constData(), 0644), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/secret")).constData(), 0700), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/public")).constData(), 0755), 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotPath).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+
+    QTemporaryDir liveDir;
+    QVERIFY(liveDir.isValid());
+    QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0777), 0);
+
+    // umaskで作成時のmodeが削られると、検索権を与え過ぎていないかを判定できないため0にする
+    const mode_t previousUmask = ::umask(0);
+    const bool secretCreated = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/secret"), snapshotFd, true);
+    const bool publicCreated = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            liveDir.path(), liveDir.path() + QStringLiteral("/public"), snapshotFd, true);
+    ::umask(previousUmask);
+    ::close(snapshotFd);
+    QVERIFY(secretCreated);
+    QVERIFY(publicCreated);
+
+    struct stat secretStat {};
+    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/secret")).constData(), &secretStat), 0);
+    QCOMPARE(mode_t(secretStat.st_mode & 07777), mode_t(0700));
+
+    // snapshot側が検索を許していた親は、復元先の子孫へ辿れるよう検索だけを与える
+    struct stat publicStat {};
+    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/public")).constData(), &publicStat), 0);
+    QCOMPARE(mode_t(publicStat.st_mode & 07777), mode_t(0711));
 }
 
 void TestFilesystemHelpers::beneathRootSymlinkHelpersApplyWithinRoot()
@@ -534,4 +585,116 @@ void TestFilesystemHelpers::beneathRootRejectsSymlinkInRootPathAncestry()
     QVERIFY(isAttackRejectionErrno(errno));
     QVERIFY(QDir(evilRootDir).entryList(QDir::AllEntries | QDir::Hidden
                                         | QDir::NoDotAndDotDot).isEmpty());
+}
+
+/**
+ * @brief 深すぎるディレクトリの再帰削除が、fdを使い切る前に何も削除せず止まることを検証する
+ *
+ * 一般ユーザが作れる深い木を削除させて、rootサービスのfdを枯渇させたりスタックを溢れさせたりできないようにする
+ */
+void TestFilesystemHelpers::beneathRootRemovalStopsAtDepthLimit()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+
+    // 上限 (256段) を超える深さの木を、dirfd相対で作る (パス長の上限に掛からないようにするため)
+    const QString deepTop = root + QStringLiteral("/deep");
+    QVERIFY(QDir().mkpath(deepTop));
+    int currentFd = ::open(QFile::encodeName(deepTop).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(currentFd >= 0);
+    for (int depth = 0; depth < 300; ++depth) {
+        QVERIFY(::mkdirat(currentFd, "d", 0700) == 0);
+        const int nextFd = ::openat(currentFd, "d", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ::close(currentFd);
+        QVERIFY(nextFd >= 0);
+        currentFd = nextFd;
+    }
+    QVERIFY(::mkdirat(currentFd, "leaf", 0700) == 0);
+    ::close(currentFd);
+
+    errno = 0;
+    QVERIFY(!safeRemoveAllBeneathRoot(root, deepTop));
+    QCOMPARE(errno, ELOOP);
+    QVERIFY(QFileInfo::exists(deepTop + QStringLiteral("/d/d/d")));
+
+    // 上限内の深さであれば、ファイルを含む木を全て削除できる
+    const QString shallowTop = root + QStringLiteral("/shallow");
+    QString nested = shallowTop;
+    for (int depth = 0; depth < 20; ++depth) {
+        nested += QStringLiteral("/n");
+    }
+    QVERIFY(QDir().mkpath(nested));
+    QFile nestedFile(nested + QStringLiteral("/file"));
+    QVERIFY(nestedFile.open(QIODevice::WriteOnly));
+    nestedFile.close();
+    QFile topFile(shallowTop + QStringLiteral("/top-file"));
+    QVERIFY(topFile.open(QIODevice::WriteOnly));
+    topFile.close();
+    QVERIFY(safeRemoveAllBeneathRoot(root, shallowTop));
+    QVERIFY(!QFileInfo::exists(shallowTop));
+
+    // QTemporaryDirの後片付けがパス長の上限で失敗しないよう、深い木は下から順に消す
+    int fds[302];
+    fds[0] = ::open(QFile::encodeName(deepTop).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(fds[0] >= 0);
+    for (int depth = 1; depth <= 300; ++depth) {
+        fds[depth] = ::openat(fds[depth - 1], "d", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        QVERIFY(fds[depth] >= 0);
+    }
+    QVERIFY(::unlinkat(fds[300], "leaf", AT_REMOVEDIR) == 0);
+    for (int depth = 300; depth >= 1; --depth) {
+        ::close(fds[depth]);
+        QVERIFY(::unlinkat(fds[depth - 1], "d", AT_REMOVEDIR) == 0);
+    }
+    ::close(fds[0]);
+}
+
+/**
+ * @brief 復元先の名前解決が、途中のmountポイントを越えないことを検証する
+ *
+ * libsnapperの差分は別のファイルシステムへ降りないため、mountを越えるエントリは偽物として扱う
+ * [/]と別のファイルシステムである/procを使い、同じファイルシステムの環境では検証を省略する
+ */
+void TestFilesystemHelpers::beneathRootResolutionRefusesMountBoundaries()
+{
+    struct stat rootInfo;
+    struct stat procInfo;
+    QCOMPARE(::stat("/", &rootInfo), 0);
+    if (::stat("/proc/sys", &procInfo) != 0 || procInfo.st_dev == rootInfo.st_dev) {
+        QSKIP("/proc is not a separate mount in this environment");
+    }
+
+    QByteArray leafName;
+    errno = 0;
+    const int parentFd = openDestinationParentBeneathRoot(QStringLiteral("/"),
+                                                          QStringLiteral("/proc/sys/kernel"), &leafName);
+    if (parentFd >= 0) {
+        ::close(parentFd);
+    }
+    QVERIFY(parentFd < 0);
+    QCOMPARE(errno, EXDEV);
+
+    errno = 0;
+    const int directoryFd = safeOpenDirectoryBeneathRoot(QStringLiteral("/"), QStringLiteral("proc/sys"),
+                                                         false, 0);
+    if (directoryFd >= 0) {
+        ::close(directoryFd);
+    }
+    QVERIFY(directoryFd < 0);
+    QCOMPARE(errno, EXDEV);
+
+    QTemporaryDir sourceDir;
+    QVERIFY(sourceDir.isValid());
+    const int sourceFd = ::open(QFile::encodeName(sourceDir.path()).constData(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(sourceFd >= 0);
+    errno = 0;
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(QStringLiteral("/"),
+                                                                          QStringLiteral("/proc/sys"),
+                                                                          sourceFd, false);
+    const int createError = errno;
+    ::close(sourceFd);
+    QVERIFY(!created);
+    QCOMPARE(createError, EXDEV);
 }

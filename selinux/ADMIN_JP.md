@@ -290,24 +290,15 @@ type_transition qsnapper_dbus_t tmp_t:dir qsnapper_tmp_t;
 | qsnapper_domtrans | 指定ドメインからqsnapper_tへのドメイン遷移を許可 |
 | qsnapper_run | ドメイン遷移の許可 + ロールへのqsnapper_roles属性付与 |
 | qsnapper_dbus_chat | 指定ドメインとqsnapper_t間のD-Busメッセージ送受信を許可 |
-| qsnapper_read_config | qsnapper_conf_t型の設定ファイル読み取りを許可 |
-| qsnapper_manage_config | qsnapper_conf_t型の設定ファイル管理を許可 |
-| qsnapper_read_snapshots | qsnapper_snapshot_t型のスナップショットファイル読み取りを許可 |
-| qsnapper_manage_snapshots | qsnapper_snapshot_t型のスナップショットファイル管理を許可 |
 | qsnapper_dbus_domtrans | 指定ドメインからqsnapper_dbus_tへのドメイン遷移を許可 |
 | qsnapper_dbus_service_chat | 指定ドメインとqsnapper_dbus_t間のD-Busメッセージ送受信を許可 |
-| qsnapper_read_log | qsnapper_log_t型のログファイル読み取りを許可 |
-| qsnapper_append_log | qsnapper_log_t型のログファイルへの追記を許可 |
-| qsnapper_manage_log | qsnapper_log_t型のログファイル管理を許可 |
-| qsnapper_admin | qSnapper環境全体の管理 (全型への管理アクセス) |
 
 **注意:**  
-qsnapper_conf_t, qsnapper_snapshot_t, qsnapper_log_t, qsnapper_var_run_tは、  
-`.if`のインターフェースでgen_requireとして参照されています。  
+以前のバージョンには、qsnapper_conf_t, qsnapper_snapshot_t, qsnapper_log_t, qsnapper_var_run_tを参照するインターフェース  
+(qsnapper_read_config, qsnapper_manage_config, qsnapper_read_snapshots, qsnapper_manage_snapshots,  
+qsnapper_read_log, qsnapper_append_log, qsnapper_manage_log, qsnapper_admin) がありました。  
 
-しかし、現在の`.te`ポリシーでは宣言されていません。  
-
-これらの型は、将来的にカスタムラベリングが必要になった場合に外部モジュールで宣言して使用するために設計されています。  
+これらの型は`.te`ポリシーで宣言されておらず、呼び出したモジュールのビルドが失敗するため削除しました。  
 現在のポリシーではシステム標準のラベル (etc_t, unlabeled_t, fs_t, var_lib_t, var_log_t) を使用しています。  
 
 ---

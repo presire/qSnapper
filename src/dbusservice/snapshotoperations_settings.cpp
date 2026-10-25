@@ -117,12 +117,14 @@ QMap<QString, QString> SnapshotOperations::getConfigAuthorized(const QString &co
  *
  * timerは全てのSnapper設定に共通であり、config名を受け取らない
  * 状態の取得もsystemdの応答を待つため、同時に1件だけに限り、他の要求を待たせない
+ * 照会はパスワードなしで呼べるため、変更 (SetTimerEnabled) とは別枠で数える
+ * 同じ枠を使うと、照会を繰り返すだけで管理者の変更やconfigの操作を拒否させられるため
  *
  * @return 応答は非同期に送るため、戻り値は使われない
  */
 SnapperTimerStateMap SnapshotOperations::GetTimerStates()
 {
-    if (rejectWhileTimerOperationRunning()) {
+    if (rejectWhileTimerQueryRunning()) {
         return {};
     }
 
@@ -136,13 +138,14 @@ SnapperTimerStateMap SnapshotOperations::GetTimerStates()
 /**
  * @brief 認可済みのGetTimerStates本体
  *
- * 認可を待つ間に別のtimerの操作が始まり得るため、本体でも同時実行を確かめ直す
+ * 認可を待つ間に別の照会が始まり得るため、本体でも同時実行を確かめ直す
+ * 変更の実行中でも照会は続ける (読み取りだけであり、変更の途中の状態が見えても次の照会で正しい状態に戻るため)
  *
  * @return 常に空のマップ (応答は操作の完了時に送る)
  */
 SnapperTimerStateMap SnapshotOperations::getTimerStatesAuthorized()
 {
-    if (rejectWhileTimerOperationRunning()) {
+    if (rejectWhileTimerQueryRunning()) {
         return {};
     }
 
@@ -153,13 +156,13 @@ SnapperTimerStateMap SnapshotOperations::getTimerStatesAuthorized()
 
     auto *operation = new SystemdTimerOperation(reply->connection, SystemdTimerOperation::Kind::Query,
                                                 qsnapper::security::snapperTimerUnits(), {}, this);
-    m_timerOperation = operation;
+    m_timerQueryOperation = operation;
     resetIdleTimer();
 
     operation->start([this, operation, reply = *reply](SystemdTimerOperation::Outcome outcome,
                                                        const SnapperTimerStateMap &states) {
         operation->deleteLater();
-        m_timerOperation.clear();
+        m_timerQueryOperation.clear();
         resetIdleTimer();
 
         if (outcome != SystemdTimerOperation::Outcome::Succeeded) {
@@ -318,9 +321,11 @@ void SnapshotOperations::sendAsyncError(const CallReply &reply, const QString &e
 }
 
 /**
- * @brief 実行中のtimerの操作があれば、固定の文言で拒否する
+ * @brief 実行中のtimerの変更があれば、固定の文言で拒否する
  *
  * 待ち行列を設けずに拒否するのは、systemdが応答しない場合に要求が際限なく溜まるのを防ぐため
+ * 照会 (m_timerQueryOperation) は見ない
+ * パスワードなしの照会で、変更とconfigの操作を拒否させないため
  */
 bool SnapshotOperations::rejectWhileTimerOperationRunning()
 {
@@ -332,9 +337,24 @@ bool SnapshotOperations::rejectWhileTimerOperationRunning()
 }
 
 /**
+ * @brief 実行中のtimerの状態の照会があれば、固定の文言で拒否する
+ *
+ * 照会もsystemdの応答を最大で数秒待つため、変更と同じ理由で待ち行列を設けず、同時に1件だけに限る
+ */
+bool SnapshotOperations::rejectWhileTimerQueryRunning()
+{
+    if (!m_timerQueryOperation) {
+        return false;
+    }
+    replyError(QDBusError::LimitsExceeded, TimerBusyText);
+    return true;
+}
+
+/**
  * @brief timerの有効化または無効化の実行中かを判定する
  *
- * 操作の完了 (finish) まではm_timerOperationが残るため、jobの完了を待つ間も実行中として扱う
+ * 変更の完了 (finish) まではm_timerOperationが残るため、jobの完了を待つ間も実行中として扱う
+ * 照会はunitを変えないため、復元の開始を妨げない
  */
 bool SnapshotOperations::timerChangeInProgress() const
 {

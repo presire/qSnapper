@@ -169,8 +169,8 @@ namespace qsnapper {
          * @brief スナップショットの作成で指定できるcleanupアルゴリズムかを判定する
          *
          * snapperのcleanupが解釈する名前 (number / timeline / empty-pre-post) と、cleanupの対象外を表す空文字列だけを許可する
-         * 未知の名前を保存すると、cleanupの対象から黙って外れ、利用者の意図より長くスナップショットが残るため、作成の時点で拒否する
-         * 既存のスナップショットの編集 (ModifySnapshot) は、YaSTと同じく任意の名前を許すため、本関数の対象外とする
+         * 未知の名前を保存すると、cleanupの対象から黙って外れ、利用者の意図より長くスナップショットが残るため、保存の時点で拒否する
+         * 作成 (CreateSnapshot) と既存のスナップショットの編集 (ModifySnapshot) の両方で、認可を要求する前と、認可後に本体を実行する直前の2回検証する
          *
          * @param cleanup D-Busから受け取ったcleanupアルゴリズム名
          * @return 許可する名前の場合: true

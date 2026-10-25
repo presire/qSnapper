@@ -10,9 +10,8 @@
 #define SNAPSHOTOPERATIONS_INTERNAL_H
 
 #include <QString>
-#include <QCoreApplication>
-#include <QDateTime>
 #include <QLatin1Char>
+#include <QRandomGenerator>
 #include <pwd.h>
 #include <grp.h>
 #include <sys/types.h>
@@ -24,29 +23,26 @@ namespace qsnapper::internal {
     /**
      * @brief 一時退避先の兄弟パスを組み立てる
      *
-     * leaf名がNAME_MAXを超えないよう切り詰め、pidと時刻と試行回数の接尾辞で一意性を保つ
-     * UTF-8の文字境界を壊さないよう文字単位で削る
+     * 退避先は書き込み可能な親ディレクトリの中に作られ得るため、他のユーザが名前を予測して先回りできないよう
+     * 接尾辞に暗号論的な乱数を使う (pidや時刻は外から推測できる)
+     * leaf名がNAME_MAXを超えないよう、UTF-8の文字境界を壊さずに文字単位で切り詰める
      *
      * @param path 元パス
-     * @param tag 識別子
-     * @param attempt 試行回数
+     * @param tag 用途を示す識別子
      * @return 退避先の兄弟パス
      */
-    inline QString siblingTemporaryPath(const QString &path, const QString &tag, int attempt)
+    inline QString siblingTemporaryPath(const QString &path, const QString &tag)
     {
         const int slashIndex = path.lastIndexOf(QLatin1Char('/'));
         const QString dirPath = slashIndex <= 0 ? QStringLiteral("/") : path.left(slashIndex);
         const QString baseName = slashIndex < 0 ? path : path.mid(slashIndex + 1);
 
         // suffixはASCIIのみで構成されるため、文字数がそのままbyte数になる
-        const QString suffix = QStringLiteral(".") + tag
-                + QStringLiteral(".") + QString::number(QCoreApplication::applicationPid())
-                + QStringLiteral(".") + QString::number(QDateTime::currentMSecsSinceEpoch())
-                + QStringLiteral(".") + QString::number(attempt);
+        const QString suffix = QStringLiteral(".") + tag + QStringLiteral(".")
+                + QStringLiteral("%1").arg(QRandomGenerator::system()->generate64(), 16, 16,
+                                           QLatin1Char('0'));
 
-        // leaf名はNAME_MAX (bytes) を超えられない
-        // 長いbase名はここで切り詰めるが、suffixのpid / ms / attemptにより一意性は保たれる
-        // UTF-8の途中で切らないよう、収まるまで文字単位で削る
+        // 長いbase名はここで切り詰めるが、一意性は乱数の接尾辞で保たれる
         const qsizetype maxBaseBytes = static_cast<qsizetype>(NAME_MAX) - 1 - suffix.size();
         QString trimmedBase = baseName;
         while (!trimmedBase.isEmpty() && trimmedBase.toUtf8().size() > maxBaseBytes) {

@@ -4,6 +4,11 @@
  *
  * Snapperの変更出力をFileChangeItemツリーへ変換して、QML向けのロールと選択状態とファイル差分取得と復元操作を提供する
  * 変更種別の向きに関する不変条件はComparisonContextが保持する
+ *
+ * 利用する側 : ファイル変更ページと差分・復元ダイアログ
+ * 入力 : QMLからのプロパティ設定とQ_INVOKABLE呼び出し
+ * 出力 : モデルのロール、比較・読み込み・復元の状態プロパティ、各処理の完了シグナル
+ * 依存 : Qt D-Bus、RestorePlanTransport、restoreplanstatus.h、FileChangeItem
  */
 
 #ifndef FILECHANGEMODEL_H
@@ -39,10 +44,26 @@ class FileChangeModel : public QAbstractItemModel
     Q_PROPERTY(int snapshotNumber READ snapshotNumber WRITE setSnapshotNumber NOTIFY snapshotNumberChanged)           // 対カレント比較用のスナップショット番号を公開する
     Q_PROPERTY(bool hasChanges READ hasChanges NOTIFY hasChangesChanged)                                              // ファイル変更の有無を公開する
     Q_PROPERTY(bool loading READ isLoading NOTIFY loadingChanged)                                                     // 読み込み状態を公開する
+    Q_PROPERTY(bool loaded READ isLoaded NOTIFY loadedChanged)                                                        // 読み込みに成功したかどうか (0件の成功も含む) を公開する
+    Q_PROPERTY(bool truncated READ isTruncated NOTIFY truncatedChanged)                                               // 上限を超えて一覧を省略したかどうかを公開する
+    Q_PROPERTY(int omittedCount READ omittedCount NOTIFY truncatedChanged)                                            // 上限を超えて省略した件数を公開する
+    Q_PROPERTY(QVariantMap restoreResult READ restoreResult NOTIFY restoreResultChanged)                              // 直近の復元計画の結果 (件数と失敗位置) を公開する
     Q_PROPERTY(int restoreBatchSize READ restoreBatchSize WRITE setRestoreBatchSize NOTIFY restoreBatchSizeChanged)   // 復元チャンクの最大件数を公開する
     Q_PROPERTY(bool useDirectRestore READ useDirectRestore WRITE setUseDirectRestore NOTIFY useDirectRestoreChanged)  // Direct Copy方式の使用設定を公開する
 
 public:
+    /**
+     * @brief 変更一覧の取り込み上限
+     *
+     * D-Busの応答は全文を受け取った後でないと切り詰められないが、
+     * 解析とツリー構築 (エントリごとに複数のオブジェクトを確保する) がメモリと時間の大半を占めるため、ここで打ち切る
+     * 上限は、通常の利用では到達しない大きさで、UIが応答しなくなる前に止まる値として選んだ
+     *   エントリ数 : 500000件
+     *   文字数     : 256 MiB相当 (QStringの1文字は2バイトのため、268435456文字を上限の目安とする)
+     */
+    static constexpr int MAX_CHANGE_ENTRIES = 500000;                       // 取り込む変更エントリ数の上限
+    static constexpr qsizetype MAX_CHANGE_TEXT_CHARS = 256LL * 1024 * 1024; // 取り込む変更一覧の文字数の上限
+
     /**
      * @brief 文字列を返すD-Bus呼び出しの非同期結果コールバック
      * @param ok 呼び出しに成功した場合はtrue
@@ -92,6 +113,10 @@ private:
     FileChangeItem *m_rootItem;                 // ツリーのルートアイテム
     bool m_hasChanges;                          // ファイル変更があるかどうか
     bool m_loading;                             // 読み込み中フラグ
+    bool m_truncated = false;                   // 上限を超えたため一覧の後半を省略したかどうか
+    int m_omittedCount = 0;                     // 上限を超えて省略した行数
+    int m_maxChangeEntries = MAX_CHANGE_ENTRIES;            // 取り込む変更エントリ数の上限 (テストで差し替える)
+    qsizetype m_maxChangeTextChars = MAX_CHANGE_TEXT_CHARS; // 取り込む変更一覧の文字数の上限 (テストで差し替える)
     int m_totalFilesCount;                      // 復元対象の総ファイル数
     int m_processedFilesCount;                  // 処理済みファイル数
 
@@ -111,6 +136,10 @@ private:
     bool m_planCommitted;                   // 復元計画のcommitを送出済みか
     bool m_planSignalsSubscribed;           // 復元計画シグナルを購読中か
     bool m_planCancelRequested;             // 復元計画のキャンセルを送出済みか
+
+    // 復元結果
+    QVariantMap m_restoreResult;            // 直近の復元計画の結果 (GetRestorePlanStatusの解析結果)
+    quint64 m_restoreResultGeneration = 0;  // 復元結果要求の世代 (新しい復元の開始後に届いた古い応答を捨てる)
 
     // 復元制御とエラー状態
     bool m_restoreHasError;                 // 復元エラーフラグ
@@ -284,6 +313,14 @@ public:
     bool hasChanges() const { return m_hasChanges; }
     /** @brief 読み込み中かどうかを返す */
     bool isLoading() const { return m_loading; }
+    /** @brief 読み込みに成功した結果を公開しているかどうかを返す (0件の成功も含む) */
+    bool isLoaded() const { return m_loadedComparisonValid; }
+    /** @brief 上限を超えて一覧を省略したかどうかを返す */
+    bool isTruncated() const { return m_truncated; }
+    /** @brief 上限を超えて省略した行数を返す */
+    int omittedCount() const { return m_omittedCount; }
+    /** @brief 直近の復元計画の結果を返す */
+    QVariantMap restoreResult() const { return m_restoreResult; }
 
     /** @brief 復元チャンクの最大件数を返す */
     int restoreBatchSize() const { return m_restoreBatchSize; }
@@ -316,6 +353,16 @@ public:
     Q_INVOKABLE QStringList getCheckedItems() const;
     /** @brief チェック済みの項目が1つでもあるかどうかを返す (RestorePreviewDialogが復元ボタンの有効状態の判定に使う) */
     Q_INVOKABLE bool hasCheckedItems() const;
+    /**
+     * @brief チェック済みの項目のうち、復元で現在のシステムから削除されるパスを返す
+     *
+     * 変更種別がcreatedのエントリは、復元元のスナップショットに存在しないパスであり、復元すると現在のシステムから削除される
+     * 復元計画へ載せる対象と同じ規則で収集するため、確認ダイアログの表示と実際の削除対象が食い違わない
+     *
+     * @param maxPaths 返すパスの最大件数 (ダイアログの描画負荷を抑えるための上限、負の値は0件として扱う)
+     * @return 削除されるパスの総数 (count) と、先頭から最大maxPaths件のパス (paths) を持つマップ
+     */
+    Q_INVOKABLE QVariantMap checkedDeletePreview(int maxPaths) const;
     /** @brief 選択済み項目の復元を開始する */
     Q_INVOKABLE bool restoreCheckedItems();
     /** @brief 指定ファイルの復元を開始する */
@@ -341,6 +388,13 @@ public:
     /** @brief テスト専用に復元計画transportを差し替える */
     void setRestorePlanTransportForTesting(RestorePlanTransport *transport);
 
+    /**
+     * @brief テスト専用に変更一覧の取り込み上限を差し替える
+     * @param maxEntries 取り込む変更エントリ数の上限
+     * @param maxTextChars 取り込む変更一覧の文字数の上限
+     */
+    void setChangeLimitsForTesting(int maxEntries, qsizetype maxTextChars);
+
 signals:
     /** @brief Snapper設定名の変更を通知する */
     void configNameChanged();
@@ -350,6 +404,12 @@ signals:
     void hasChangesChanged();
     /** @brief 読み込み状態の更新を通知する */
     void loadingChanged();
+    /** @brief 読み込み成功状態の更新を通知する */
+    void loadedChanged();
+    /** @brief 一覧の省略状態の更新を通知する */
+    void truncatedChanged();
+    /** @brief 復元結果の更新を通知する */
+    void restoreResultChanged();
     /** @brief 操作エラーを通知する */
     void errorOccurred(const QString &message);
     /** @brief ファイル差分と詳細の取得完了を通知する */

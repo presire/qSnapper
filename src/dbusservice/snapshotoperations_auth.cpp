@@ -9,6 +9,7 @@
 #include <QDBusConnectionInterface>
 #include <QDBusReply>
 #include <QDebug>
+#include <QDateTime>
 #include <QPointer>
 #include "snapshotoperations.h"
 #include "snapshotoperations_internal.h"
@@ -186,7 +187,23 @@ void SnapshotOperations::replyError(const QString &errorName, const QString &tex
         return;
     }
 
+    // QDBusContext::sendErrorReplyはD-Busの呼び出しcontextが無いと無効なmessageを参照して異常終了する
+    // スロットを直接呼ぶ単体テストでは返す相手がいないため、エラー応答を送らずに終える
+    if (!calledFromDBus()) {
+        return;
+    }
     sendErrorReply(errorName, text);
+}
+
+/**
+ * @brief 認可済みの本体で想定外の例外が起きたことを記録し、固定の文言でエラー応答する
+ *
+ * 遅延許可の経路で本体が応答を確保済みの場合、replyErrorは送出済みとして扱い、二重には応答しない
+ */
+void SnapshotOperations::replyUnexpectedFailure()
+{
+    qWarning() << "Unexpected exception in an authorized operation";
+    replyError(QDBusError::Failed, QStringLiteral("Internal error"));
 }
 
 /**
@@ -244,6 +261,15 @@ void SnapshotOperations::setAuthorizationForTesting(TestAuthorization mode)
 int SnapshotOperations::pendingTestAuthorizationCount() const
 {
     return static_cast<int>(m_testPendingAuthorizations.size());
+}
+
+/**
+ * @brief テスト用の認可に届いた要求の累計件数を返す
+ * @return beginAuthorizationが呼ばれた回数
+ */
+int SnapshotOperations::testAuthorizationRequestCount() const
+{
+    return m_testAuthorizationRequests;
 }
 
 /**
@@ -310,6 +336,99 @@ void SnapshotOperations::endSnapperdOperationForTesting()
     m_snapperdOperation.clear();
     resetIdleTimer();
 }
+
+/**
+ * @brief config操作を止める復元計画があるかの判定を、認可とD-Busを介さずに呼び出す
+ * @param configName 判定対象の設定名
+ * @return hasUnfinishedRestorePlanの結果
+ */
+bool SnapshotOperations::hasUnfinishedRestorePlanForTesting(const QString &configName)
+{
+    return hasUnfinishedRestorePlan(configName);
+}
+
+/**
+ * @brief discardStagingRestorePlansを、config操作を介さずに呼び出す
+ * @param configName 対象の設定名
+ * @param snapshotNumber 参照する計画だけに絞るスナップショット番号 (負の値なら絞らない)
+ */
+void SnapshotOperations::discardStagingRestorePlansForTesting(const QString &configName, int snapshotNumber)
+{
+    discardStagingRestorePlans(configName, snapshotNumber);
+}
+
+/**
+ * @brief ownerの接続が切れたときの処理を、D-Busの通知を介さずに呼び出す
+ * @param owner 切断されたことにするowner
+ */
+void SnapshotOperations::handleRestoreOwnerUnregisteredForTesting(const QString &owner)
+{
+    handleRestoreOwnerUnregistered(owner);
+}
+
+/**
+ * @brief 認可済みのcommitが作る実行状態を、mountせずに作る
+ *
+ * mountedは未設定のままにするため、終了処理はunmountを行わず、渡したfdだけを閉じる
+ *
+ * @param manifestId 実行状態に対応付けるマニフェストID
+ * @param sourcePath 復元元として扱うディレクトリの絶対パス
+ * @param sourceDirFd sourcePathを開いたfd (所有権を移す)
+ * @param subvolume 復元先の基準とする絶対パス
+ * @param useReflink ダイレクトコピー方式として扱う場合true
+ * @param rootReadWriteState 終了時の安全ネットの判定材料
+ */
+void SnapshotOperations::beginRestoreApplyForTesting(
+    const QString &manifestId,
+    const QString &sourcePath,
+    int sourceDirFd,
+    const QString &subvolume,
+    bool useReflink,
+    const qsnapper::restore::RootReadWriteSafetyNetState &rootReadWriteState)
+{
+    RestoreExecution execution;
+    execution.configName = QStringLiteral("test");
+    execution.snapshotDir = sourcePath;
+    execution.snapshotDirFd = sourceDirFd;
+    execution.subvolume = subvolume;
+    execution.useReflink = useReflink;
+    execution.rootReadWriteState = rootReadWriteState;
+    m_restoreExecutions.insert(manifestId, execution);
+}
+
+/**
+ * @brief applyRestoreEntryを、executorとD-Busを介さずに呼び出す
+ * @param manifestId beginRestoreApplyForTestingで作った実行状態のID
+ * @param entry 適用するentry
+ * @return applyRestoreEntryの結果
+ */
+qsnapper::restore::RestoreEntryOutcome SnapshotOperations::applyRestoreEntryForTesting(
+    const QString &manifestId,
+    const qsnapper::restore::RestoreEntry &entry)
+{
+    return applyRestoreEntry(manifestId, entry);
+}
+
+/**
+ * @brief finishRestorePlanを、executorを介さずに呼び出す
+ * @param manifestId 終了させるマニフェストID
+ * @param terminal executorが報告した終端状態
+ */
+void SnapshotOperations::finishRestorePlanForTesting(const QString &manifestId,
+                                                     qsnapper::restore::ManifestState terminal)
+{
+    finishRestorePlan(manifestId, terminal, QString());
+}
+
+/**
+ * @brief 例外を投げる本体をauthorizeThenで実行し、例外がスロットの外へ出ないかを確かめる
+ * @param body 認可済みの本体として実行する処理 (例外を投げる)
+ * @return authorizeThenの戻り値 (例外を止めた場合はfalse)
+ */
+bool SnapshotOperations::authorizeThrowingBodyForTesting(const std::function<bool()> &body)
+{
+    return authorizeThen<bool>(QStringLiteral("com.presire.qsnapper.view-diff"), body);
+}
 #endif
 
 /**
@@ -344,6 +463,17 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
 {
     resetIdleTimer();
 
+#ifdef QSNAPPER_ENABLE_TEST_HOOKS
+    // 隔離環境にはpolkitdが無いため、テスト用サービスでは認可の結果だけを差し替える
+    // 即時許可と遅延許可のどちらの経路も、本番と同じ呼び出し側 (authorizeThen) を通す
+    // 即時許可は応答の遅延を伴わないため、単体テストがスロットを直接呼ぶ場合 (D-Bus経由でない呼び出し) にも許可する
+    // 本番のビルドにはこの分岐が存在せず、D-Bus経由でない呼び出しは下の検査で必ず拒否される
+    ++m_testAuthorizationRequests;
+    if (m_testAuthorization == TestAuthorization::Grant) {
+        return AuthorizationOutcome::Granted;
+    }
+#endif
+
     const CallReply reply = captureCallReply();
     if (!reply.fromDBus || reply.message.service().isEmpty()) {
         replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
@@ -351,11 +481,6 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     }
 
 #ifdef QSNAPPER_ENABLE_TEST_HOOKS
-    // 隔離環境にはpolkitdが無いため、テスト用サービスでは認可の結果だけを差し替える
-    // 即時許可と遅延許可のどちらの経路も、本番と同じ呼び出し側 (authorizeThen) を通す
-    if (m_testAuthorization == TestAuthorization::Grant) {
-        return AuthorizationOutcome::Granted;
-    }
     if (m_testAuthorization == TestAuthorization::Defer) {
         m_testPendingAuthorizations.append({reply, continuation});
         setDelayedReply(true);
@@ -511,6 +636,11 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
         qWarning() << "Failed to create Snapper instance";
         return nullptr;
     }
+    catch (const std::exception &) {
+        // bad_allocなどsnapper以外の例外も呼び出し元のスロットの外へ出すとサービスが異常終了するため、作成の失敗として扱う
+        qWarning() << "Failed to create Snapper instance: unexpected exception";
+        return nullptr;
+    }
 }
 
 /**
@@ -550,6 +680,10 @@ snapper::Snapper* SnapshotOperations::getSnapperForListing(const QString &config
     catch (const snapper::Exception &) {
         // e.what()には設定ファイルのpath (指定された設定名) が含まれ得るため、ログには載せない
         qWarning() << "Failed to read Snapper config for listing";
+    }
+    catch (const std::exception &) {
+        // 指紋が空のままなら下の判定で作り直しへ進むため、読み取りの失敗と同じに扱う
+        qWarning() << "Failed to read Snapper config for listing: unexpected exception";
     }
 
     if (m_snapper && m_currentConfig == configName && !fingerprint.isEmpty()

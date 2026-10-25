@@ -175,13 +175,18 @@ public slots:
      * snapshotoperations.cpp BeginRestorePlanと同じ順序:
      * owner確認 -> resolveConfigOrFail -> restoreMode検証 -> snapshotNumber検証 -> counterpartSnapshotNumber検証 -> purgeExpired -> createStaging
      *
+     * 本番はcounterpartSnapshotNumber検証の後にview-diffで認可し、同じUIDの計画数が上限なら最も古いStaging計画を破棄してから作る
+     * 隔離環境にはpolkitdが無く、本ハーネスは所有者の束縛と復元の実行の認可 (CommitRestorePlanの1回) を検証するため、
+     * 計画作成の認可は常に許可したものとして扱い、認可ログ (復元の実行の認可だけを数える) にも記録しない
+     * 認可と破棄の挙動は単体テスト (tst_snapshotoperations) と静的検査 (check_restore_authorization_boundaries.py) で確認する
+     *
      * counterpartSnapshotNumberは比較相手のsnapshot番号であり、0は「現在のシステム」のsentinel、正の値は復元元と異なる番号でなければならない
      *
      * @param configName Snapper設定名
      * @param snapshotNumber 復元元snapshot番号
      * @param counterpartSnapshotNumber 比較相手のsnapshot番号 (0は現在のシステム)
      * @param restoreMode yastまたはdirect
-     * @return 成功時manifest id
+     * @return 成功時にmanifest idを返し、失敗時は空文字列を返す
      */
     QString BeginRestorePlan(const QString &configName, int snapshotNumber,
                              int counterpartSnapshotNumber,
@@ -448,7 +453,13 @@ public slots:
             restoreModeString(status->mode),
             quoteRestoreStatusCsvField(status->configName),
             QString::number(status->snapshotNumber),
-            quoteRestoreStatusCsvField(status->lastError)
+            quoteRestoreStatusCsvField(status->lastError),
+            QString::number(status->deletedCount),
+            QString::number(status->skippedCount),
+            QString::number(status->failedIndex),
+            quoteRestoreStatusCsvField(status->failedPath),
+            // 計画のパスは制御文字を含まないことをステージング時に検証済みのため、改行を区切りに使える
+            quoteRestoreStatusCsvField(status->skippedPaths.join(QLatin1Char('\n')))
         };
         return fields.join(QLatin1Char(','));
     }
@@ -670,19 +681,19 @@ private:
      * 本番のapplyRestoreEntry (snapshotoperations.cpp 行2681以降) は、libsnapperでmountしたsnapshotから実ファイルをlive filesystemへコピーするが、
      * user namespace内ではbtrfs mount操作を実行できない
      *
-     * 本スタブは、QSNAPPER_TEST_APPLY_LOGへentry pathを1行追記し、1ミリ秒スリープしてtrueを返すだけのno-opとする
+     * 本スタブは、QSNAPPER_TEST_APPLY_LOGへentry pathを1行追記し、1ミリ秒スリープしてAppliedを返すだけのno-opとする
      *
      * @param manifestId 実行中manifest id (未使用)
      * @param entry 適用対象entry
-     * @return 常にtrue
+     * @return 常にRestoreEntryOutcome::Applied
      */
-    bool applyRestoreEntryForTest(const QString &manifestId,
-                                  const qsnapper::restore::RestoreEntry &entry)
+    qsnapper::restore::RestoreEntryOutcome applyRestoreEntryForTest(const QString &manifestId,
+                                                                    const qsnapper::restore::RestoreEntry &entry)
     {
         Q_UNUSED(manifestId)
         appendLogLine(m_applyLogPath, entry.path);
         QThread::msleep(1);
-        return true;
+        return qsnapper::restore::RestoreEntryOutcome::Applied;
     }
 
     /**

@@ -287,20 +287,12 @@ These interfaces are for external module use and are not used by the qSnapper `.
 | `qsnapper_domtrans` | Allow domain transition from specified domain to `qsnapper_t` |
 | `qsnapper_run` | Allow domain transition + assign `qsnapper_roles` attribute to role |
 | `qsnapper_dbus_chat` | Allow D-Bus message exchange between specified domain and `qsnapper_t` |
-| `qsnapper_read_config` | Allow reading `qsnapper_conf_t` type configuration files |
-| `qsnapper_manage_config` | Allow managing `qsnapper_conf_t` type configuration files |
-| `qsnapper_read_snapshots` | Allow reading `qsnapper_snapshot_t` type snapshot files |
-| `qsnapper_manage_snapshots` | Allow managing `qsnapper_snapshot_t` type snapshot files |
 | `qsnapper_dbus_domtrans` | Allow domain transition from specified domain to `qsnapper_dbus_t` |
 | `qsnapper_dbus_service_chat` | Allow D-Bus message exchange between specified domain and `qsnapper_dbus_t` |
-| `qsnapper_read_log` | Allow reading `qsnapper_log_t` type log files |
-| `qsnapper_append_log` | Allow appending to `qsnapper_log_t` type log files |
-| `qsnapper_manage_log` | Allow managing `qsnapper_log_t` type log files |
-| `qsnapper_admin` | Full administration of the qSnapper environment (admin access to all types) |
 
 **Note:**  
-`qsnapper_conf_t`, `qsnapper_snapshot_t`, `qsnapper_log_t`, and `qsnapper_var_run_t` are referenced via `gen_require` in the `.if` interfaces but are not declared in the current `.te` policy.  
-These types are designed for use by external modules when custom labeling is needed in the future.  
+Earlier versions also shipped interfaces for `qsnapper_conf_t`, `qsnapper_snapshot_t`, `qsnapper_log_t`, and `qsnapper_var_run_t` (`qsnapper_read_config`, `qsnapper_manage_config`, `qsnapper_read_snapshots`, `qsnapper_manage_snapshots`, `qsnapper_read_log`, `qsnapper_append_log`, `qsnapper_manage_log`, `qsnapper_admin`).  
+These types are not declared in the `.te` policy, so any module calling those interfaces failed to build. They have been removed.  
 The current policy uses standard system labels (`etc_t`, `unlabeled_t`, `fs_t`, `var_lib_t`, `var_log_t`).  
 
 ---

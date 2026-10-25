@@ -4,6 +4,8 @@
  *
  * manifest単体の状態遷移、registryのowner境界、容量予算 (owner/UID/global)、
  * TTL回収とkeepAlive、終了計画storeの保持契約を確認する
+ * あわせて、config操作を止める計画の判定、計画が参照するスナップショットの保護、
+ * config/UID単位のStaging計画の列挙を確認する
  */
 
 #include <QHash>
@@ -150,6 +152,14 @@ private slots:
     void finishedPlanStatusIsOwnerBoundAndExpires();
     /** @brief 終了計画storeが上限で古い順に破棄されowner切断で該当分だけ消えることを確認する */
     void finishedPlanStoreIsBoundedAndClearedPerOwner();
+    /** @brief config操作を止める計画の判定がStagingを含めずownerにも依存しないことを確認する */
+    void activePlanQueryIgnoresStagingAndOwner();
+    /** @brief 単体削除から保護するスナップショットの判定が復元元と比較相手の両方を対象にすることを確認する */
+    void activePlanSnapshotReferenceCoversSourceAndCounterpart();
+    /** @brief config操作の直前に破棄する計画として、対象configのStaging計画だけをownerを問わず返すことを確認する */
+    void stagingIdsForConfigListOnlyStagingPlansOfConfig();
+    /** @brief 同じUIDのStaging計画が作成順に列挙され指定した計画と他の状態が除かれることを確認する */
+    void stagingIdsForUidAreListedOldestFirst();
 };
 
 /**
@@ -628,7 +638,8 @@ void TestRestoreManifest::registryManifestLimitsAreEnforced()
 /**
  * @brief stagingの予算がregistry全体で閉じており、接続数で掛け算できないこと
  *
- * BeginRestorePlan / StageRestoreEntries は設計上、認可を要さない
+ * BeginRestorePlan / StageRestoreEntries は、復元の実行の認可を要さない
+ * (BeginRestorePlanは差分の閲覧と同じview-diffの認可だけを求める)
  * 上限がmanifest単位にしか無いと、一般ユーザがD-Bus接続を複数開くだけで (unique nameごとに別ownerとして数えられるため)
  * rootサービスにマニフェスト上限 x 接続数のメモリを確保させられる
  *
@@ -1394,6 +1405,182 @@ void TestRestoreManifest::finishedPlanStoreIsBoundedAndClearedPerOwner()
                           QStringLiteral(":1.0")).has_value());
     QVERIFY(store.status(QStringLiteral("rm-%1").arg(total - 1),
                          QStringLiteral(":1.1")).has_value());
+}
+
+/**
+ * @brief config操作を止める計画の判定が、Staging計画を含めずownerにも依存しないことを検証する
+ *
+ * Staging計画は差分を閲覧できる利用者なら誰でも作れるため、空の計画を作るだけで
+ * 管理者のconfig操作 (CreateConfig / DeleteConfig / DeleteSnapshots) を妨害できてはならない
+ * Frozen計画とRunning計画は、作成したownerに関係なく止める
+ * 期限切れのFrozen計画は止めないが、Running計画はTTLで失効しないため止め続ける
+ */
+void TestRestoreManifest::activePlanQueryIgnoresStagingAndOwner()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    ManifestError error = ManifestError::None;
+
+    // 別ユーザが作った空のStaging計画だけでは止めない
+    const QString staging = registry.createStaging(QStringLiteral(":7.1"), 3000, QStringLiteral("root"),
+                                                   42, 0, RestoreMode::YastCompatible, &error);
+    QVERIFY(!staging.isEmpty());
+    QVERIFY(!registry.hasActivePlanForConfig(QStringLiteral("root")));
+
+    // Frozen計画は、ownerを問わず同じconfigだけを止める
+    const QString frozen = registry.createStaging(QStringLiteral(":7.2"), 3001, QStringLiteral("root"),
+                                                  42, 0, RestoreMode::YastCompatible, &error);
+    QVERIFY(registry.stageEntries(frozen, QStringLiteral(":7.2"), {QStringLiteral("/etc/hosts")},
+                                  {QStringLiteral("modified")}, &error));
+    QVERIFY(registry.freeze(frozen, QStringLiteral(":7.2"), &error));
+    QVERIFY(registry.hasActivePlanForConfig(QStringLiteral("root")));
+    QVERIFY(!registry.hasActivePlanForConfig(QStringLiteral("home")));
+
+    // 期限切れのFrozen計画は止めない
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs + 1;
+    QVERIFY(!registry.hasActivePlanForConfig(QStringLiteral("root")));
+
+    // Running計画はTTLで失効しないため、時間が経っても止め続ける
+    nowMs = kInitialTimeMs;
+    QVERIFY(registry.markRunning(frozen, QStringLiteral(":7.2"), &error));
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs * 2;
+    QVERIFY(registry.hasActivePlanForConfig(QStringLiteral("root")));
+
+    // 終端した計画は止めない
+    QVERIFY(registry.cancel(frozen, QStringLiteral(":7.2"), &error));
+    QVERIFY(!registry.hasActivePlanForConfig(QStringLiteral("root")));
+}
+
+/**
+ * @brief 同じUIDのStaging計画が作成順に列挙され、指定した計画と他の状態の計画が除かれることを検証する
+ *
+ * UIDの計画数が上限に達したとき、BeginRestorePlanは最も古いStaging計画から破棄する
+ * 破棄の対象に凍結済み・実行中の計画や他のユーザの計画が混ざると、認可済みの復元や他人の作業を壊してしまう
+ */
+void TestRestoreManifest::stagingIdsForUidAreListedOldestFirst()
+{
+    constexpr uint kUid = 4000;
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    ManifestError error = ManifestError::None;
+
+    const QString first = registry.createStaging(QStringLiteral(":8.1"), kUid, QStringLiteral("root"),
+                                                 42, 0, RestoreMode::YastCompatible, &error);
+    nowMs += 10;
+    const QString frozen = registry.createStaging(QStringLiteral(":8.2"), kUid, QStringLiteral("root"),
+                                                  42, 0, RestoreMode::YastCompatible, &error);
+    QVERIFY(registry.stageEntries(frozen, QStringLiteral(":8.2"), {QStringLiteral("/etc/hosts")},
+                                  {QStringLiteral("modified")}, &error));
+    QVERIFY(registry.freeze(frozen, QStringLiteral(":8.2"), &error));
+    nowMs += 10;
+    const QString second = registry.createStaging(QStringLiteral(":8.3"), kUid, QStringLiteral("root"),
+                                                  42, 0, RestoreMode::YastCompatible, &error);
+
+    // secondと同じミリ秒に作ったthirdも、作成順でsecondの後に並ぶ (計画IDの文字列順では決まらない)
+    const QString third = registry.createStaging(QStringLiteral(":8.1"), kUid, QStringLiteral("root"),
+                                                 42, 0, RestoreMode::YastCompatible, &error);
+    const QString otherUser = registry.createStaging(QStringLiteral(":9.1"), kUid + 1, QStringLiteral("root"),
+                                                     42, 0, RestoreMode::YastCompatible, &error);
+    QVERIFY(!first.isEmpty() && !second.isEmpty() && !third.isEmpty() && !otherUser.isEmpty());
+
+    QCOMPARE(registry.stagingIdsForUidOldestFirst(kUid, QString()), QStringList({first, second, third}));
+    QCOMPARE(registry.stagingIdsForUidOldestFirst(kUid, second), QStringList({first, third}));
+    QCOMPARE(registry.stagingIdsForUidOldestFirst(kUid + 1, QString()), QStringList({otherUser}));
+    QVERIFY(registry.stagingIdsForUidOldestFirst(kUid + 2, QString()).isEmpty());
+}
+
+/**
+ * @brief 単体削除から保護するスナップショットの判定が、復元元と比較相手の両方を対象にすることを検証する
+ *
+ * 凍結済み・実行中の計画の復元元と比較相手 (スナップショットの場合) を保護し、Staging計画と終端した計画は保護しない
+ */
+void TestRestoreManifest::activePlanSnapshotReferenceCoversSourceAndCounterpart()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    ManifestError error = ManifestError::None;
+
+    const QString plan = registry.createStaging(QStringLiteral(":8.1"), 3100, QStringLiteral("root"),
+                                                42, 45, RestoreMode::YastCompatible, &error);
+    QVERIFY(!plan.isEmpty());
+    QVERIFY(registry.stageEntries(plan, QStringLiteral(":8.1"), {QStringLiteral("/etc/hosts")},
+                                  {QStringLiteral("modified")}, &error));
+
+    // Staging計画は誰でも作れるため、削除を止めない
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 42));
+
+    QVERIFY(registry.freeze(plan, QStringLiteral(":8.1"), &error));
+    QVERIFY(registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 42));
+    QVERIFY(registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 45));
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 43));
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("home"), 42));
+
+    // 比較相手がlive (番号0) の計画は、番号0を保護対象として扱わない
+    const QString livePlan = registry.createStaging(QStringLiteral(":8.2"), 3101, QStringLiteral("home"),
+                                                    7, 0, RestoreMode::YastCompatible, &error);
+    QVERIFY(registry.stageEntries(livePlan, QStringLiteral(":8.2"), {QStringLiteral("/notes")},
+                                  {QStringLiteral("modified")}, &error));
+    QVERIFY(registry.freeze(livePlan, QStringLiteral(":8.2"), &error));
+    QVERIFY(registry.isSnapshotReferencedByActivePlan(QStringLiteral("home"), 7));
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("home"), 0));
+
+    // 期限切れのFrozen計画は保護しないが、Running計画は時間が経っても保護し続ける
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs + 1;
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("home"), 7));
+    nowMs = kInitialTimeMs;
+    QVERIFY(registry.markRunning(plan, QStringLiteral(":8.1"), &error));
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs * 2;
+    QVERIFY(registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 42));
+
+    // 終端した計画は保護しない
+    QVERIFY(registry.cancel(plan, QStringLiteral(":8.1"), &error));
+    QVERIFY(!registry.isSnapshotReferencedByActivePlan(QStringLiteral("root"), 42));
+}
+
+/**
+ * @brief config操作の直前に破棄する計画として、対象configのStaging計画だけを
+ *        ownerを問わず返すことを検証する
+ *
+ * 凍結済みの計画は認可待ちか実行直前であり、config操作の側で拒否するため対象に含めない
+ */
+void TestRestoreManifest::stagingIdsForConfigListOnlyStagingPlansOfConfig()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    ManifestError error = ManifestError::None;
+
+    const QString first = registry.createStaging(QStringLiteral(":9.1"), 3200, QStringLiteral("root"),
+                                                 10, 0, RestoreMode::DirectCopy, &error);
+    const QString second = registry.createStaging(QStringLiteral(":9.2"), 3201, QStringLiteral("root"),
+                                                  11, 12, RestoreMode::DirectCopy, &error);
+    const QString frozen = registry.createStaging(QStringLiteral(":9.3"), 3202, QStringLiteral("root"),
+                                                  10, 0, RestoreMode::DirectCopy, &error);
+    const QString other = registry.createStaging(QStringLiteral(":9.4"), 3203, QStringLiteral("home"),
+                                                 10, 0, RestoreMode::DirectCopy, &error);
+    QVERIFY(!first.isEmpty() && !second.isEmpty() && !frozen.isEmpty() && !other.isEmpty());
+    QVERIFY(registry.stageEntries(frozen, QStringLiteral(":9.3"), {QStringLiteral("/etc/hosts")},
+                                  {QStringLiteral("modified")}, &error));
+    QVERIFY(registry.freeze(frozen, QStringLiteral(":9.3"), &error));
+
+    QStringList all = registry.stagingIdsForConfig(QStringLiteral("root"), -1);
+    all.sort();
+    QStringList expected {first, second};
+    expected.sort();
+    QCOMPARE(all, expected);
+
+    // 番号で絞る場合は、復元元と比較相手のどちらで参照していても対象にする
+    QCOMPARE(registry.stagingIdsForConfig(QStringLiteral("root"), 10), QStringList {first});
+    QCOMPARE(registry.stagingIdsForConfig(QStringLiteral("root"), 12), QStringList {second});
+    QVERIFY(registry.stagingIdsForConfig(QStringLiteral("root"), 0).isEmpty());
+    QCOMPARE(registry.stagingIdsForConfig(QStringLiteral("home"), -1), QStringList {other});
+
+    // 期限切れの計画は、TTLの掃除で終端させるため対象に含めない
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs + 1;
+    QVERIFY(registry.stagingIdsForConfig(QStringLiteral("root"), -1).isEmpty());
 }
 
 QTEST_MAIN(TestRestoreManifest)

@@ -11,12 +11,17 @@
     変更種別を信頼し、段階的実行に対する除外も持たなかったため削除された
     復活させてはならない
 
-    STAGEDの単一認可経路 (BeginRestorePlan / StageRestoreEntries / CommitRestorePlan /
+    STAGEDの経路 (BeginRestorePlan / StageRestoreEntries / CommitRestorePlan /
     ContinueRestorePlan / GetRestorePlanStatus / CancelRestorePlan) は、
-    CommitRestorePlanの内部でちょうど1回だけ、計画の凍結より厳密に後に認可する
-    凍結前のメソッドとコミット後の制御メソッド (Continue/Status/Cancel) は決して認可してはならない
+    復元の実行をCommitRestorePlanの内部でちょうど1回だけ、計画の凍結より厳密に後に認可する
+    StageRestoreEntriesとコミット後の制御メソッド (Continue/Status/Cancel) は決して認可してはならない
     認可すると、計画が不変になる前に認可を求めたり、実行中に再プロンプトしたりすることになり、
-    いずれも「ちょうど1回だけ認可する」というセキュリティ特性を損なう
+    いずれも「復元の実行をちょうど1回だけ認可する」というセキュリティ特性を損なう
+
+    BeginRestorePlanだけは、計画の予算 (計画のために確保するエントリ数とpathバイト数の上限) を
+    認可のない利用者に使い切らせないため、差分の閲覧と同じview-diffでちょうど1回認可する
+    復元の実行の認可 (rollback-snapshot) を求めてはならず、計画の作成は認可後の本体
+    (beginRestorePlanAuthorized) に置かなければならない
 
 認可のプリミティブ :
     認可は非同期である
@@ -75,7 +80,11 @@ REMOVED_LEGACY_FUNCTIONS = (          # 復活してはならない旧経路の�
 )
 
 # 段階的単一認可経路の関数名
-STAGE_PRE_FREEZE = ("BeginRestorePlan", "StageRestoreEntries")  # 凍結前のメソッド
+STAGE_BEGIN = "BeginRestorePlan"                                # 計画を作るメソッド (view-diffで認可する)
+STAGE_BEGIN_ACTION = "com.presire.qsnapper.view-diff"           # 計画の作成に求めるアクション
+STAGE_COMMIT_ACTION = "com.presire.qsnapper.rollback-snapshot"  # 復元の実行に求めるアクション
+STAGE_BEGIN_BODY = "beginRestorePlanAuthorized"                 # 計画を作る認可後の本体
+STAGE_PRE_FREEZE = ("StageRestoreEntries",)                     # 認可してはならない凍結前のメソッド
 STAGE_COMMIT = "CommitRestorePlan"                              # 凍結と認可を行うメソッド
 STAGE_POST_COMMIT_CONTROL = (                                   # コミット後の制御メソッド
     "ContinueRestorePlan",                                      # 実行を継続する
@@ -108,8 +117,15 @@ EXPECTED_AUTHORIZING_METHODS = frozenset({   # 認可ゲートの呼び出しを
     "GetFileChangesBetween",
     "GetFileDiffBetween",
     "GetFileDiffAndDetails",
+    STAGE_BEGIN,
     STAGE_COMMIT,
+    # QSNAPPER_ENABLE_TEST_HOOKS付きのビルドだけに存在し、例外がスロットの外へ漏れないことを単体テストで確かめるために認可ゲートを通す
+    "authorizeThrowingBodyForTesting",
 })
+
+# 認可済みの本体を呼び出す式
+# 例外をスロットの外へ出さないよう、authorizeThenとcompleteDeferredCallは本体をAUTHORIZED_BODY_CALLのラッパー経由で実行する
+AUTHORIZED_BODY_CALL = "invokeAuthorizedBody<T>(body)"
 
 FUNCTION_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+)\s*\(")  # SnapshotOperations::name(の定義
 
@@ -133,7 +149,7 @@ RAW_ERROR_REPLY_OWNER = "replyError"                             # sendErrorRepl
 # authorizeThenとcompleteDeferredCallはテンプレートのためヘッダに定義されている
 RESTORE_GATE_CALL = "rejectWhileRestoreRunning()"                                    # ゲートの呼び出し
 RESTORE_GATE_EXEMPT_TOKEN = "AllowWhileRestoring"                                    # ゲートを外す指定
-RESTORE_GATE_EXEMPT_METHODS = frozenset({"ListConfigs"})                             # 外してよいメソッド
+RESTORE_GATE_EXEMPT_METHODS = frozenset({"ListConfigs", "BeginRestorePlan"})         # 外してよいメソッド
 AUTHORIZE_THEN_DEF_RE = re.compile(r"\bT\s+authorizeThen\s*\(")                      # authorizeThenの定義
 COMPLETE_DEFERRED_DEF_RE = re.compile(r"\bvoid\s+completeDeferredCall\s*\(")         # completeDeferredCallの定義
 
@@ -509,7 +525,7 @@ def check_restore_gate(text: str,
     if authorize_then is not None:
         gate_offsets = [m.start() for m in re.finditer(re.escape(RESTORE_GATE_CALL), authorize_then)]
         auth_offset = authorize_then.find("beginAuthorization(")
-        body_offset = authorize_then.rfind("return body();")
+        body_offset = authorize_then.rfind(f"return {AUTHORIZED_BODY_CALL};")
         print(f"[10] authorizeThen gate offsets {gate_offsets}, "
               f"beginAuthorization at {auth_offset}, last body() at {body_offset}")
         if len(gate_offsets) < 2:
@@ -520,17 +536,17 @@ def check_restore_gate(text: str,
         elif not (gate_offsets[0] < auth_offset < gate_offsets[-1] < body_offset):
             failures.append(
                 f"authorizeThen must call {RESTORE_GATE_CALL} before beginAuthorization( "
-                f"and again between authorization and return body();"
+                f"and again between authorization and return {AUTHORIZED_BODY_CALL};"
             )
 
     complete_deferred = template_body(COMPLETE_DEFERRED_DEF_RE, "completeDeferredCall")
     if complete_deferred is not None:
         gate_offset = complete_deferred.find(RESTORE_GATE_CALL)
-        body_offset = complete_deferred.find("body()")
+        body_offset = complete_deferred.find(AUTHORIZED_BODY_CALL)
         print(f"[10] completeDeferredCall gate at {gate_offset}, body() at {body_offset}")
         if gate_offset < 0 or body_offset < 0 or gate_offset > body_offset:
             failures.append(
-                f"completeDeferredCall must call {RESTORE_GATE_CALL} before body() "
+                f"completeDeferredCall must call {RESTORE_GATE_CALL} before {AUTHORIZED_BODY_CALL} "
                 f"(a restore can start while the Polkit prompt is pending)"
             )
 
@@ -650,7 +666,36 @@ def main() -> int:
             f" -- restore must go through the staged single-authorization path"
         )
 
-    # --- 3: BeginRestorePlan / StageRestoreEntriesの認可は0回であること ---
+    # --- 3: StageRestoreEntriesの認可は0回、BeginRestorePlanはview-diffでちょうど1回であること ---
+    begin_body = require_function(STAGE_BEGIN)
+    if begin_body is not None:
+        call_count = len(calls_in_function(STAGE_BEGIN))
+        print(f"[3] {STAGE_BEGIN}: {AUTH_CALL_LABEL} call count = {call_count} "
+              f"(must be 1, action {STAGE_BEGIN_ACTION})")
+        if call_count != 1:
+            failures.append(
+                f"{STAGE_BEGIN} must call {AUTH_CALL_LABEL} exactly once, "
+                f"found {call_count}"
+            )
+        if STAGE_BEGIN_ACTION not in begin_body:
+            failures.append(f"{STAGE_BEGIN} must authorize with {STAGE_BEGIN_ACTION}")
+        if STAGE_COMMIT_ACTION in begin_body:
+            failures.append(
+                f"{STAGE_BEGIN} must not request {STAGE_COMMIT_ACTION}; "
+                f"the restore is authorized only by {STAGE_COMMIT}"
+            )
+        if "m_restoreRegistry.createStaging(" in begin_body:
+            failures.append(
+                f"{STAGE_BEGIN} must create the plan only inside {STAGE_BEGIN_BODY} "
+                f"(after authorization)"
+            )
+    if STAGE_BEGIN_BODY in functions:
+        _, body_open, body_close = functions[STAGE_BEGIN_BODY]
+        if "m_restoreRegistry.createStaging(" not in text[body_open:body_close]:
+            failures.append(f"{STAGE_BEGIN_BODY} no longer creates the staging plan")
+    else:
+        failures.append(f"{STAGE_BEGIN_BODY} definition was not found")
+
     for name in STAGE_PRE_FREEZE:
         body = require_function(name)
         if body is None:

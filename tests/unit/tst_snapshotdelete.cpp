@@ -8,6 +8,8 @@
  * DeleteSnapshotsは、polkitのdelete-snapshots (auth_admin) で毎回認可し、snapperdを経由して削除する
  * 1件の削除でDeleteSnapshotsを呼び出すと、削除のたびに認証を求められる
  * また、作成した直後のスナップショットがSnapshotListOutdatedで拒否される
+ * 一覧を現在のconfigから取得し終えていない間は、番号がどのconfigを指すか確定しないため削除を拒否する
+ * configを切り替えた直後も、前のconfigの一覧に基づく削除を拒否し、同じ番号を切り替え先のスナップショットとして消さない
  * 本テストは、1件の削除が再びDeleteSnapshotsを使うように戻る不具合を検出する
  *
  * テストでは、テスト専用のdbus-daemonを起動し、DBUS_SYSTEM_BUS_ADDRESSでシステムバスの接続先をそのdbus-daemonへ切り替える
@@ -27,6 +29,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 
+#include "snapperservice.h"
 #include "snapshotlistmodel.h"
 
 namespace {
@@ -43,8 +46,8 @@ const QString FAKE_CONNECTION = QStringLiteral("tst_snapshotdelete_fake");      
  *
  * 受け取った削除の呼び出しを記録し、テストが呼び出されたメソッドと引数を確認できるようにする
  * DeleteSnapshotの応答 (true、false、エラー応答) は、テストから切り替えられる
- * SnapshotListModel::refreshは、ListSnapshotsを同期で呼び出し、応答が届くまでテストのスレッドを止める
- * 本オブジェクトがテストと同じスレッドにあると応答を返せなくなるため、本オブジェクトは別のスレッドで動かす
+ * SnapshotListModelは、一覧を取得し終えるまで削除を受け付けないため、各テストは先にListSnapshotsで一覧を読み込ませる
+ * テストのスレッドがQTRY_*で待つ間も確実に応答できるよう、偽サービスは別のスレッドで動かす
  * 呼び出しの記録と応答の設定は、テストのスレッドと本オブジェクトのスレッドの両方から読み書きするため、ミューテックスで保護する
  */
 class FakeOperations : public QObject, protected QDBusContext
@@ -70,6 +73,7 @@ public:
     {
         QMutexLocker locker(&m_mutex);
         m_calls.clear();
+        m_listedConfigs.clear();
         m_singleReply = SingleReply::ReturnTrue;
     }
 
@@ -136,20 +140,33 @@ public slots:
     }
 
     /**
-     * @brief 削除後にSnapshotListModel::refreshが行う一覧の再読み込みに応答する偽のListSnapshots
-     * @param configName Snapperの設定名 (本テストでは使用しない)
+     * @brief SnapshotListModel::refreshが行う一覧の取得に応答する偽のListSnapshots
+     * @param configName Snapperの設定名
      * @return スナップショットが1つもないことを表す空文字列 (CSV形式の一覧が空)
-     * @note 本メソッドがないと、refreshの同期呼び出しがタイムアウトするまでテストが止まるため、空の一覧を返す
+     * @note 取得を記録し、どのconfigの一覧を読み込んだかをテストから確認できるようにする
+     *       削除の呼び出しの記録とは分けて、削除の確認を一覧の取得が妨げないようにする
      */
     QString ListSnapshots(const QString &configName)
     {
-        Q_UNUSED(configName);
+        QMutexLocker locker(&m_mutex);
+        m_listedConfigs.append(configName);
         return QString();
     }
 
+    /**
+     * @brief ListSnapshotsで一覧を求められたconfigの記録を返す
+     * @return 呼び出された順のconfig名の一覧
+     */
+    QStringList listedConfigs() const
+    {
+        QMutexLocker locker(&m_mutex);
+        return m_listedConfigs;
+    }
+
 private:
-    mutable QMutex m_mutex;                               // m_callsとm_singleReplyを2つのスレッドから読み書きするための排他
+    mutable QMutex m_mutex;                               // 記録と応答の設定を2つのスレッドから読み書きするための排他
     QStringList m_calls;                                  // 受け取った削除の呼び出しの記録
+    QStringList m_listedConfigs;                          // ListSnapshotsで一覧を求められたconfig名の記録
     SingleReply m_singleReply = SingleReply::ReturnTrue;  // 偽のDeleteSnapshotが返す応答の種類
 };
 
@@ -174,8 +191,14 @@ private slots:
     void singleDeleteReturningFalseIsReportedAsFailure();
     void singleDeleteErrorIsReported();
     void multipleSelectionUsesDeleteSnapshots();
+    /** @brief 一覧を取得し終える前の削除要求が、D-Busを呼ばずに失敗として通知されることを確認する */
+    void deletionIsRefusedBeforeListIsLoaded();
+    /** @brief configを切り替えた後、前のconfigの一覧に基づく削除要求が拒否されることを確認する */
+    void deletionIsRefusedAfterConfigSwitch();
 
 private:
+    void loadList(SnapshotListModel &model);
+
     QTemporaryDir m_busDir;            // テスト専用のdbus-daemonのソケットを置く一時ディレクトリ
     QProcess m_busProcess;             // テスト専用のdbus-daemonのプロセス
     QThread m_fakeThread;              // 偽サービスを動かすスレッド
@@ -250,6 +273,18 @@ void TestSnapshotDelete::init()
 }
 
 /**
+ * @brief 一覧を現在のconfigから読み込ませ、取得が終わるまで待つ
+ * @param model 一覧を読み込ませるモデル
+ * @note SnapshotListModelは、表示中の一覧が現在のconfigから取得し終えたものでない場合に削除を受け付けない
+ *       削除の振る舞いを確認するテストは、本関数で前提の状態を作ってから削除を要求する
+ */
+void TestSnapshotDelete::loadList(SnapshotListModel &model)
+{
+    model.refresh();
+    QTRY_VERIFY(!model.loading());
+}
+
+/**
  * @brief 1件だけ削除する場合に、DeleteSnapshotを呼び出すことを確認する
  * @note 成功した場合は、snapshotsDeletionCompletedシグナルで成功数1と失敗数0が通知されることも確認する
  *       設定名のrootは、SnapperServiceの既定の設定名である
@@ -260,6 +295,7 @@ void TestSnapshotDelete::singleSelectionUsesDeleteSnapshot()
     QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
     QSignalSpy failed(&model, &SnapshotListModel::snapshotsDeletionFailed);
 
+    loadList(model);
     model.deleteSnapshots({5});
 
     QTRY_COMPARE(completed.count(), 1);
@@ -277,6 +313,7 @@ void TestSnapshotDelete::duplicatedSingleNumberUsesDeleteSnapshot()
     SnapshotListModel model;
     QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
 
+    loadList(model);
     model.deleteSnapshots({6, 6});
 
     QTRY_COMPARE(completed.count(), 1);
@@ -293,6 +330,7 @@ void TestSnapshotDelete::singleDeleteReturningFalseIsReportedAsFailure()
     SnapshotListModel model;
     QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
 
+    loadList(model);
     model.deleteSnapshots({7});
 
     QTRY_COMPARE(completed.count(), 1);
@@ -311,6 +349,7 @@ void TestSnapshotDelete::singleDeleteErrorIsReported()
     QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
     QSignalSpy failed(&model, &SnapshotListModel::snapshotsDeletionFailed);
 
+    loadList(model);
     model.deleteSnapshots({8});
 
     QTRY_COMPARE(failed.count(), 1);
@@ -327,12 +366,65 @@ void TestSnapshotDelete::multipleSelectionUsesDeleteSnapshots()
     SnapshotListModel model;
     QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
 
+    loadList(model);
     model.deleteSnapshots({3, 4, 3});
 
     QTRY_COMPARE(completed.count(), 1);
     QCOMPARE(completed.at(0).at(0).toInt(), 2);
     QCOMPARE(completed.at(0).at(1).toInt(), 0);
     QCOMPARE(m_fake->calls(), QStringList{QStringLiteral("DeleteSnapshots:root:3,4")});
+}
+
+/**
+ * @brief 一覧を取得し終える前の削除要求を、D-Busを呼び出さずに拒否することを確認する
+ * @note 取得前の一覧の番号は、どのconfigのスナップショットを指すか確定していないため、削除してはならない
+ *       拒否した場合は、GUIの処理中の表示を閉じられるよう、snapshotsDeletionFailedシグナルで知らせる
+ */
+void TestSnapshotDelete::deletionIsRefusedBeforeListIsLoaded()
+{
+    SnapshotListModel model;
+    QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
+    QSignalSpy failed(&model, &SnapshotListModel::snapshotsDeletionFailed);
+
+    model.deleteSnapshots({5});
+    model.deleteSnapshots({3, 4});
+
+    QCOMPARE(failed.count(), 2);
+    QCOMPARE(completed.count(), 0);
+    QVERIFY(m_fake->calls().isEmpty());
+}
+
+/**
+ * @brief configを切り替えた後は、前のconfigの一覧に基づく削除要求を拒否することを確認する
+ * @note 前のconfigの行に表示されていた番号で削除すると、切り替え先のconfigにある同じ番号のスナップショットを削除してしまう
+ *       一覧を切り替え先のconfigから読み込み直した後は、切り替え先のconfigに対して削除できることも確認する
+ *       SnapperServiceは全テストで共有するため、最後に既定の設定名rootへ戻す
+ */
+void TestSnapshotDelete::deletionIsRefusedAfterConfigSwitch()
+{
+    SnapperService *service = SnapperService::instance();
+    SnapshotListModel model;
+    loadList(model);
+    QSignalSpy failed(&model, &SnapshotListModel::snapshotsDeletionFailed);
+    QSignalSpy completed(&model, &SnapshotListModel::snapshotsDeletionCompleted);
+
+    // 一覧はrootから取得したままなので、home向けの番号9として扱えず拒否される
+    service->setCurrentConfig(QStringLiteral("home"));
+    model.deleteSnapshots({9});
+
+    QCOMPARE(failed.count(), 1);
+    QVERIFY(m_fake->calls().isEmpty());
+
+    // homeの一覧を読み込み直せば、同じ番号9をhomeのスナップショットとして削除できる
+    loadList(model);
+    model.deleteSnapshots({9});
+
+    QTRY_COMPARE(completed.count(), 1);
+    QCOMPARE(m_fake->calls(), QStringList{QStringLiteral("DeleteSnapshot:home:9")});
+    // 完了後に走る再読み込みで記録が増えるため、削除前に読み込んだ先頭2件だけを確認する
+    QCOMPARE(m_fake->listedConfigs().mid(0, 2), (QStringList{QStringLiteral("root"), QStringLiteral("home")}));
+
+    service->setCurrentConfig(QStringLiteral("root"));
 }
 
 QTEST_GUILESS_MAIN(TestSnapshotDelete)

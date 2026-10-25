@@ -820,25 +820,38 @@ BorderedDialog {
         anchors.centerIn: Overlay.overlay
         modal: true
         standardButtons: Dialog.Yes | Dialog.No
+        // ダイアログの大きさは、ウィンドウの6割を目安にする (幅は700〜1100、高さは500〜950の範囲)
+        // 説明文が長いため、小さいと何度も折り返して読みにくくなる
+        // ただし、ウィンドウより大きいと画面からはみ出すため、ウィンドウより40だけ小さい値を上限にする
         width: {
-            if (!ApplicationWindow.window) return 550
-            var calculated = ApplicationWindow.window.width * 0.45
-            return Math.min(Math.max(calculated, 550), 850)
+            if (!ApplicationWindow.window) return 700
+            var win = ApplicationWindow.window
+            var calculated = Math.min(Math.max(win.width * 0.6, 700), 1100)
+            return Math.min(calculated, win.width - 40)
         }
         height: {
-            if (!ApplicationWindow.window) return 380
-            var calculated = ApplicationWindow.window.height * 0.45
-            return Math.min(Math.max(calculated, 380), 750)
+            if (!ApplicationWindow.window) return 500
+            var win = ApplicationWindow.window
+            var calculated = Math.min(Math.max(win.height * 0.6, 500), 950)
+            return Math.min(calculated, win.height - 40)
         }
 
         property int restoreTargetNumber: 0  // 復元元のスナップショット番号 (開く前に設定する)
 
+        // ダイアログの本文 (確認の質問、復元の内容、注意書き、復元オプション)
+        // 幅はダイアログいっぱいに広げ、説明文がダイアログの右端まで使って折り返すようにする
+        // 本文が上に寄って下に大きな空白が残らないよう、縦方向は中央に置く
+        // ただし、本文がダイアログに収まらない場合は、先頭が隠れないよう上端から表示する
         ColumnLayout {
-            spacing: 10
+            width: parent.width
+            y: Math.max(0, (parent.height - height) / 2)
+            spacing: 12
 
             Label {
                 text: qsTr("Restore selected files/directories?")
                 font.bold: true
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
             }
 
             Label {
@@ -849,14 +862,14 @@ BorderedDialog {
                             .arg(confirmRestoreDialog.restoreTargetNumber)
                       : qsTr("This will restore selected files and directories to snapshot #%1 state.").arg(confirmRestoreDialog.restoreTargetNumber)
                 wrapMode: Text.WordWrap
-                Layout.preferredWidth: 450
+                Layout.fillWidth: true
                 color: palette.text
             }
 
             Label {
                 text: qsTr("Warning: This may overwrite current files.")
                 wrapMode: Text.WordWrap
-                Layout.preferredWidth: 450
+                Layout.fillWidth: true
                 color: ThemeManager.warningColor
                 font.italic: true
             }
@@ -865,16 +878,24 @@ BorderedDialog {
             ThemedGroupBox {
                 title: qsTr("Restore Options")
                 Layout.fillWidth: true
+                Layout.topMargin: 4
 
-                ColumnLayout {
-                    spacing: 8
+                // 復元方式とバッチサイズの設定欄 (左の列が項目名、右の列が入力欄)
+                // 項目名を右揃えにして、ラジオボタンとスピンボックスの左端を揃える
+                // 設定欄が左に寄らないよう、グループの枠の中央に置く
+                GridLayout {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    columns: 2
+                    columnSpacing: 12
+                    rowSpacing: 8
 
                     // 復元方式 (直接コピーまたはYaST互換)
+                    Label {
+                        text: qsTr("Method:")
+                        Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                    }
                     RowLayout {
-                        spacing: 10
-                        Label {
-                            text: qsTr("Method:")
-                        }
+                        spacing: 16
                         RadioButton {
                             id: directRestoreRadio
                             text: qsTr("Direct copy (fast)")
@@ -889,11 +910,12 @@ BorderedDialog {
                     }
 
                     // 1回の要求でまとめて復元するファイル数
+                    Label {
+                        text: qsTr("Batch size:")
+                        Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                    }
                     RowLayout {
-                        spacing: 10
-                        Label {
-                            text: qsTr("Batch size:")
-                        }
+                        spacing: 8
                         SpinBox {
                             id: batchSizeSpinBox
                             from: 1

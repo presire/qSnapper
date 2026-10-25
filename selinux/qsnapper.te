@@ -1,4 +1,4 @@
-module qsnapper 1.3.10;
+module qsnapper 1.4.0;
 
 ########################################
 # qSnapper SELinuxポリシーモジュール

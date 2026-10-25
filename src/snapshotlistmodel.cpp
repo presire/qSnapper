@@ -5,6 +5,8 @@
 
 #include "snapshotlistmodel.h"
 #include "snapperservice.h"
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDebug>
 
 /**
@@ -18,6 +20,7 @@
 SnapshotListModel::SnapshotListModel(QObject *parent)
     : QAbstractListModel(parent)
     , m_snapperService(SnapperService::instance())
+    , m_deletionGeneration(0)
 {
     connect(m_snapperService, &SnapperService::snapshotCreated, this, &SnapshotListModel::onSnapshotCreated);
     connect(m_snapperService, &SnapperService::snapshotCreationFailed, this, &SnapshotListModel::onSnapshotCreationFailed);
@@ -153,11 +156,16 @@ void SnapshotListModel::refresh()
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
+ * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は""扱い)
+ * @param important 重要フラグ
  * @param userdata ユーザデータマップ
  */
-void SnapshotListModel::createSingleSnapshot(const QString &description, const QVariantMap &userdata)
+void SnapshotListModel::createSingleSnapshot(const QString &description,
+                                             const QString &cleanup,
+                                             bool important,
+                                             const QVariantMap &userdata)
 {
-    m_snapperService->createSingle(description, FsSnapshot::CleanupAlgorithm::None, false, userdata);
+    m_snapperService->createSingle(description, FsSnapshot::stringToCleanupAlgorithm(cleanup), important, userdata);
 }
 
 /**
@@ -171,11 +179,16 @@ void SnapshotListModel::createSingleSnapshot(const QString &description, const Q
  * QMLから呼び出し可能なメソッド
  *
  * @param description スナップショットの説明文
+ * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は""扱い)
+ * @param important 重要フラグ
  * @param userdata ユーザデータマップ
  */
-void SnapshotListModel::createPreSnapshot(const QString &description, const QVariantMap &userdata)
+void SnapshotListModel::createPreSnapshot(const QString &description,
+                                          const QString &cleanup,
+                                          bool important,
+                                          const QVariantMap &userdata)
 {
-    m_snapperService->createPre(description, FsSnapshot::CleanupAlgorithm::None, false, userdata);
+    m_snapperService->createPre(description, FsSnapshot::stringToCleanupAlgorithm(cleanup), important, userdata);
 }
 
 /**
@@ -190,11 +203,62 @@ void SnapshotListModel::createPreSnapshot(const QString &description, const QVar
  *
  * @param description スナップショットの説明文
  * @param previousNumber ペアにするPreスナップショットの番号
+ * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は""扱い)
+ * @param important 重要フラグ
  * @param userdata ユーザデータマップ
  */
-void SnapshotListModel::createPostSnapshot(const QString &description, int previousNumber, const QVariantMap &userdata)
+void SnapshotListModel::createPostSnapshot(const QString &description,
+                                           int previousNumber,
+                                           const QString &cleanup,
+                                           bool important,
+                                           const QVariantMap &userdata)
 {
-    m_snapperService->createPost(description, previousNumber, FsSnapshot::CleanupAlgorithm::None, false, userdata);
+    m_snapperService->createPost(description, previousNumber, FsSnapshot::stringToCleanupAlgorithm(cleanup),
+                                 important, userdata);
+}
+
+/**
+ * @brief 選択中のスナップショットから、Postを作成できるPreスナップショットの番号を求める
+ *
+ * Postの作成ダイアログで、Post種別を選べるかどうかと紐付け先のPre番号を決めるために使う
+ * 選択が複数、またはPre以外、またはPostが既にあるPreの場合は、紐付け先を一意に決められないため-1を返す
+ * (Postは1つのPreに1件だけ対応するため、既にPostがあるPreへ2件目を作らせない)
+ *
+ * QMLから呼び出し可能なメソッド
+ *
+ * @param selectedNumbers 選択中のスナップショット番号の一覧
+ * @return Postが未作成のPreスナップショット1件だけを選択している場合はその番号、それ以外は-1
+ */
+int SnapshotListModel::pendingPreNumber(const QVariantList &selectedNumbers) const
+{
+    if (selectedNumbers.size() != 1) {
+        return -1;
+    }
+
+    bool ok = false;
+    const int number = selectedNumbers.first().toInt(&ok);
+    if (!ok) {
+        return -1;
+    }
+
+    const FsSnapshot *pre = nullptr;
+    for (const FsSnapshot *snapshot : std::as_const(m_snapshots)) {
+        if (snapshot->number() == number) {
+            pre = snapshot;
+            break;
+        }
+    }
+    if (!pre || pre->snapshotType() != FsSnapshot::SnapshotType::Pre) {
+        return -1;
+    }
+
+    for (const FsSnapshot *snapshot : std::as_const(m_snapshots)) {
+        if (snapshot->snapshotType() == FsSnapshot::SnapshotType::Post
+            && snapshot->previousNumber() == number) {
+            return -1;
+        }
+    }
+    return number;
 }
 
 /**
@@ -259,38 +323,81 @@ void SnapshotListModel::deleteSnapshot(int number)
 /**
  * @brief 複数のスナップショットを一括削除
  *
- * スナップショット番号のリストを受け取り、各スナップショットを順次削除する
- * 成功数と失敗数をカウントし、全ての削除処理完了後にシグナルで通知する
- * 処理完了後、スナップショット一覧を自動的に再読み込みする
+ * 複数件の場合は、ヘルパのDeleteSnapshotsメソッドを1回だけ呼び出して削除する
+ * 応答には削除を確認できた番号の一覧が返るため、その件数から成功数と失敗数を求める
+ * 1件だけの場合は、ヘルパのDeleteSnapshotメソッドで削除し、応答の真偽値から成功数と失敗数を求める
+ * どちらの場合も、応答を受け取った後にスナップショット一覧を再読み込みする
  *
  * QMLから呼び出し可能なメソッド
  *
  * @param numbers 削除するスナップショット番号のリスト (QVariant配列)
+ * @note 削除の結果は、snapshotsDeletionCompletedシグナル (成功数と失敗数) で通知する
+ *       エラー応答を受け取った場合や、有効な番号が1つもない場合は、snapshotsDeletionFailedシグナルで通知する
+ *       番号ごとの同期呼び出しでは、GUIが固まり、認証も番号ごとに求められるため、非同期の呼び出しを使う
+ *       削除の要求ごとに世代番号 (m_deletionGeneration) を進める
+ *       新しい要求の開始後に届いた古い要求の応答は、世代番号が一致しないため無視する
  */
 void SnapshotListModel::deleteSnapshots(const QVariantList &numbers)
 {
-    int successCount = 0;
-    int failureCount = 0;
-
-    for (const QVariant &numVariant : numbers) {
-        bool ok;
-        int number = numVariant.toInt(&ok);
-        if (!ok) {
-            failureCount++;
+    QList<uint> requested;
+    for (const QVariant &value : numbers) {
+        bool ok = false;
+        const uint number = value.toUInt(&ok);
+        if (!ok || number < 1) {
             continue;
         }
-
-        bool success = m_snapperService->deleteSnapshot(number);
-        if (success) {
-            successCount++;
-        }
-        else {
-            failureCount++;
+        if (!requested.contains(number)) {
+            requested.append(number);
         }
     }
 
-    refresh();
-    emit snapshotsDeletionCompleted(successCount, failureCount);
+    if (requested.isEmpty()) {
+        emit snapshotsDeletionFailed(tr("No valid snapshot numbers were selected."));
+        return;
+    }
+
+    const quint64 generation = ++m_deletionGeneration;
+    const int requestedCount = requested.size();
+    const QString configName = m_snapperService->currentConfig();
+
+    // 1件だけの削除には、DeleteSnapshotを使う
+    // DeleteSnapshotは、polkitが認可を一時保持する間は再認証を求めず、snapperdを経由せずに削除する
+    // DeleteSnapshotsは、毎回認証を求め、snapperdを経由するため作成直後のスナップショットをSnapshotListOutdatedで拒否する
+    // そのため、DeleteSnapshotsは複数件をまとめて削除する場合だけに使う
+    const bool single = (requestedCount == 1);
+    const QDBusPendingCall call = single
+        ? m_snapperService->asyncDeleteSnapshot(configName, requested.first())
+        : m_snapperService->asyncDeleteSnapshots(configName, requested);
+
+    auto *watcher = new QDBusPendingCallWatcher(call, this);
+    connect(watcher, &QDBusPendingCallWatcher::finished, this,
+            [this, watcher, generation, requestedCount, single]() {
+        watcher->deleteLater();
+
+        // より新しい一括削除が始まっている場合は、古い応答で表示を乱さない
+        if (generation != m_deletionGeneration) {
+            return;
+        }
+
+        if (watcher->isError()) {
+            emit snapshotsDeletionFailed(SnapperService::errorText(watcher->error()));
+        }
+        else if (single) {
+            // DeleteSnapshotは通常、失敗をエラー応答で返す
+            // 正常な応答でfalseが返った場合も、削除できなかったものとして失敗数に数える
+            QDBusPendingReply<bool> reply = *watcher;
+            const int successCount = reply.value() ? 1 : 0;
+            emit snapshotsDeletionCompleted(successCount, requestedCount - successCount);
+        }
+        else {
+            QDBusPendingReply<QList<uint>> reply = *watcher;
+            const int successCount = qMin(reply.value().size(), requestedCount);
+            emit snapshotsDeletionCompleted(successCount, requestedCount - successCount);
+        }
+
+        // 一部失敗でも実際の状態を表示できるよう、結果にかかわらず一覧を読み直す
+        refresh();
+    });
 }
 
 /**

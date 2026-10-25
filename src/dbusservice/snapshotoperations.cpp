@@ -191,7 +191,9 @@ SnapshotOperations::~SnapshotOperations()
  */
 void SnapshotOperations::resetIdleTimer()
 {
-    if (m_pendingAuthorizations.total() > 0) {
+    // timerの操作の途中で終了すると、systemdへの変更が途中で止まり、呼び出し元へ結果を返せなくなるため、完了まで終了しない
+    // snapperdへ転送した変更も同じ理由で、完了 (結果が分からない場合はsnapperdの終了) まで終了しない
+    if (m_pendingAuthorizations.total() > 0 || m_timerOperation || m_snapperdOperation) {
         m_idleTimer.stop();
         return;
     }
@@ -361,11 +363,13 @@ void SnapshotOperations::unmountRestoreExecution(
         }
         snapshot->umountFilesystemSnapshot(true);
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Staged restore: Failed to unmount snapshot:" << e.what();
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Staged restore: Failed to unmount snapshot";
     }
-    catch (const std::exception &e) {
-        qWarning() << "Staged restore: Unexpected unmount failure:" << e.what();
+    catch (const std::exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Staged restore: Unexpected unmount failure";
     }
     catch (...) {
         qWarning() << "Staged restore: Unknown unmount failure";

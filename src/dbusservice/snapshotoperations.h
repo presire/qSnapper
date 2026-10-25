@@ -11,6 +11,7 @@
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusServiceWatcher>
+#include <QPointer>
 #include <QTimer>
 #include <sys/stat.h>
 #include <functional>
@@ -23,6 +24,9 @@
 #include "restoreplanexecutor.h"
 #include "restorevalidation.h"
 #include "snapshotoperations_types.h"
+#include "snappertimerstate.h"
+#include "systemdtimeroperation.h"
+#include "snapperdoperation.h"
 
 namespace snapper {
     class Snapper;
@@ -72,6 +76,8 @@ private:
     std::optional<CallReply> m_deferredReply;               // 遅延応答の継続を実行している間のみ有効
                                                             // replyError()がsendErrorReply()ではなくキャプチャ済みmessageを使う判断に用いる
     qsnapper::security::PendingAuthorizationBudget m_pendingAuthorizations{MaxPendingAuthorizationsPerUid, MaxPendingAuthorizations};  // polkitプロンプト待ちの件数 (呼び出し元UID単位と全体)
+    QPointer<qsnapper::dbusservice::SystemdTimerOperation> m_timerOperation;   // 実行中のtimerの操作 (同時に1件だけ)
+    QPointer<qsnapper::dbusservice::SnapperdOperation> m_snapperdOperation;    // snapperdへ転送した実行中の変更 (同時に1件だけ、完了まで他の操作を拒否する)
 
 private:
     /** @brief アイドルタイマをリセットする
@@ -87,7 +93,37 @@ private:
      * @param type 返すD-Busエラー種別
      * @param text エラーメッセージ
      */
-    void replyError(QDBusError::ErrorType type, const QString &text);
+    void replyError(QDBusError::ErrorType type, const QString &text)
+    {
+        replyError(QDBusError::errorString(type), text);
+    }
+
+    /** @brief 同期応答と遅延応答のどちらでも正しく名前付きのD-Busエラーを返す
+     *  標準のエラー種別に無い本サービス固有のエラー名 (RestoreInProgressなど) を返すために使う
+     * @param errorName 返すD-Busエラー名
+     * @param text エラーメッセージ (攻撃者が制御し得る値を含めない固定の文言)
+     */
+    void replyError(const QString &errorName, const QString &text);
+
+    /** @brief 復元の実行中、またはsnapperdへ転送した変更の実行中であれば、操作を固定の文言で拒否する
+     *  共有のSnapperインスタンス、比較キャッシュ、mount状態は復元の実行中に使われ続けるため、
+     *  非復元操作がそれらを差し替えたり破棄したりすると、実行中の復元が壊れる
+     *  snapperdへ転送した変更 (config作成・削除、一括削除) の実行中は、configやスナップショットの一覧が変わる途中であるため、
+     *  変更前の状態を前提とした操作を受け付けない
+     * @return 拒否してエラー応答を送出した場合: true
+     */
+    bool rejectWhileRestoreRunning();
+
+    /** @class RestoreGatePolicy
+     *  @brief authorizeThenを通る操作を、復元の実行中に拒否するかどうか
+     *
+     * 既定は拒否であり、新しく追加した操作は自動的にゲートの対象になる
+     * 許可するのは、共有のSnapperインスタンス・比較キャッシュ・mount状態に一切触れない操作だけに限る
+     */
+    enum class RestoreGatePolicy {
+        RejectWhileRestoring,   // 復元の実行中は拒否する (既定)
+        AllowWhileRestoring     // 共有状態に触れないため、復元の実行中も許可する
+    };
 
     /** @brief polkit認可を要求する (対話が必要な場合のみ非同期化する)
      * @param actionId PolkitアクションID
@@ -107,14 +143,21 @@ private:
      * @param reply キャプチャ済み応答コンテキスト
      * @param body 認可済みの本体処理
      * @param granted 認可されたか
+     * @param gatePolicy 復元の実行中に拒否するかどうか
+     * @note polkitプロンプトを待つ間に復元が始まり得るため、認可前の確認だけでは足りない
+     *       本体を実行する直前に、復元の実行中でないことを再確認する
      */
     template <typename T, typename Body>
-    void completeDeferredCall(const CallReply &reply, const Body &body, bool granted)
+    void completeDeferredCall(const CallReply &reply, const Body &body, bool granted,
+                              RestoreGatePolicy gatePolicy)
     {
         m_deferredReply = reply;
         T result{};
         if (granted) {
-            result = body();
+            if (gatePolicy == RestoreGatePolicy::AllowWhileRestoring
+                    || !rejectWhileRestoreRunning()) {
+                result = body();
+            }
         }
         else {
             replyError(QDBusError::AccessDenied,
@@ -132,21 +175,38 @@ private:
     /** @brief 認可してから本体を実行する共通ゲート
      *  対話不要ならその場で本体を同期実行して戻り値を返す (従来と同じ挙動)
      *  対話が必要な場合は遅延応答へ切り替え、既定値を返して呼び出しを終える
+     *
+     *  復元の実行中は、gatePolicyで許可した操作を除いて本体を実行しない
+     *  確認は次の3か所で行う
+     *    - polkitへの問い合わせ前 (実行できない操作のためにプロンプトを出さない)
+     *    - 即時許可の経路で、本体を実行する直前
+     *    - 遅延許可の経路で、本体を実行する直前 (completeDeferredCall)
+     *  復元計画のメソッドはbeginAuthorizationを直接使うため、本ゲートの対象外であり、既存の排他に任せる
      *  @tparam T 対象D-Busメソッドの戻り値型
      * @param actionId PolkitアクションID
      * @param body 認可済みの本体処理
+     * @param gatePolicy 復元の実行中に拒否するかどうか (既定は拒否)
      * @return 同期実行時は本体の戻り値、それ以外はT{}
      */
     template <typename T, typename Body>
-    T authorizeThen(const QString &actionId, Body body)
+    T authorizeThen(const QString &actionId, Body body,
+                    RestoreGatePolicy gatePolicy = RestoreGatePolicy::RejectWhileRestoring)
     {
+        const bool gated = gatePolicy == RestoreGatePolicy::RejectWhileRestoring;
+        if (gated && rejectWhileRestoreRunning()) {
+            return T{};
+        }
+
         const AuthorizationOutcome outcome = beginAuthorization(
             actionId,
-            [this, body](const CallReply &reply, bool granted) {
-                completeDeferredCall<T>(reply, body, granted);
+            [this, body, gatePolicy](const CallReply &reply, bool granted) {
+                completeDeferredCall<T>(reply, body, granted, gatePolicy);
             });
 
         if (outcome == AuthorizationOutcome::Granted) {
+            if (gated && rejectWhileRestoreRunning()) {
+                return T{};
+            }
             return body();
         }
         return T{};
@@ -213,6 +273,53 @@ private:
      */
     bool setupQuotaAuthorized(const QString &configName);
 
+    /** @brief 認可済みのGetConfig本体
+     * @param configName 検証済み設定名
+     * @return 編集できるキーとSUBVOLUME / FSTYPE / QGROUPの値 (設定ファイルに無いキーは含めない)
+     */
+    QMap<QString, QString> getConfigAuthorized(const QString &configName);
+
+    /** @brief 認可済みのGetTimerStates本体
+     *  応答はtimerの状態を読み終えた後に非同期で送るため、戻り値は使われない
+     * @return 常に空のマップ
+     */
+    SnapperTimerStateMap getTimerStatesAuthorized();
+
+    /** @brief 認可済みのSetTimerEnabled本体
+     *  応答はsystemdの操作と状態の読み直しを終えた後に非同期で送るため、戻り値は使われない
+     * @param unit 呼び出し元が指定したunit名 (本体で許可リストと照合し直す)
+     * @param enabled trueで有効化と起動、falseで停止と無効化
+     * @return 常にfalse
+     */
+    bool setTimerEnabledAuthorized(const QString &unit, bool enabled);
+
+    /** @brief 現在の呼び出しの応答を、本体から戻った後に非同期で送るために確保する
+     *  即時許可の経路ではQDBusContextの遅延応答に切り替え、遅延許可の経路ではcompleteDeferredCallに応答を送らせない
+     * @return 確保した応答コンテキスト (D-Bus経由の呼び出しでなければstd::nullopt)
+     */
+    std::optional<CallReply> claimReplyForAsyncCompletion();
+
+    /** @brief 確保した応答コンテキストへ固定の文言のエラーを送る
+     * @param reply claimReplyForAsyncCompletion()で確保した応答コンテキスト
+     * @param errorName D-Busエラー名
+     * @param text エラーメッセージ (攻撃者が制御し得る値を含めない固定の文言)
+     */
+    void sendAsyncError(const CallReply &reply, const QString &errorName, const QString &text);
+
+    /** @brief timerの操作を同時に1件に限るため、実行中の操作があれば拒否する
+     * @return 拒否してエラー応答を送出した場合: true
+     */
+    bool rejectWhileTimerOperationRunning();
+
+    /** @brief timerの有効化または無効化、またはsnapperdへ転送した変更の実行中かを判定する
+     * @return 変更を伴うtimerの操作、またはsnapperdへ転送した変更が完了していない場合: true
+     * @note CommitRestorePlanが復元の開始を拒否するために使う
+     *       timerの操作は変更の直前ごとに復元の実行中でないことを確かめるが、送信済みの変更は取り消せないため、
+     *       復元の開始側でも実行中の変更と重ならないようにする
+     *       snapperdへ転送した変更も同じ理由で含める (認可前に拒否すれば、復元計画は失敗にならずに残る)
+     */
+    bool timerChangeInProgress() const;
+
     /** @brief 認可済みのCommitRestorePlan本体
      * @param manifestId owner束縛されたマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name
@@ -246,6 +353,68 @@ private:
      * @param forceReload 強制再生成フラグ
      */
      snapper::Snapper* getSnapper(const QString &configName = "root", bool forceReload = false);
+    /** @brief snapperdへ転送した変更の実行中かを判定する
+     * @return 完了の通知を受けていない変更がある場合: true
+     */
+    bool snapperdOperationRunning() const { return !m_snapperdOperation.isNull(); }
+
+    /** @brief snapperdへ転送した変更の実行中であれば、操作を固定の文言で拒否する
+     * @return 拒否してエラー応答を送出した場合: true
+     */
+    bool rejectWhileSnapperdOperationRunning();
+
+    /** @brief 認可済みのCreateConfig本体
+     * @param configName 構文を検証済みの新しい設定名
+     * @param subvolume 構文を検証済みのsubvolumeの絶対パス
+     * @return 常にfalse (応答はsnapperdの完了後に送る)
+     */
+    bool createConfigAuthorized(const QString &configName, const QString &subvolume);
+
+    /** @brief 認可済みのDeleteConfig本体
+     * @param configName 構文を検証済みの設定名
+     * @return 常にfalse (応答はsnapperdの完了後に送る)
+     */
+    bool deleteConfigAuthorized(const QString &configName);
+
+    /** @brief 認可済みのDeleteSnapshots本体
+     * @param configName 検証済みの設定名
+     * @param numbers 範囲と件数を検証し、重複を除いた番号
+     * @return 常に空 (応答はsnapperdの完了後に送る)
+     */
+    QList<uint> deleteSnapshotsAuthorized(const QString &configName, const QList<uint> &numbers);
+
+    /** @brief 認可済みのGetFilesystemUsage本体
+     * @param configName 検証済みの設定名
+     * @return 使用量のCSV
+     */
+    QString getFilesystemUsageAuthorized(const QString &configName);
+
+    /** @brief 認可済みのListSubvolumes本体
+     * @param configName 検証済みの設定名
+     * @return サブボリューム一覧のCSV
+     */
+    QString listSubvolumesAuthorized(const QString &configName);
+
+    /** @brief 指定したconfigに、終わっていない復元計画があるかを判定する
+     * @param configName 検証済みの設定名
+     * @param uncertain 計画の状態を読めなかった場合にtrueを受け取る (呼び出し側は拒否として扱う)
+     * @return 終わっていない計画がある場合: true
+     */
+    bool hasUnfinishedRestorePlan(const QString &configName, bool *uncertain);
+
+    /** @brief snapperdへ変更を転送し、完了時に結果を読み直して応答する
+     * @param reply 非同期に応答するために確保した応答コンテキスト
+     * @param mutation snapperdへ転送する変更
+     * @param listConfig 事前にsnapperdのスナップショット一覧を確かめるconfig名 (空の場合は確かめない)
+     * @param requiredNumbers listConfigの一覧に存在を求める番号
+     * @param replyDeadlineMs 呼び出し元へ応答する期限
+     * @param verify 完了後に実際の状態を読み直し、応答を送る処理 (期限切れで応答済みの場合はrepliedがtrue)
+     */
+    void startSnapperdOperation(const CallReply &reply, const QDBusMessage &mutation, const QString &listConfig,
+                                const QList<uint> &requiredNumbers, int replyDeadlineMs,
+                                std::function<void(qsnapper::dbusservice::SnapperdOperation::Outcome, bool stoppedByRestore,
+                                                   const CallReply &reply, bool replied)> verify);
+
     /** @brief 一覧の取得用にSnapperインスタンスを取得する
      * @param configName 検証済みSnapper設定名
      * @return Snapperインスタンスへのポインタ、失敗時はnullptr
@@ -390,6 +559,59 @@ public:
      * @param readWriteRestorer rwへ戻す関数 (成功した場合true)
      */
      void setRootSubvolumeAccessForTesting(std::function<bool(bool *)> readOnlyProbe, std::function<bool()> readWriteRestorer);
+
+#ifdef QSNAPPER_ENABLE_TEST_HOOKS
+    // 以下はQSNAPPER_ENABLE_TEST_HOOKSを定義したテスト用ターゲットだけでコンパイルする
+    // 認可を迂回できるため、本番のサービス (src/dbusservice/CMakeLists.txt) では定義しない
+
+    /** @class TestAuthorization
+     *  @brief テスト用サービスで、polkitの代わりに使う認可の結果
+     */
+    enum class TestAuthorization {
+        Polkit,     // 本番と同じくpolkitへ問い合わせる
+        Grant,      // 即時に許可する (即時許可の経路を通す)
+        Defer       // 応答を保留し、resolveTestAuthorizationsで確定する (遅延許可の経路を通す)
+    };
+
+    /** @brief 認可の結果をテスト用に固定する
+     * @param mode 以降の認可要求に返す結果
+     */
+    void setAuthorizationForTesting(TestAuthorization mode);
+
+    /** @brief 保留中のテスト用認可の件数を返す
+     * @return 保留中の件数
+     */
+    int pendingTestAuthorizationCount() const;
+
+    /** @brief 保留中のテスト用認可をすべて確定し、各呼び出しの継続を実行する
+     * @param granted 許可する場合はtrue
+     */
+    void resolveTestAuthorizations(bool granted);
+
+    /** @brief 復元の実行中の状態を、mountせずに作る
+     *  共通ゲートとgetSnapperの多重防御を、実際の復元を伴わずに検証するために使う
+     * @param configName 復元中として記録するconfig名
+     */
+    void beginRestoreExecutionForTesting(const QString &configName);
+
+    /** @brief beginRestoreExecutionForTestingで作った状態を解除する
+     */
+    void endRestoreExecutionForTesting();
+
+    /** @brief snapperdへ転送した変更の実行中の状態を、snapperdへ転送せずに作る
+     *  configの作成・削除や一括削除の途中に、他の操作と復元の開始が拒否されることを確かめるために使う
+     */
+    void beginSnapperdOperationForTesting();
+
+    /** @brief beginSnapperdOperationForTestingで作った状態を解除する
+     */
+    void endSnapperdOperationForTesting();
+
+private:
+    TestAuthorization m_testAuthorization = TestAuthorization::Polkit;                                  // 認可の結果
+    QList<std::pair<CallReply, std::function<void(const CallReply &, bool)>>> m_testPendingAuthorizations;  // 保留中の認可と継続
+#endif
+
 public slots:
     /** @brief 既存のSnapper設定名の一覧を返す
      * @return 設定名の配列
@@ -481,6 +703,56 @@ public slots:
     /** @brief Snapperクォータ機能をセットアップする
      */
     bool SetupQuota(const QString &configName);
+
+    /** @brief Snapper設定の値を読み取る (Settings画面の表示に使う)
+     * @param configName 設定名 (空文字列は"root"として扱う)
+     * @return 編集できる18キーとSUBVOLUME / FSTYPE / QGROUPの値
+     */
+    QMap<QString, QString> GetConfig(const QString &configName);
+
+    /** @brief snapperのsystemd timerの状態を読み取る
+     * @return unit名から (UnitFileState, ActiveState) へのマップ
+     */
+    SnapperTimerStateMap GetTimerStates();
+
+    /** @brief Btrfsのsubvolumeに新しいSnapper設定を作成する (snapperdへ転送する)
+     * @param configName 新しい設定名 (英数字で始まる英数字・下線・ハイフンの1から64文字)
+     * @param subvolume subvolumeの最上位ディレクトリの絶対パス (「/」は扱わない)
+     * @return 作成され、読み直した設定が要求どおりの場合: true
+     */
+    bool CreateConfig(const QString &configName, const QString &subvolume);
+
+    /** @brief Snapper設定と、その全てのスナップショットを削除する (snapperdへ転送する)
+     * @param configName 削除する設定名 (rootの設定は扱わない)
+     * @return 削除され、読み直した設定の一覧に無い場合: true
+     */
+    bool DeleteConfig(const QString &configName);
+
+    /** @brief 複数のスナップショットを1回の認可で削除する (snapperdへ転送する)
+     * @param configName 設定名 (空文字列は"root"として扱う)
+     * @param numbers 削除する番号 (1以上、重複は除き、件数に上限がある)
+     * @return 読み直した一覧で削除を確かめた番号 (要求より少ない場合は一部だけ削除された)
+     */
+    QList<uint> DeleteSnapshots(const QString &configName, const QList<uint> &numbers);
+
+    /** @brief configのsubvolumeがあるBtrfsの割当量と使用量を読み取る
+     * @param configName 設定名 (空文字列は"root"として扱う)
+     * @return 使用量のCSV
+     */
+    QString GetFilesystemUsage(const QString &configName);
+
+    /** @brief configのsubvolumeがあるBtrfsのサブボリュームの一覧を読み取る
+     * @param configName 設定名 (空文字列は"root"として扱う)
+     * @return サブボリューム一覧のCSV (件数・サイズ・時間の上限で打ち切った場合は先頭の行で示す)
+     */
+    QString ListSubvolumes(const QString &configName);
+
+    /** @brief snapperのsystemd timerを有効化して起動する、または停止して無効化する
+     * @param unit 許可リストにあるunit名
+     * @param enabled trueで有効化と起動、falseで停止と無効化
+     * @return 読み直した状態が要求どおりになった場合: true
+     */
+    bool SetTimerEnabled(const QString &unit, bool enabled);
 
 signals:
     /** @brief staged restore計画の進捗通知

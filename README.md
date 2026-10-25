@@ -3,7 +3,7 @@
 A modern Qt6/QML GUI application for managing Btrfs/Snapper filesystem snapshots on Linux.
 
 ![License](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)
-![Qt Version](https://img.shields.io/badge/Qt-6.2+-green.svg)
+![Qt Version](https://img.shields.io/badge/Qt-6.5+-green.svg)
 ![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)
 
 <p align="center">
@@ -18,11 +18,19 @@ qSnapper is a graphical user interface for the Snapper snapshot management tool.
 ### Features
 
 - **Snapshot Management**:  
-  Create, view, and delete filesystem snapshots  
+  Create, view, compare, and delete filesystem snapshots, including multi-select deletion that authenticates once and reports any snapshot that could not be deleted  
 - **Snapshot Types**:  
   Support for Single, Pre, and Post snapshots  
 - **Cleanup Policies**:  
-  Configure automatic cleanup using Number or Timeline algorithms  
+  Choose Number or Timeline cleanup when creating a snapshot; snapshots marked as important are counted against a separate number limit  
+- **Snapshot Settings**:  
+  Edit the selected configuration's cleanup and timeline limits, space limits, and background comparison settings  
+- **Configuration Management**:  
+  Create a Snapper configuration for a mounted Btrfs subvolume and delete a configuration with typed-name confirmation  
+- **Systemd Timers**:  
+  Inspect the snapper timers and enable or disable them from the Settings tab  
+- **Filesystem Overview**:  
+  Read-only Btrfs allocation and usage per chunk type and per device, plus an on-demand subvolume list  
 - **File Comparison**:
   View changes between snapshots with detailed diff preview
 - **Pre/Post Snapshot Comparison**:
@@ -32,7 +40,7 @@ qSnapper is a graphical user interface for the Snapper snapshot management tool.
 - **Fast Restore**:
   Two restore modes — Direct Copy (fast, btrfs reflink-aware) and YaST compatible — with configurable batch size and real-time progress logging
 - **Theme Support**:  
-  Light/Dark mode switching  
+  Light or Dark mode, or follow the system theme  
 - **Internationalization**:
   Multi-language support (English, Japanese, German)
 - **Modern UI**:  
@@ -44,14 +52,14 @@ qSnapper is a graphical user interface for the Snapper snapshot management tool.
 
 ### Main Window - Snapshot List
 
-The main window displays all available snapshots with detailed information including snapshot number, type, timestamp, and description.  
+The main window has three tabs: Snapshots, Settings, and Filesystem. The Snapshots tab displays all available snapshots with detailed information including snapshot number, type, important marker, timestamps, description, and user data.  
 
 <p align="center"><img src="ScreenShot/01_main_snapshot_list.png" width="600" alt="Main Snapshot List"></p>  
 
 ### Create Snapshot Dialog
 
 Create new snapshots with customizable options including snapshot type (Single/Pre/Post),  
-description, and cleanup algorithm.  
+description, cleanup algorithm, important flag, and user data.  
 
 <p align="center"><img src="ScreenShot/02_create_snapshot_dialog.png" width="600" alt="Create Snapshot Dialog"></p>  
 
@@ -69,15 +77,15 @@ This helps you understand what will be modified.
 
 <p align="center"><img src="ScreenShot/04_restore_preview_dialog.png" width="600" alt="Restore Preview Dialog"></p>
 
-### Restore Settings Dialog
+### Restore Options Dialog
 
-Configure the restore method (Direct Copy or YaST compatible) and batch size before restoring files.  
+Choose the restore method (Direct Copy or YaST compatible) and the batch size in the Restore Options dialog while restoring files.  
 
-<p align="center"><img src="ScreenShot/06_restore_settings_dialog.png" width="600" alt="Restore Settings Dialog"></p>
+<p align="center"><img src="ScreenShot/06_restore_settings_dialog.png" width="600" alt="Restore Options Dialog"></p>
 
 ### Delete Snapshot Dialog
 
-Confirm snapshot deletion with a safety dialog that shows which snapshot will be removed.  
+Confirm snapshot deletion with a safety dialog that warns the operation cannot be undone and notes that administrator privileges are required. A multi-selection is summarized by count.  
 
 <p align="center"><img src="ScreenShot/05_delete_snapshot_dialog.png" width="600" alt="Delete Snapshot Dialog"></p>
 
@@ -86,7 +94,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 ### Runtime Dependencies
 
 - Linux operating system (required)
-- Qt6 (>= 6.2)
+- Qt6 (>= 6.5)
   - Qt6 Core
   - Qt6 GUI
   - Qt6 Quick
@@ -94,6 +102,8 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
   - Qt6 Qml
   - Qt6 DBus
 - Snapper (>= 0.8.0)
+- Snapper D-Bus service (`org.opensuse.Snapper`, provided by the `snapper` package; required for configuration creation and deletion and for bulk deletion)
+- libbtrfsutil (required for the Filesystem tab)
 - PolicyKit (polkit)
 - D-Bus
 
@@ -104,6 +114,7 @@ Confirm snapshot deletion with a safety dialog that shows which snapshot will be
 - Qt6 development packages
 - PolicyKit-Qt6 development files
 - Snapper development headers
+- libbtrfsutil development headers
 - scdoc (optional, for generating the man page; if absent, the build skips man page generation)
 
 ## Installation
@@ -214,19 +225,34 @@ You can launch qSnapper from:
 ### Creating Snapshots
 
 1. Click the "Create Snapshot" button
-2. Select snapshot type (Single, Pre, or Post)
-3. Enter a description
-4. Choose cleanup algorithm (optional)
-5. Click "Create"
+2. Enter a description (required)
+3. Select the snapshot type
+   - **Single** creates one standalone snapshot
+   - **Pre** creates a pre snapshot that can be paired with a post snapshot later
+   - **Post** is available only when a pre snapshot without a post snapshot is selected; the new snapshot is paired with it
+4. Choose a cleanup algorithm (None, number, or timeline)
+5. Optionally mark the snapshot as important; important snapshots are shown with a `!` in the list and use the separate important number limit
+6. Optionally enter user data as `key=value` lines or comma-separated pairs
+7. Click "Create"
 
 ### Viewing Snapshots
 
-The main window displays a list of all snapshots with:  
+The Snapshots tab displays a list of all snapshots with:  
 - Snapshot number
 - Type (Single, Pre, Post)
-- Date and time
-- User who created it
+- Important marker (`!`)
+- Start and end date and time
 - Description
+- User data
+
+Pre/Post pairs are grouped into one row, and selecting a pair selects both snapshots.  
+
+### Deleting Snapshots
+
+Select one or more snapshots with the checkboxes and click "Delete Selected".  
+The whole selection is sent as a single request and requires a single authentication.  
+When a single snapshot is deleted in an active local session, polkit keeps the authorization for a short time, so deleting another single snapshot shortly afterwards does not ask again.  
+If some snapshots cannot be deleted, the remaining ones are deleted and the failures are reported with their count.  
 
 ### Comparing Snapshots
 
@@ -281,12 +307,35 @@ Restoring snapshots may overwrite current data. Always review changes before con
 **Note**:  
 If the changes between the Pre and Post snapshots created a whole new directory (for example, a package installation that added `/etc/foo/`), reverting to Pre removes that directory recursively, including any files you added inside it afterwards (for example, `/etc/foo/mine.conf`). This is the same behaviour as `snapper undochange` and is intentional.  
 
+### Settings Tab
+
+The Settings tab edits the selected Snapper configuration:  
+- Configuration information (subvolume, filesystem type, qgroup) is shown read-only
+- Number cleanup, timeline cleanup, empty pre/post cleanup, space limits, and background comparison values can be changed
+- The timeline creation setting only takes effect while `snapper-timeline.timer` is enabled
+- The snapper systemd timers can be enabled or disabled; the timers are shared by all configurations
+- The theme can be set to Light, Dark, or follow the system
+
+"New..." creates a configuration for a mounted Btrfs subvolume. The `.snapshots` subvolume is created automatically, and the filesystem root cannot be used.  
+"Delete..." removes a configuration after typing its name to confirm; all snapshots in that configuration are deleted. The root configuration cannot be created or deleted here.  
+
+### Filesystem
+
+The Filesystem tab shows read-only Btrfs information for the selected configuration:  
+- Overall size, allocated space, unallocated space, node size, and sector size
+- Space by chunk type, including profile, total allocated, and used space
+- Per-device size and allocated space
+- A subvolume list loaded on demand, with an option to hide Snapper snapshots
+
+The values come from the kernel Btrfs ioctls and can differ from the output of `btrfs filesystem usage`.  
+Loading the subvolume list requires authentication and is read-only. Long lists are capped and marked as truncated.  
+
 ## Configuration
 
 ### Snapper Configuration
 
-qSnapper uses your existing Snapper configuration.  
-To configure Snapper for your root filesystem:  
+qSnapper uses existing Snapper configurations and can also create and delete them from the Settings tab.  
+A configuration for the filesystem root cannot be created from the Settings tab, so create it with the command below before using qSnapper on the root filesystem.  
 
 ```bash
 sudo snapper -c root create-config /
@@ -304,7 +353,7 @@ Application settings are stored in:
 - `~/.config/Presire/qSnapper.conf`
 
 Settings include:  
-- Theme mode (Light or Dark)
+- Theme mode (Light, Dark, or system)
 - Window geometry and state
 - Restore method (Direct Copy or YaST compatible)
 - Restore batch size (1–1000)
@@ -318,8 +367,10 @@ qSnapper supports theme switching through the built-in ThemeManager:
    Optimized light color scheme with Material Design colors  
 2. **Dark Mode**:  
    Comfortable dark color scheme for low-light environments  
+3. **System**:  
+   Follows the desktop's light or dark preference  
 
-The theme setting is automatically persisted in the application configuration and can be toggled through the UI.  
+The theme setting is persisted per user in the application configuration and is applied when you press Save in the Settings tab.  
 
 ## Troubleshooting
 
@@ -359,13 +410,14 @@ If operations fail with permission errors:
 
 ### Snapper Not Configured
 
-If Snapper is not configured:  
-s
+If Snapper is not configured, the snapshot list is empty.  
+Check the existing configurations:  
+
 ```bash
 sudo snapper list-configs
 ```
 
-If no configurations exist, create one as shown in the Configuration section.  
+If no configuration exists for the subvolume you want to use, create one from the Settings tab with "New..." or from the command line as shown in the Configuration section.  
 
 ## Development
 
@@ -389,50 +441,69 @@ qSnapper/
 │   └── release.yml                                 # CI: tests, RPM/DEB builds and release on version tags
 ├── src/                                            # C++ sources
 │   ├── main.cpp                                    # GUI application entry point
-│   ├── snapperservice.cpp                          # Client-side D-Bus interface to the Snapper service
+│   ├── snapperservice.cpp                          # Client-side D-Bus interface to the privileged helper
 │   ├── fssnapshot.cpp                              # Snapshot data model (one snapshot)
-│   ├── fssnapshotstore.cpp                         # Per-user persistence of Pre snapshot numbers
 │   ├── snapshotlistmodel.cpp                       # Snapshot list model
 │   ├── snapshotgroupmodel.cpp                      # Pre/Post snapshot grouping model
-│   ├── filechangemodel.cpp                         # File change tree model (comparison, diff, restore plan)
-│   ├── thememanager.cpp                            # Theme management (Light/Dark mode)
+│   ├── configmanagermodel.cpp                      # Snapper configuration list model
+│   ├── snappersettingsmodel.cpp                    # Configuration values and timer state model
+│   ├── filesysteminfomodel.cpp                     # Filesystem allocation, usage and subvolume model
+│   ├── filechangemodel_loading.cpp                 # File change loading (libsnapper comparison input)
+│   ├── filechangemodel_model.cpp                   # File change tree model
+│   ├── filechangemodel_restore.cpp                 # Restore plan staging and execution
+│   ├── filechangemodel_transport.cpp               # D-Bus transport for restore plans
+│   ├── thememanager.cpp                            # Theme management (Light, Dark, System)
 │   ├── windowstatemanager.cpp                      # Persistence of window size and maximized state
 │   ├── singleinstanceguard.cpp                     # Single-instance guard (lock file and local socket)
 │   └── dbusservice/                                # Privileged D-Bus service (runs as root)
 │       ├── main.cpp                                # Service entry point (object registration, logging, idle timeout)
-│       ├── snapshotoperations.{cpp,h}              # D-Bus methods (snapshots, restore plans, polkit authorization)
+│       ├── snapshotoperations.{cpp,h}              # D-Bus method entry points and polkit authorization
+│       ├── snapshotoperations_*.cpp                # Method groups (snapshots, changes, configs, settings, restore)
+│       ├── snapperdoperation.{cpp,h}               # Calls org.opensuse.Snapper for config and bulk delete operations
+│       ├── btrfsinfo.{cpp,h}                       # Kernel Btrfs ioctls and libbtrfsutil wrappers
+│       ├── systemdtimeroperation.{cpp,h}           # systemd timer state and enable/disable
 │       ├── inputvalidator.{cpp,h}                  # Validation of untrusted D-Bus input
+│       ├── configpathvalidation.{cpp,h}            # Validation of configuration names and subvolume paths
 │       ├── filesystemhelpers.{cpp,h}               # Safe file operations beneath a root (no symlink following)
 │       ├── restoremanifest.{cpp,h}                 # Restore plan registry (owner binding, budgets, retention)
 │       ├── restoreplanexecutor.{cpp,h}             # Chunked execution of frozen restore plans
 │       ├── restorevalidation.{cpp,h}               # Restore destination construction and entry validation
 │       └── comparisoncache.h                       # Single-entry cache of a libsnapper comparison
 ├── include/                                        # Headers for the GUI application
+│   ├── configmanagermodel.h                        # Configuration list model
 │   ├── csvrecord.h                                 # CSV quoting and parsing (shared by service and client)
 │   ├── externalurlopener.h                         # Opens http/https links via the desktop portal
 │   ├── filechangemodel.h                           # File change model and restore plan transport
+│   ├── filesysteminfomodel.h                       # Filesystem information model
 │   ├── fssnapshot.h                                # Snapshot data model
-│   ├── fssnapshotstore.h                           # Pre snapshot number store
 │   ├── singleinstanceguard.h                       # Single-instance guard
 │   ├── snapperservice.h                            # Client-side D-Bus interface
+│   ├── snappersettingsmodel.h                      # Configuration values and timer state model
+│   ├── snappertimerstate.h                         # Timer unit state record
 │   ├── snapshotgroupmodel.h                        # Pre/Post grouping model
 │   ├── snapshotlistmodel.h                         # Snapshot list model
 │   ├── thememanager.h                              # Theme manager
 │   └── windowstatemanager.h                        # Window state manager
 ├── qml/                                            # QML user interface
-│   ├── Main.qml                                    # Main window (theme support)
+│   ├── Main.qml                                    # Main window with Snapshots, Settings and Filesystem tabs
 │   ├── pages/                                      # Page components
-│   │   └── SnapshotListPage.qml                    # Snapshot list page
+│   │   ├── SnapshotListPage.qml                    # Snapshot list page
+│   │   ├── SettingsPage.qml                        # Configuration editor, timers and appearance
+│   │   └── FilesystemPage.qml                      # Btrfs allocation, usage and subvolumes
 │   └── components/                                 # Reusable components
 │       ├── AboutQtDialog.qml                       # About Qt dialog
 │       ├── AboutqSnapperDialog.qml                 # About qSnapper dialog
 │       ├── BorderedDialog.qml                      # Dialog base type with a theme-aware border
 │       ├── CompareSnapshotsDialog.qml              # File differences between two snapshots
+│       ├── CreateConfigDialog.qml                  # Create a Snapper configuration
+│       ├── DeleteConfigDialog.qml                  # Delete a configuration with typed-name confirmation
 │       ├── RestorePreviewDialog.qml                # Restore preview, options and progress
+│       ├── SettingsFieldRow.qml                    # One editable configuration value
 │       ├── SnapshotDetailDialog.qml                # Snapshot details, file restore and rollback
 │       ├── SnapshotEditDialog.qml                  # Edit snapshot metadata
 │       ├── SnapshotTableHeader.qml                 # Snapshot table header row
-│       └── SnapshotTableRow.qml                    # Snapshot table row delegate
+│       ├── SnapshotTableRow.qml                    # Snapshot table row delegate
+│       └── TimerSettingsSection.qml                # systemd timer state and enable/disable
 ├── dbus/                                           # D-Bus configuration
 │   ├── com.presire.qsnapper.Operations.conf        # Bus policy (allowed methods)
 │   ├── com.presire.qsnapper.Operations.service.in  # Service activation template

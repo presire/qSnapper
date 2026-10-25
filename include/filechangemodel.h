@@ -161,6 +161,8 @@ private:
 
     /** @brief チェック済みパスのみを収集する */
     void collectCheckedItems(FileChangeItem *parent, QStringList &paths) const;
+    /** @brief 指定した項目の配下に、チェック済みの項目が1つでもあるかどうかを調べる */
+    bool containsCheckedItem(FileChangeItem *parent) const;
     /** @brief チェック済みパスと変更タイプを収集する */
     void collectCheckedItemsWithTypes(FileChangeItem *parent, QStringList &paths, QStringList &changeTypes) const;
     /** @brief 全ファイルパスを再帰的に収集する */
@@ -312,6 +314,8 @@ public:
     Q_INVOKABLE void setItemChecked(const QString &filePath, bool checked);
     /** @brief 選択済みパスの一覧を返す */
     Q_INVOKABLE QStringList getCheckedItems() const;
+    /** @brief チェック済みの項目が1つでもあるかどうかを返す (RestorePreviewDialogが復元ボタンの有効状態の判定に使う) */
+    Q_INVOKABLE bool hasCheckedItems() const;
     /** @brief 選択済み項目の復元を開始する */
     Q_INVOKABLE bool restoreCheckedItems();
     /** @brief 指定ファイルの復元を開始する */

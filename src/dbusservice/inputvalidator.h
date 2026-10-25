@@ -15,6 +15,8 @@
 
 #include <QMap>
 #include <QString>
+#include <QStringList>
+#include <optional>
 
 namespace qsnapper {
     namespace security {
@@ -134,6 +136,46 @@ namespace qsnapper {
          * @return 全てのキーと値が安全な場合: true、拒否すべき場合: false
          */
         bool validateSnapperConfigSettings(const QMap<QString, QString> &settings);
+
+        /**
+         * @brief WriteSnapperConfigで書き込みを許可するキーの一覧を返す
+         *
+         * GetConfigが返すキーをvalidateSnapperConfigSettings()の許可リストと一致させるために使う
+         * 一覧を1か所に保ち、読み取りと書き込みで扱うキーがずれないようにする
+         *
+         * @return 書き込みを許可するキーの一覧 (固定の順序)
+         */
+        const QStringList &editableSnapperConfigKeys();
+
+        /**
+         * @brief systemdのunit名を、本サービスが操作してよいsnapperのtimerの固定名へ対応付ける
+         *
+         * 許可するのはsnapper-timeline.timer / snapper-cleanup.timer / snapper-boot.timerの完全一致だけである
+         * 別のサービス、テンプレートのunit (名前に@を含むもの)、パス区切りや改行を含む名前は、一覧と一致しないため拒否される
+         * 戻り値は本関数が持つ定数であり、呼び出し元の文字列をそのままsystemdへ渡さないようにする
+         *
+         * @param unit D-Busから受け取ったunit名
+         * @return 一致した場合は固定のunit名、それ以外はstd::nullopt
+         */
+        std::optional<QString> canonicalSnapperTimerUnit(const QString &unit);
+
+        /**
+         * @brief 本サービスが操作してよいsnapperのtimerの一覧を返す
+         * @return 固定のunit名の一覧 (固定の順序)
+         */
+        const QStringList &snapperTimerUnits();
+
+        /**
+         * @brief スナップショットの作成で指定できるcleanupアルゴリズムかを判定する
+         *
+         * snapperのcleanupが解釈する名前 (number / timeline / empty-pre-post) と、cleanupの対象外を表す空文字列だけを許可する
+         * 未知の名前を保存すると、cleanupの対象から黙って外れ、利用者の意図より長くスナップショットが残るため、作成の時点で拒否する
+         * 既存のスナップショットの編集 (ModifySnapshot) は、YaSTと同じく任意の名前を許すため、本関数の対象外とする
+         *
+         * @param cleanup D-Busから受け取ったcleanupアルゴリズム名
+         * @return 許可する名前の場合: true
+         */
+        bool isAllowedCreateCleanupAlgorithm(const QString &cleanup);
     } // namespace security
 } // namespace qsnapper
 

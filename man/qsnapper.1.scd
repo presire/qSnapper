@@ -16,6 +16,12 @@ comparing, and restoring Btrfs snapshots, and communicates with a privileged
 D-Bus helper service (*qsnapper-dbus-service*(8)) for all operations that
 require elevated privileges.
 
+The main window has three tabs. *Snapshots* lists, creates, modifies, compares,
+and deletes snapshots. *Settings* edits the selected Snapper configuration,
+manages the snapper systemd timers, creates and deletes configurations, and
+sets up Btrfs quota. *Filesystem* shows read-only Btrfs allocation, usage, and
+subvolume information for the selected configuration.
+
 Privileged operations are authorized through PolicyKit. Active desktop sessions
 are prompted for authentication when required; non-interactive or inactive
 sessions require administrator credentials for all operations.
@@ -49,12 +55,20 @@ following standard Qt options are accepted:
 
 *Post*
 	The "after" snapshot paired with a specific Pre snapshot. Together, a
-	Pre/Post pair captures what changed during a system operation.
+	Pre/Post pair captures what changed during a system operation. A Post
+	snapshot can be created only while a Pre snapshot without a Post
+	snapshot is selected; the new snapshot is paired with it.
+
+Snapshots can be marked as important when they are created. Important snapshots
+are shown with *!* in the snapshot list and are counted against the separate
+_NUMBER_LIMIT_IMPORTANT_ setting during number cleanup.
 
 # CLEANUP ALGORITHMS
 
 An optional cleanup algorithm may be assigned to a snapshot at creation time.
-Snapper will apply the chosen algorithm when performing automatic cleanup.
+Snapper will apply the chosen algorithm when performing automatic cleanup. The
+creation dialog offers *None*, *Number*, and *Timeline*. The algorithm and the
+description can be changed later with *Modify*.
 
 *Number*
 	Keeps a configurable maximum number of snapshots. Oldest snapshots are
@@ -73,16 +87,37 @@ Snapper will apply the chosen algorithm when performing automatic cleanup.
 
 ## Viewing Snapshots
 
-The main window lists all snapshots for the selected Snapper configuration,
-showing the snapshot number, type (Single/Pre/Post), creation timestamp,
-creating user, and description.
+The Snapshots tab lists all snapshots for the selected Snapper configuration,
+showing the snapshot number, type (Single/Pre/Post), important marker (*!*),
+start and end timestamps, description, and user data. Pre/Post pairs are grouped
+into one row, and selecting a pair selects both snapshots. Checkboxes allow
+selecting multiple snapshots for bulk deletion.
 
 ## Creating Snapshots
 
-Click *Create Snapshot* to open the creation dialog. Select the snapshot type
-(Single, Pre, or Post), enter a description, optionally choose a cleanup
-algorithm, and click *Create*. Creating a Post snapshot requires an existing
-Pre snapshot to pair with.
+Click *Create Snapshot* to open the creation dialog. Enter a description, then
+choose the snapshot type:
+
+*Single*
+	Creates a standalone snapshot.
+
+*Pre*
+	Creates a pre snapshot that can be paired with a post snapshot later.
+
+*Post*
+	Available only while a pre snapshot without a post snapshot is selected.
+	The new snapshot is paired with that pre snapshot.
+
+Optionally choose a cleanup algorithm (*None*, *Number*, or *Timeline*), mark
+the snapshot as important, and enter user data as *key=value* lines or
+comma-separated pairs. Then click *Create*.
+
+## Deleting Snapshots
+
+Select one or more snapshots with the checkboxes and click *Delete Selected*.
+The whole selection is sent as a single request and requires one PolicyKit
+authorization. If some snapshots cannot be deleted, the remaining snapshots are
+deleted and the number of failures is reported.
 
 ## Viewing File Changes
 
@@ -91,21 +126,53 @@ dialog. A tree view lists files that were added, modified, or deleted relative
 to the current system (for single snapshots) or between a Pre/Post pair. A
 diff panel shows the unified diff for the selected file.
 
-For Pre/Post snapshot pairs, radio buttons toggle the diff view between the
-Pre and Post snapshots.
+For Pre/Post pairs, radio buttons choose between reverting to the Pre snapshot,
+re-applying to the Post snapshot, and viewing either snapshot against the
+current system. The two current-system views are read-only.
 
 ## Restoring Files
 
 In the Snapshot Overview dialog, check the files or directories to restore,
-then click *Restore Selected*. A confirmation dialog presents restore method
-and batch size options before the operation proceeds. A real-time progress log
-displays each file as it is restored.
-
-For Pre/Post pairs, dedicated *Restore from Pre* and *Restore from Post*
-buttons allow independent restoration from either snapshot.
+then click *Restore Selected*. The confirmation dialog contains restore method
+and batch size options. For Pre/Post pairs the button reads *Restore Selected
+to #N* and restores only the entries that differ between Pre and Post. A
+real-time progress log displays each file as it is restored.
 
 *Warning*: Restoring files overwrites the current versions on disk. Review all
 selected changes carefully before confirming.
+
+## Settings
+
+The Settings tab edits the selected Snapper configuration. Configuration
+information (subvolume, filesystem type, and qgroup) is read-only. Number
+cleanup, timeline cleanup, empty pre/post pair cleanup, space limits, and
+background comparison values can be changed. The *Timeline* creation setting
+only takes effect while *snapper-timeline.timer* is enabled.
+
+The tab also lists the snapper systemd timers and allows enabling or disabling
+them. The timers are shared by all configurations.
+
+*New...* creates a configuration for a mounted Btrfs subvolume. The .snapshots
+subvolume is created automatically, and the filesystem root cannot be used.
+*Delete...* deletes a configuration after its name is typed to confirm; all
+snapshots in that configuration are deleted as well. The root configuration
+cannot be created or deleted from the Settings tab.
+
+When a configuration has no qgroup yet, *Set up quota* enables Btrfs quota
+after a confirmation prompt. Quota setup cannot be undone from qSnapper, and
+the space limit settings only take effect once quota is enabled.
+
+## Filesystem
+
+The Filesystem tab shows read-only Btrfs information for the selected
+configuration: overall size, allocated and unallocated space, node size,
+sector size, space by chunk type, and per-device size and allocation. A
+subvolume list can be loaded on demand with an option to hide Snapper
+snapshots.
+
+The values come from the kernel Btrfs ioctls and can differ from the output of
+*btrfs filesystem usage*. Loading the subvolume list requires authentication
+and is read-only. Long lists are capped and marked as truncated.
 
 # RESTORE MODES
 
@@ -136,13 +203,20 @@ qSnapper stores its settings in:
 
 	_~/.config/Presire/qSnapper.conf_
 
-Settings written to this file include the current theme (Light or Dark), saved
-window geometry, the selected restore method, and the restore batch size.
+Settings written to this file include the current theme (Light, Dark, or
+System), saved window geometry, the selected restore method, and the restore
+batch size.
 
 ## Snapper Configuration
 
-qSnapper uses existing Snapper configurations. To create a configuration for
-the root filesystem:
+qSnapper uses existing Snapper configurations and can create and delete them
+from the Settings tab. Creating or deleting a configuration, and deleting
+several snapshots at once, is performed through the Snapper D-Bus service
+*org.opensuse.Snapper*, which is provided by the *snapper* package and must be
+available.
+
+The root configuration cannot be created or deleted in the Settings tab. To
+create a configuration for the root filesystem, use:
 
 ```
 sudo snapper -c root create-config /
@@ -158,8 +232,10 @@ See *snapper*(8) for full configuration options.
 
 ## Theme
 
-qSnapper provides Light and Dark themes, selectable from the application UI.
-The chosen theme is persisted in the application configuration file.
+qSnapper provides Light, Dark, and System themes, selectable from the
+application UI. System follows the desktop's light or dark preference. The
+chosen theme is persisted per user in the application configuration file and
+is applied when Save is pressed in the Settings tab.
 
 # FILES
 
@@ -210,6 +286,15 @@ The interface provides the following methods:
 *DeleteSnapshot*(_configName_, _number_)
 	Deletes the specified snapshot.
 
+*DeleteSnapshots*(_configName_, _numbers_)
+	Deletes several snapshots in one request with a single authorization.
+	Numbers must be greater than zero; duplicates are removed and the batch
+	is limited to 100 snapshots.
+
+*RollbackSnapshot*(_configName_, _number_)
+	Rolls the system back to the specified snapshot. A reboot is required
+	to complete the rollback.
+
 *GetFileChanges*(_configName_, _snapshotNumber_)
 	Returns files changed between the snapshot and the current system.
 
@@ -244,6 +329,33 @@ The interface provides the following methods:
 *SetupQuota*(_configName_)
 	Enables Snapper quota management for the configuration.
 
+*GetConfig*(_configName_)
+	Returns the editable settings plus the subvolume, filesystem type, and
+	qgroup of the configuration.
+
+*GetTimerStates*(), *SetTimerEnabled*(_unit_, _enabled_)
+	Read and change the state of the fixed Snapper timer units
+	(*snapper-timeline.timer*, *snapper-cleanup.timer*,
+	*snapper-boot.timer*). The unit file state and the active state are
+	reported separately.
+
+*CreateConfig*(_configName_, _subvolume_)
+	Creates a Snapper configuration for a mounted Btrfs subvolume through
+	*org.opensuse.Snapper*. The root configuration is never created here.
+
+*DeleteConfig*(_configName_)
+	Deletes a Snapper configuration through *org.opensuse.Snapper*. The
+	root configuration is never deleted here.
+
+*GetFilesystemUsage*(_configName_)
+	Returns read-only Btrfs size, allocation, per-chunk-type, and
+	per-device usage as CSV text.
+
+*ListSubvolumes*(_configName_)
+	Returns the subvolume list as CSV text. The list is capped by count,
+	total path size, and elapsed time, and the first line reports whether
+	it was truncated.
+
 The helper also emits the *restorePlanProgress*(_manifestId_, _current_, _total_, _filePath_)
 and *restorePlanFinished*(_manifestId_, _terminalState_, _message_) signals
 during file restoration, which the GUI displays in the real-time progress log.
@@ -277,6 +389,39 @@ defined:
 *com.presire.qsnapper.configure*
 	Writing Snapper configuration. Requires authentication (kept for the
 	session).
+
+*com.presire.qsnapper.view-config*
+	Reading Snapper configuration values. Allowed for active desktop
+	sessions.
+
+*com.presire.qsnapper.view-timers*
+	Reading systemd timer states. Allowed for active desktop sessions.
+
+*com.presire.qsnapper.manage-timers*
+	Enabling or disabling systemd timers. Requires authentication (kept for
+	the session).
+
+*com.presire.qsnapper.setup-quota*
+	Enabling Btrfs quota. Requires authentication (kept for the session).
+
+*com.presire.qsnapper.create-config*
+	Creating a Snapper configuration. Requires administrator credentials
+	for all sessions.
+
+*com.presire.qsnapper.delete-config*
+	Deleting a Snapper configuration. Requires administrator credentials
+	and is not kept for the session.
+
+*com.presire.qsnapper.delete-snapshots*
+	Deleting several snapshots in one request. Requires administrator
+	credentials and is not kept for the session.
+
+*com.presire.qsnapper.view-filesystem*
+	Reading filesystem allocation and usage. Allowed for active desktop
+	sessions.
+
+*com.presire.qsnapper.list-subvolumes*
+	Listing subvolumes. Requires authentication (kept for the session).
 
 Non-interactive sessions and remote sessions always require administrator
 credentials for all operations.
@@ -325,8 +470,11 @@ ls /usr/share/polkit-1/actions/com.presire.qsnapper.policy
 
 ## Snapper Not Configured
 
-If no Snapper configurations exist, qSnapper will indicate that Snapper is
-not configured. Create a configuration as shown in the *CONFIGURATION* section.
+If no Snapper configurations exist, the snapshot list is empty. Check the
+available configurations with *snapper list-configs*. A configuration for a
+non-root Btrfs subvolume can be created from the *Settings* tab with *New...*;
+the root configuration must be created from the command line as shown in the
+*CONFIGURATION* section.
 
 ## Log File
 
@@ -336,7 +484,7 @@ _/var/log/qsnapper/qsnapper-dbus.log_.
 # SEE ALSO
 
 *snapper*(8), *btrfs*(8), *polkit*(8), *dbus-daemon*(1),
-*systemd-tmpfiles*(8), *cp*(1)
+*systemctl*(1), *systemd-tmpfiles*(8), *cp*(1)
 
 # AUTHORS
 

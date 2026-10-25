@@ -6,8 +6,11 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantMap>
+#include <QMap>
 #include <QLoggingCategory>
 #include <QDBusInterface>
+#include <QDBusPendingCall>
+#include <QDBusError>
 #include "fssnapshot.h"
 
 Q_DECLARE_LOGGING_CATEGORY(snapperLog)
@@ -27,7 +30,6 @@ Q_DECLARE_LOGGING_CATEGORY(snapperLog)
 class SnapperService : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(bool configured READ isConfigured NOTIFY configuredChanged)                                  // Snapper設定済みフラグ
     Q_PROPERTY(QStringList configs READ configs NOTIFY configsChanged)                                      // 利用可能な設定一覧
     Q_PROPERTY(QString currentConfig READ currentConfig WRITE setCurrentConfig NOTIFY currentConfigChanged) // 現在選択中の設定名
 
@@ -49,18 +51,6 @@ public:
      * @return SnapperServiceの唯一のインスタンス
      */
     static SnapperService* instance();
-
-    // 設定状態
-    /**
-     * @brief Snapperが設定済みか判定する
-     * @return 設定済みの場合はtrue
-     */
-    bool isConfigured();
-
-    /**
-     * @brief Snapperを設定する
-     */
-    Q_INVOKABLE void configureSnapper();
 
     // 設定 (config) 切替API
     /**
@@ -85,6 +75,113 @@ public:
      * @brief 設定一覧を更新する
      */
     Q_INVOKABLE void refreshConfigs();
+
+    // 設定画面向けの非同期D-Bus呼び出し (C++専用)
+    // 設定画面はGUIスレッドをブロックしないよう、同期呼び出しを使わずQDBusPendingCallで結果を受け取る
+    // 呼び出し元はQDBusPendingCallWatcherを作成して完了を待つ
+    // reconnect()は同期呼び出しでGUIを止めるため使わず、特権サービスの起動はバスのD-Bus activationに任せる
+    /**
+     * @brief 指定設定のsnapper設定値を非同期に取得する (GetConfig)
+     * @param configName 取得対象の設定名
+     * @return 応答がa{ss}のQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     */
+    QDBusPendingCall asyncGetConfig(const QString &configName);
+
+    /**
+     * @brief 指定設定のsnapper設定値を非同期に書き込む (WriteSnapperConfig)
+     * @param configName 書き込み対象の設定名
+     * @param settings 書き込む設定値 (サーバ側が許可する編集可能キーだけを渡す)
+     * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     */
+    QDBusPendingCall asyncWriteSnapperConfig(const QString &configName, const QMap<QString, QString> &settings);
+
+    /**
+     * @brief 指定設定のBtrfsクォータを非同期に設定する (SetupQuota)
+     * @param configName 対象の設定名
+     * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     */
+    QDBusPendingCall asyncSetupQuota(const QString &configName);
+
+    /**
+     * @brief snapperのsystemdタイマの状態を非同期に取得する (GetTimerStates)
+     * @return 応答がa{s(ss)}のQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     */
+    QDBusPendingCall asyncGetTimerStates();
+
+    /**
+     * @brief snapperのsystemdタイマの有効化と無効化を非同期に要求する (SetTimerEnabled)
+     * @param unit 対象のユニット名 (snapper-timeline.timerなど)
+     * @param enabled trueで有効化して起動、falseで停止して無効化
+     * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答のQDBusPendingCall
+     */
+    QDBusPendingCall asyncSetTimerEnabled(const QString &unit, bool enabled);
+
+    /**
+     * @brief 設定の作成を非同期に要求する (CreateConfig)
+     * @param configName 作成する設定名 (サーバ側でも同じ規則で検証される)
+     * @param subvolume 設定が対象とするBtrfsサブボリュームの絶対パス
+     * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
+     * @note polkitは毎回auth_adminで認証を求めるため、認証ダイアログへの入力待ちを見込んで待ち時間を延ばす
+     *       サーバ側がfstype=btrfsとtemplate=defaultを固定する
+     */
+    QDBusPendingCall asyncCreateConfig(const QString &configName, const QString &subvolume);
+
+    /**
+     * @brief 設定の削除を非同期に要求する (DeleteConfig)
+     * @param configName 削除する設定名
+     * @return 応答がboolのQDBusPendingCall、接続できない場合はエラー応答
+     * @note 対象設定の全スナップショットも削除されるため、完了までに時間がかかる
+     *       サーバ側はSUBVOLUMEが/の設定 (システムのルート) を拒否する
+     */
+    QDBusPendingCall asyncDeleteConfig(const QString &configName);
+
+    /**
+     * @brief 複数スナップショットの一括削除を非同期に要求する (DeleteSnapshots)
+     * @param configName 対象の設定名
+     * @param numbers 削除するスナップショット番号 (1以上、重複なし)
+     * @return 応答がauのQDBusPendingCall、接続できない場合はエラー応答
+     * @note 認証は1回だけ求められるため、番号ごとの個別呼び出しよりプロンプトが少なくなる
+     *       応答のリストは再読み込み後に削除を確認できた番号であり、要求より短い場合は一部失敗を意味する
+     */
+    QDBusPendingCall asyncDeleteSnapshots(const QString &configName, const QList<uint> &numbers);
+
+    /**
+     * @brief 1件のスナップショットの削除を、ヘルパのDeleteSnapshotメソッドへ非同期に要求する
+     * @param configName 削除するスナップショットが属するSnapperの設定名
+     * @param number 削除するスナップショット番号 (1以上)
+     * @return 応答の値がboolになるQDBusPendingCall
+     *         ヘルパへ接続できない場合は、エラー応答を持つQDBusPendingCall
+     * @note DeleteSnapshotの認可 (delete-snapshot) はauth_admin_keepのため、polkitが認可を一時保持する間は再認証を求めない
+     *       ヘルパはsnapperdを経由せずlibsnapperで直接削除する
+     *       そのため、snapperdが保持する古い一覧が原因の拒否 (SnapshotListOutdated) は発生しない
+     */
+    QDBusPendingCall asyncDeleteSnapshot(const QString &configName, uint number);
+
+    /**
+     * @brief 設定のファイルシステム使用量を非同期に取得する (GetFilesystemUsage)
+     * @param configName 対象の設定名
+     * @return 応答がCSV文字列のQDBusPendingCall、接続できない場合はエラー応答
+     * @note 認可はallow_activeのため認証は求められないが、サーバ側の処理時間を見込んで待ち時間を延ばす
+     */
+    QDBusPendingCall asyncGetFilesystemUsage(const QString &configName);
+
+    /**
+     * @brief 設定のサブボリューム一覧を非同期に取得する (ListSubvolumes)
+     * @param configName 対象の設定名
+     * @return 応答がCSV文字列のQDBusPendingCall、接続できない場合はエラー応答
+     * @note 認可はauth_admin_keepのため、初回は認証ダイアログへの入力待ちが発生する
+     */
+    QDBusPendingCall asyncListSubvolumes(const QString &configName);
+
+    /**
+     * @brief D-Busエラーを利用者へ表示する文言へ変換する
+     * @param error 特権サービスから返されたD-Busエラー
+     * @return 既知の拒否理由であれば翻訳済みの固定文言、それ以外はエラー本文
+     * @note エラー本文は特権サービスが返す固定の英語文言であり、設定ファイルの内容は含まない
+     *       拒否は一時的なものが多く、完了後に再実行すれば成功するため、エラー名で判別して理由を翻訳して伝える
+     *       エラー名はdbus/com.presire.qsnapper.Operations.xmlに記載した名前と一致させる必要がある
+     */
+    static QString errorText(const QDBusError &error);
 
     // 外部ブラウザでURLを開く (QML公開)
     /**
@@ -191,26 +288,7 @@ public:
     Q_INVOKABLE bool modifySnapshot(int number, const QString &description,
                                     const QString &cleanup, const QVariantMap &userdata);
 
-    // インストール時設定
-    /**
-     * @brief インストール時設定フラグを設定する
-     * @param value 設定するフラグ値
-     */
-    void setConfigureOnInstall(bool value) { m_configureOnInstall = value; }
-
-    /**
-     * @brief インストール時設定フラグを取得する
-     * @return インストール時に設定を行う場合はtrue
-     */
-    bool configureOnInstall() const { return m_configureOnInstall; }
-
 signals:
-    /**
-     * @brief 設定状態変更時に発行する
-     * @param configured 設定済みかどうか
-     */
-    void configuredChanged(bool configured);
-
     /**
      * @brief 設定一覧変更時に発行する
      */
@@ -288,30 +366,6 @@ private:
                bool important = false,
                const QVariantMap &userdata = QVariantMap());
 
-    // パス・環境判定
-    /**
-     * @brief ターゲットルートパスを取得する
-     * @return スナップショット対象のルートパス
-     */
-    QString targetRoot() const;
-
-    /**
-     * @brief 非切り替えインストールか判定する
-     * @return 非切り替えインストールの場合はtrue
-     */
-    bool nonSwitchedInstallation() const;
-
-    // インストール補助
-    /**
-     * @brief Snapper設定ファイルを書き込む
-     */
-    void writeSnapperConfig();
-
-    /**
-     * @brief Snapperクォータを設定する
-     */
-    void setupSnapperQuota();
-
     // 解析・実行
     /**
      * @brief CSV出力を解析してスナップショットリストを生成する
@@ -333,9 +387,6 @@ private:
     static SnapperService *s_instance;  // シングルトンインスタンス
 
     // 状態フラグ
-    bool m_configured;          // Snapperが設定済みかどうか
-    bool m_configuredChecked;   // 設定チェック済みフラグ
-    bool m_configureOnInstall;  // インストール時に設定を行うかどうか
     bool m_configsChecked;      // 設定一覧キャッシュ済みフラグ
 
     // 通信・キャッシュ

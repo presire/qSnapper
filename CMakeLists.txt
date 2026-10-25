@@ -18,7 +18,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Core Gui Quick Qml QuickControls2 DBus LinguistTools)
+# QStyleHints::colorSchemeを使用しているため、Qt 6.5以降を要求する
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick Qml QuickControls2 DBus LinguistTools)
 find_package(PolkitQt6-1 REQUIRED)
 
 # D-Busサービスはpolkitの非同期認可API (polkit_authority_check_authorization) を直接使用する
@@ -42,7 +43,6 @@ set(SOURCES
     src/main.cpp
     src/fssnapshot.cpp
     src/snapperservice.cpp
-    src/fssnapshotstore.cpp
     src/snapshotlistmodel.cpp
     src/filechangeitem.cpp
     src/filechangemodel_loading.cpp
@@ -53,13 +53,15 @@ set(SOURCES
     src/snapshotgroupmodel.cpp
     src/singleinstanceguard.cpp
     src/windowstatemanager.cpp
+    src/snappersettingsmodel.cpp
+    src/configmanagermodel.cpp
+    src/filesysteminfomodel.cpp
 )
 
 # GUIアプリケーション本体の公開ヘッダー
 set(HEADERS
     include/fssnapshot.h
     include/snapperservice.h
-    include/fssnapshotstore.h
     include/snapshotlistmodel.h
     include/filechangeitem.h
     include/filechangemodel.h
@@ -68,6 +70,10 @@ set(HEADERS
     include/snapshotgroupmodel.h
     include/singleinstanceguard.h
     include/windowstatemanager.h
+    include/snappersettingsmodel.h
+    include/snappertimerstate.h
+    include/configmanagermodel.h
+    include/filesysteminfomodel.h
 )
 
 # GUIアプリケーションの実行ファイルを生成
@@ -90,6 +96,10 @@ qt6_add_qml_module(qsnapper
     QML_FILES
         qml/Main.qml
         qml/pages/SnapshotListPage.qml
+    qml/pages/SettingsPage.qml
+    qml/components/SettingsFieldRow.qml
+    qml/components/TimerSettingsSection.qml
+    qml/components/ThemedGroupBox.qml
         qml/components/SnapshotDetailDialog.qml
         qml/components/RestorePreviewDialog.qml
         qml/components/AboutqSnapperDialog.qml
@@ -99,6 +109,9 @@ qt6_add_qml_module(qsnapper
         qml/components/SnapshotEditDialog.qml
         qml/components/CompareSnapshotsDialog.qml
         qml/components/BorderedDialog.qml
+        qml/components/CreateConfigDialog.qml
+        qml/components/DeleteConfigDialog.qml
+        qml/pages/FilesystemPage.qml
 )
 
 # アイコンリソースを別途追加 (QMLモジュールとは独立)
@@ -151,6 +164,12 @@ set(DBUS_SERVICE_SOURCES
     src/dbusservice/snapshotoperations.cpp
     src/dbusservice/snapshotoperations_auth.cpp
     src/dbusservice/snapshotoperations_snapshots.cpp
+    src/dbusservice/snapshotoperations_settings.cpp
+    src/dbusservice/systemdtimeroperation.cpp
+    src/dbusservice/snapperdoperation.cpp
+    src/dbusservice/configpathvalidation.cpp
+    src/dbusservice/snapshotoperations_configs.cpp
+    src/dbusservice/btrfsinfo.cpp
     src/dbusservice/snapshotoperations_changes.cpp
     src/dbusservice/snapshotoperations_diff.cpp
     src/dbusservice/snapshotoperations_restore.cpp
@@ -169,6 +188,11 @@ set(DBUS_SERVICE_HEADERS
     src/dbusservice/snapshotoperations.h
     src/dbusservice/snapshotoperations_types.h
     src/dbusservice/snapshotoperations_internal.h
+    src/dbusservice/systemdtimeroperation.h
+    src/dbusservice/snapperdoperation.h
+    src/dbusservice/configpathvalidation.h
+    src/dbusservice/btrfsinfo.h
+    include/snappertimerstate.h
     src/dbusservice/inputvalidator.h
     src/dbusservice/filesystemhelpers.h
     src/dbusservice/filesystemhelpers_internal.h

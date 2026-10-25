@@ -286,5 +286,83 @@ namespace qsnapper {
             }
             return true;
         }
+
+        /**
+         * @brief WriteSnapperConfigで書き込みを許可するキーの一覧を返す
+         *
+         * validateSnapperConfigSettings()の許可リストと同じキーを返す
+         * tests/unit/tst_configname.cppで、一覧の全キーが許可リストに受理されることを確認する
+         */
+        const QStringList &editableSnapperConfigKeys()
+        {
+            static const QStringList keys = {
+                QStringLiteral("NUMBER_CLEANUP"),
+                QStringLiteral("NUMBER_MIN_AGE"),
+                QStringLiteral("NUMBER_LIMIT"),
+                QStringLiteral("NUMBER_LIMIT_IMPORTANT"),
+                QStringLiteral("TIMELINE_CREATE"),
+                QStringLiteral("TIMELINE_CLEANUP"),
+                QStringLiteral("TIMELINE_MIN_AGE"),
+                QStringLiteral("TIMELINE_LIMIT_HOURLY"),
+                QStringLiteral("TIMELINE_LIMIT_DAILY"),
+                QStringLiteral("TIMELINE_LIMIT_WEEKLY"),
+                QStringLiteral("TIMELINE_LIMIT_MONTHLY"),
+                QStringLiteral("TIMELINE_LIMIT_QUARTERLY"),
+                QStringLiteral("TIMELINE_LIMIT_YEARLY"),
+                QStringLiteral("EMPTY_PRE_POST_CLEANUP"),
+                QStringLiteral("EMPTY_PRE_POST_MIN_AGE"),
+                QStringLiteral("SPACE_LIMIT"),
+                QStringLiteral("FREE_LIMIT"),
+                QStringLiteral("BACKGROUND_COMPARISON"),
+            };
+            return keys;
+        }
+
+        /**
+         * @brief 本サービスが操作してよいsnapperのtimerの一覧を返す
+         *
+         * snapperのパッケージが提供するtimerだけに限定する
+         * 他のunitを操作できると、本サービスの認可でシステムの任意のサービスを止めたり起動したりできてしまうため
+         */
+        const QStringList &snapperTimerUnits()
+        {
+            static const QStringList units = {
+                QStringLiteral("snapper-timeline.timer"),
+                QStringLiteral("snapper-cleanup.timer"),
+                QStringLiteral("snapper-boot.timer"),
+            };
+            return units;
+        }
+
+        /**
+         * @brief unit名を固定のsnapperのtimer名へ対応付ける
+         *
+         * 詳細な契約は、inputvalidator.h側の説明を参照すること
+         */
+        std::optional<QString> canonicalSnapperTimerUnit(const QString &unit)
+        {
+            for (const QString &allowed : snapperTimerUnits()) {
+                if (unit == allowed) {
+                    return allowed;
+                }
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief スナップショットの作成で指定できるcleanupアルゴリズムかを判定する
+         *
+         * 詳細な契約は、inputvalidator.h側の説明を参照すること
+         */
+        bool isAllowedCreateCleanupAlgorithm(const QString &cleanup)
+        {
+            static const QStringList algorithms = {
+                QString(),
+                QStringLiteral("number"),
+                QStringLiteral("timeline"),
+                QStringLiteral("empty-pre-post"),
+            };
+            return algorithms.contains(cleanup);
+        }
     } // namespace security
 } // namespace qsnapper

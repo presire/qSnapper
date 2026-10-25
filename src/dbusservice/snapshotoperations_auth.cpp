@@ -135,6 +135,11 @@ std::optional<QString> SnapshotOperations::resolveConfigOrFail(const QString &co
                        QStringLiteral("Invalid configName"));
         return std::nullopt;
     }
+    // configの作成・削除や一括削除の途中は、configの一覧とスナップショットが変わる途中であるため、
+    // configを指定する全ての操作 (復元計画の作成を含む) を、認可の前に拒否する
+    if (rejectWhileSnapperdOperationRunning()) {
+        return std::nullopt;
+    }
     return effective;
 }
 
@@ -160,12 +165,15 @@ SnapshotOperations::CallReply SnapshotOperations::captureCallReply() const
 }
 
 /**
- * @brief 同期応答と遅延応答のどちらでも正しくD-Busエラーを返す
+ * @brief 同期応答と遅延応答のどちらでも正しく名前付きのD-Busエラーを返す
  *
- * @param type 返すD-Busエラー種別
+ * エラー種別を受け取る版 (snapshotoperations.h) も、種別をエラー名へ変換して本関数へ委ねる
+ * エラー応答を送出する箇所を本関数の1か所に保つため (遅延応答の取りこぼしを静的検査で防ぐ)
+ *
+ * @param errorName 返すD-Busエラー名
  * @param text エラーメッセージ
  */
-void SnapshotOperations::replyError(QDBusError::ErrorType type, const QString &text)
+void SnapshotOperations::replyError(const QString &errorName, const QString &text)
 {
     if (m_deferredReply) {
         // 継続の中ではQDBusContextの呼び出しcontextが失われているため、
@@ -173,13 +181,136 @@ void SnapshotOperations::replyError(QDBusError::ErrorType type, const QString &t
         if (!m_deferredReply->replied && m_deferredReply->fromDBus) {
             m_deferredReply->replied = true;
             m_deferredReply->connection.send(
-                m_deferredReply->message.createErrorReply(type, text));
+                m_deferredReply->message.createErrorReply(errorName, text));
         }
         return;
     }
 
-    sendErrorReply(type, text);
+    sendErrorReply(errorName, text);
 }
+
+/**
+ * @brief 復元の実行中であれば、操作を固定の文言で拒否する
+ *
+ * m_restoreExecutionsは、復元計画の認可後にmountしてから終端するまでの間だけ要素を持つ
+ * この間に共有のSnapperインスタンスを作り直したり、比較キャッシュを破棄したりすると、
+ * 実行中の復元と終了時のunmountが別のインスタンスを参照してしまうため、非復元操作を一律に拒否する
+ * エラー本文には、config名やpathなど呼び出し元が制御し得る値を載せない
+ *
+ * @return 拒否してエラー応答を送出した場合: true
+ */
+bool SnapshotOperations::rejectWhileRestoreRunning()
+{
+    if (m_restoreExecutions.isEmpty()) {
+        return rejectWhileSnapperdOperationRunning();
+    }
+
+    replyError(QString::fromLatin1(qsnapper::dbusservice::RESTORE_IN_PROGRESS_ERROR_NAME),
+               QString::fromLatin1(qsnapper::dbusservice::RESTORE_IN_PROGRESS_ERROR_TEXT));
+    return true;
+}
+
+/**
+ * @brief snapperdへ転送した変更の実行中であれば、操作を固定の文言で拒否する
+ *
+ * rejectWhileRestoreRunning()から呼び、共通ゲートの3か所 (認可の前、即時認可の直後、遅延認可の後) で同じ判定にする
+ * @return 拒否してエラー応答を送出した場合: true
+ */
+bool SnapshotOperations::rejectWhileSnapperdOperationRunning()
+{
+    if (!snapperdOperationRunning()) {
+        return false;
+    }
+
+    replyError(QString::fromLatin1(qsnapper::dbusservice::OPERATION_IN_PROGRESS_ERROR_NAME),
+               QString::fromLatin1(qsnapper::dbusservice::OPERATION_IN_PROGRESS_ERROR_TEXT));
+    return true;
+}
+
+#ifdef QSNAPPER_ENABLE_TEST_HOOKS
+/**
+ * @brief 認可の結果をテスト用に固定する
+ * @param mode 以降の認可要求に返す結果
+ */
+void SnapshotOperations::setAuthorizationForTesting(TestAuthorization mode)
+{
+    m_testAuthorization = mode;
+}
+
+/**
+ * @brief 保留中のテスト用認可の件数を返す
+ * @return 保留中の件数
+ */
+int SnapshotOperations::pendingTestAuthorizationCount() const
+{
+    return static_cast<int>(m_testPendingAuthorizations.size());
+}
+
+/**
+ * @brief 保留中のテスト用認可をすべて確定し、各呼び出しの継続を実行する
+ *
+ * polkitの非同期応答と同じく、event loopから継続を呼び出す
+ * 継続の実行中に新たな保留が積まれても取りこぼさないよう、先に一覧を取り出してから実行する
+ *
+ * @param granted 許可する場合はtrue
+ */
+void SnapshotOperations::resolveTestAuthorizations(bool granted)
+{
+    const auto pending = std::exchange(m_testPendingAuthorizations, {});
+    for (const auto &[reply, continuation] : pending) {
+        continuation(reply, granted);
+    }
+}
+
+/**
+ * @brief 復元の実行中の状態を、mountせずに作る
+ *
+ * mountedとsnapshotDirFdを未使用の値にしておくため、
+ * 解除やサービス終了時の後片付け (cleanupRestoreExecution) はunmountもcloseも行わない
+ *
+ * @param configName 復元中として記録するconfig名
+ */
+void SnapshotOperations::beginRestoreExecutionForTesting(const QString &configName)
+{
+    RestoreExecution execution;
+    execution.configName = configName;
+    m_restoreExecutions.insert(QStringLiteral("test-restore-execution"), execution);
+}
+
+/**
+ * @brief beginRestoreExecutionForTestingで作った状態を解除する
+ */
+void SnapshotOperations::endRestoreExecutionForTesting()
+{
+    cleanupRestoreExecution(QStringLiteral("test-restore-execution"));
+}
+
+/**
+ * @brief snapperdへ転送した変更の実行中の状態を、snapperdへ転送せずに作る
+ *
+ * 開始しない操作を保持させ、本番と同じ判定 (snapperdOperationRunning) で拒否させる
+ */
+void SnapshotOperations::beginSnapperdOperationForTesting()
+{
+    if (m_snapperdOperation) {
+        return;
+    }
+    m_snapperdOperation = new qsnapper::dbusservice::SnapperdOperation(
+        QDBusConnection::systemBus(), QString(), QDBusMessage(), QString(), {},
+        []() { return false; }, this);
+    resetIdleTimer();
+}
+
+/**
+ * @brief beginSnapperdOperationForTestingで作った状態を解除する
+ */
+void SnapshotOperations::endSnapperdOperationForTesting()
+{
+    delete m_snapperdOperation.data();
+    m_snapperdOperation.clear();
+    resetIdleTimer();
+}
+#endif
 
 /**
  * @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
@@ -218,6 +349,19 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
         replyError(QDBusError::AccessDenied, QStringLiteral("Authorization failed"));
         return AuthorizationOutcome::Denied;
     }
+
+#ifdef QSNAPPER_ENABLE_TEST_HOOKS
+    // 隔離環境にはpolkitdが無いため、テスト用サービスでは認可の結果だけを差し替える
+    // 即時許可と遅延許可のどちらの経路も、本番と同じ呼び出し側 (authorizeThen) を通す
+    if (m_testAuthorization == TestAuthorization::Grant) {
+        return AuthorizationOutcome::Granted;
+    }
+    if (m_testAuthorization == TestAuthorization::Defer) {
+        m_testPendingAuthorizations.append({reply, continuation});
+        setDelayedReply(true);
+        return AuthorizationOutcome::Deferred;
+    }
+#endif
 
     PolkitAuthority *authority = polkitAuthorityInstance();
     if (!authority) {
@@ -314,10 +458,39 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
  * 設定が変更された場合は新しいインスタンスを作成する
  *
  * @param configName Snapper設定名
+ * @param forceReload 同じ設定名でもインスタンスを作り直すか
  * @return Snapperインスタンスへのポインタ、失敗時はnullptr
+ * @note 復元の実行中は、インスタンスの差し替え (別config・forceReload) を一切行わない
+ *       実行中の復元と終了時のunmount (unmountRestoreExecution) は同じインスタンスを使い続ける必要があり、
+ *       破棄するとmount状態と比較キャッシュの寿命が壊れるため
+ *       非復元操作はauthorizeThenのゲートで拒否されるが、ゲートを迂回する経路が将来できても
+ *       共有インスタンスを破棄しないよう、ここでも多重に防御する (判定できない場合はnullptrで拒否する)
  */
 snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool forceReload)
 {
+    // snapperdへ転送した変更の途中は、configやスナップショットが変わる途中の状態を読み込まないよう、インスタンスを渡さない
+    if (snapperdOperationRunning()) {
+        return nullptr;
+    }
+
+    if (!m_restoreExecutions.isEmpty()) {
+        bool recordedConfig = false;
+        for (const RestoreExecution &execution : std::as_const(m_restoreExecutions)) {
+            if (execution.configName == configName) {
+                recordedConfig = true;
+                break;
+            }
+        }
+
+        if (recordedConfig && !forceReload && m_snapper && m_currentConfig == configName) {
+            return m_snapper.get();
+        }
+
+        // config名は呼び出し元が制御し得るため、ログには固定の文言だけを出す
+        qWarning() << "Refusing to replace the Snapper instance while a restore is in progress";
+        return nullptr;
+    }
+
     try {
         // 設定変更時・初回・強制リロード指定時に新しいSnapperインスタンスを作成する
         // libsnapperのSnapperオブジェクトは構築時にスナップショット一覧を読み込み、
@@ -333,8 +506,9 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
         }
         return m_snapper.get();
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to create Snapper instance:" << e.what();
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Failed to create Snapper instance";
         return nullptr;
     }
 }
@@ -356,6 +530,11 @@ snapper::Snapper* SnapshotOperations::getSnapper(const QString &configName, bool
  */
 snapper::Snapper* SnapshotOperations::getSnapperForListing(const QString &configName)
 {
+    // getSnapper()と同じ理由で、変更の途中はキャッシュしたインスタンスも渡さない
+    if (snapperdOperationRunning()) {
+        return nullptr;
+    }
+
     // 指紋は再生成より先に取る
     // 再生成の途中で一覧が変わった場合も、保存した指紋とは一致しなくなるため、次回に再生成される
     QByteArray fingerprint;

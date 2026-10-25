@@ -47,6 +47,9 @@
     将来の編集が認可呼び出しを追加、削除、移動すると、
     セキュリティ挙動を静かに変えるのではなくここで失敗する
 
+    加えて、復元の実行中に非復元操作を拒否する共通ゲート (snapshotoperations.hのauthorizeThen) が、
+    認可の前と本体の直前の両方で確認していること、ゲートを外すメソッドが許可済みのものに限られることを検査する
+
     本スクリプトはPython 3標準ライブラリのみを使う
 
 使い方 : check_restore_authorization_boundaries.py [--source FILE ...]
@@ -87,6 +90,14 @@ STAGED_CONTROL_METHODS = STAGE_PRE_FREEZE + STAGE_POST_COMMIT_CONTROL  # 段階�
 EXPECTED_AUTHORIZING_METHODS = frozenset({   # 認可ゲートの呼び出しを許可するメソッド
     "WriteSnapperConfig",
     "SetupQuota",
+    "GetConfig",
+    "GetTimerStates",
+    "SetTimerEnabled",
+    "CreateConfig",
+    "DeleteConfig",
+    "DeleteSnapshots",
+    "GetFilesystemUsage",
+    "ListSubvolumes",
     "ListConfigs",
     "ListSnapshots",
     "CreateSnapshot",
@@ -117,6 +128,14 @@ AUTHORIZED_BODY_DEF_RE = re.compile(r"\bSnapshotOperations::(\w+Authorized)\s*\(
 # それ以外の全エラー経路はreplyError()を使わなければならない
 RAW_ERROR_REPLY_RE = re.compile(r"(?<!::)\bsendErrorReply\s*\(")  # replyError()以外の生のエラー応答
 RAW_ERROR_REPLY_OWNER = "replyError"                             # sendErrorReply(を許す唯一の関数
+
+# 復元の実行中に非復元操作を拒否する共通ゲート
+# authorizeThenとcompleteDeferredCallはテンプレートのためヘッダに定義されている
+RESTORE_GATE_CALL = "rejectWhileRestoreRunning()"                                    # ゲートの呼び出し
+RESTORE_GATE_EXEMPT_TOKEN = "AllowWhileRestoring"                                    # ゲートを外す指定
+RESTORE_GATE_EXEMPT_METHODS = frozenset({"ListConfigs"})                             # 外してよいメソッド
+AUTHORIZE_THEN_DEF_RE = re.compile(r"\bT\s+authorizeThen\s*\(")                      # authorizeThenの定義
+COMPLETE_DEFERRED_DEF_RE = re.compile(r"\bvoid\s+completeDeferredCall\s*\(")         # completeDeferredCallの定義
 
 
 def repo_root() -> str:
@@ -438,6 +457,107 @@ def call_offsets_in_span(offsets: list[int], span_start: int, span_end: int) -> 
         span_start以上span_end以下にある位置のリスト
     """
     return [off for off in offsets if span_start <= off <= span_end]
+
+
+def check_restore_gate(text: str,
+                       functions: dict[str, tuple[int, int, int]],
+                       non_code_ranges: list[tuple[int, int]],
+                       failures: list[str]) -> None:
+    """
+    @brief 復元の実行中に非復元操作を拒否する共通ゲートが崩れていないことを検査する
+
+    ゲートはヘッダのテンプレート (authorizeThenとcompleteDeferredCall) にあるため、
+    snapshotoperations.hを読み、括弧の対応で本体を切り出して呼び出しの順序を確かめる
+
+    Args:
+        text: 連結済みのsnapshotoperations*.cpp全体
+        functions: collect_functions()の結果
+        non_code_ranges: textのコメントと文字列の範囲
+        failures: 違反を追記するリスト (本関数が変更する)
+    """
+    header_path = os.path.join(repo_root(), "src", "dbusservice", "snapshotoperations.h")
+    try:
+        with open(header_path, "r", encoding="utf-8") as handle:
+            header = handle.read()
+    except OSError as exc:
+        failures.append(f"cannot read {header_path}: {exc}")
+        return
+
+    def template_body(pattern: re.Pattern[str], label: str) -> str | None:
+        """
+        @brief ヘッダからテンプレート関数の本体を切り出す
+
+        Args:
+            pattern: 関数定義に一致する正規表現
+            label: 失敗時に表示する関数名
+
+        Returns:
+            波括弧を含む関数本体、見つからない場合はNone
+        """
+        match = pattern.search(header)
+        if match is None:
+            failures.append(f"{label} definition not found in snapshotoperations.h")
+            return None
+        try:
+            brace_open, brace_close = find_function_body_span(header, match.end() - 1)
+        except ValueError:
+            failures.append(f"{label} body not found by brace matching")
+            return None
+        return header[brace_open:brace_close + 1]
+
+    authorize_then = template_body(AUTHORIZE_THEN_DEF_RE, "authorizeThen")
+    if authorize_then is not None:
+        gate_offsets = [m.start() for m in re.finditer(re.escape(RESTORE_GATE_CALL), authorize_then)]
+        auth_offset = authorize_then.find("beginAuthorization(")
+        body_offset = authorize_then.rfind("return body();")
+        print(f"[10] authorizeThen gate offsets {gate_offsets}, "
+              f"beginAuthorization at {auth_offset}, last body() at {body_offset}")
+        if len(gate_offsets) < 2:
+            failures.append(
+                f"authorizeThen must call {RESTORE_GATE_CALL} before authorization "
+                f"and again before running the body"
+            )
+        elif not (gate_offsets[0] < auth_offset < gate_offsets[-1] < body_offset):
+            failures.append(
+                f"authorizeThen must call {RESTORE_GATE_CALL} before beginAuthorization( "
+                f"and again between authorization and return body();"
+            )
+
+    complete_deferred = template_body(COMPLETE_DEFERRED_DEF_RE, "completeDeferredCall")
+    if complete_deferred is not None:
+        gate_offset = complete_deferred.find(RESTORE_GATE_CALL)
+        body_offset = complete_deferred.find("body()")
+        print(f"[10] completeDeferredCall gate at {gate_offset}, body() at {body_offset}")
+        if gate_offset < 0 or body_offset < 0 or gate_offset > body_offset:
+            failures.append(
+                f"completeDeferredCall must call {RESTORE_GATE_CALL} before body() "
+                f"(a restore can start while the Polkit prompt is pending)"
+            )
+
+    gate_impl = functions.get("rejectWhileRestoreRunning")
+    if gate_impl is None:
+        failures.append("SnapshotOperations::rejectWhileRestoreRunning definition not found")
+    elif "m_restoreExecutions.isEmpty()" not in text[gate_impl[1]:gate_impl[2] + 1]:
+        failures.append("rejectWhileRestoreRunning no longer checks m_restoreExecutions")
+
+    exempt_sites: set[str] = set()
+    for match in re.finditer(RESTORE_GATE_EXEMPT_TOKEN, text):
+        if is_in_non_code_range(match.start(), non_code_ranges):
+            continue
+        enclosing = "<UNRESOLVED>"
+        for name, (_, brace_open, brace_close) in functions.items():
+            if brace_open <= match.start() <= brace_close:
+                enclosing = name
+                break
+        exempt_sites.add(enclosing)
+    print(f"[10] methods exempt from the restore gate: {sorted(exempt_sites)}")
+    unexpected = sorted(exempt_sites - RESTORE_GATE_EXEMPT_METHODS)
+    if unexpected:
+        failures.append(
+            f"{RESTORE_GATE_EXEMPT_TOKEN} used outside {sorted(RESTORE_GATE_EXEMPT_METHODS)}: "
+            f"{unexpected} -- only methods that never touch the shared Snapper instance, "
+            f"comparison cache or mount state may run during a restore"
+        )
 
 
 def main() -> int:
@@ -764,6 +884,12 @@ def main() -> int:
             + " -- error paths that can run after a delayed reply must use "
               "replyError()"
         )
+
+    # [10] 復元の実行中に非復元操作を拒否する共通ゲート
+    # 共有のSnapperインスタンスを差し替える操作が復元中に走ると、実行中の復元が壊れる
+    # 認可待ちの間に復元が始まり得るため、認可前に加えて本体の直前でも再確認していることを検査する
+    print()
+    check_restore_gate(text, functions, non_code_ranges, failures)
 
     print()
     if failures:

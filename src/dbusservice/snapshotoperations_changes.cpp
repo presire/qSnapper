@@ -127,9 +127,10 @@ QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
         return output;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to get file changes:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to get file changes";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
 }
@@ -227,9 +228,10 @@ QString SnapshotOperations::getFileChangesBetweenAuthorized(
         return output;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to get file changes between snapshots:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to get file changes: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to get file changes between snapshots";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
 }
@@ -353,9 +355,10 @@ QString SnapshotOperations::getFileDiffBetweenAuthorized(
         return detailsPart + "---DIFF_SEPARATOR---\n" + diffPart;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to get file diff between snapshots:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to get file diff: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to get file diff between snapshots";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
     catch (const std::exception &) {
@@ -491,9 +494,10 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
         return detailsPart + "---DIFF_SEPARATOR---\n" + diffPart;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to get file diff and details:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to get file diff and details: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to get file diff and details";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
     catch (const std::exception &) {

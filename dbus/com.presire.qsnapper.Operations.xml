@@ -2,6 +2,62 @@
  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node>
   <interface name="com.presire.qsnapper.Operations">
+    <!--
+      Restore exclusion gate.
+      While a committed restore plan is running (from authorization and mount
+      until the plan reaches a terminal state), every non-restore method that
+      goes through the service's authorization gate is rejected with the D-Bus
+      error
+
+        com.presire.qsnapper.Error.RestoreInProgress
+        message: "A restore is in progress"
+
+      The message is a fixed string and never contains a config name, path or
+      snapshot number. The check runs before Polkit is consulted and again
+      immediately before the method body runs, so a restore that starts while
+      an authorization prompt is pending still blocks the method.
+      Exempt: ListConfigs and IsConfigured (they only read the static config
+      list and never touch the shared Snapper instance, comparison cache or
+      mount state) and the restore plan methods below (they keep their own
+      single-running-plan exclusion).
+      New non-restore methods are gated by default.
+
+      Settings and timers.
+      GetConfig returns only the editable keys plus SUBVOLUME, FSTYPE and
+      QGROUP. WriteSnapperConfig accepts only the editable keys, writes the
+      config file of that name directly and never enables or disables a
+      systemd timer. GetTimerStates and SetTimerEnabled accept only the fixed
+      Snapper timer units (snapper-timeline.timer, snapper-cleanup.timer,
+      snapper-boot.timer); the unit file state and the active state are
+      reported separately and the timers are shared by all configs.
+      Only one timer operation runs at a time; a second one is rejected with
+      org.freedesktop.DBus.Error.LimitsExceeded. SetTimerEnabled returns true
+      only when the state read back from systemd matches the request.
+
+      Configurations and bulk deletion.
+      CreateConfig, DeleteConfig and DeleteSnapshots are forwarded to snapperd
+      (org.opensuse.Snapper) after the service has re-checked the state after
+      authorization; the result is read back before replying. The root
+      configuration is never created or deleted here. While one of them is
+      running, every method that takes a config name, every gated method and
+      the start of a restore are rejected with
+
+        com.presire.qsnapper.Error.OperationInProgress
+
+      If the result cannot be confirmed (reply deadline, snapperd exit) the
+      error is com.presire.qsnapper.Error.OutcomeUnknown and the caller must
+      reload. DeleteConfig and DeleteSnapshots are rejected with
+      com.presire.qsnapper.Error.RestorePlanPending while an unfinished
+      restore plan exists for the config, and with
+      com.presire.qsnapper.Error.SnapshotListOutdated when snapperd does not
+      know every snapshot yet. DeleteSnapshots accepts numbers greater than
+      zero, removes duplicates, rejects more than 100 unique numbers (1000 raw)
+      and returns the numbers confirmed as deleted (a shorter list means a
+      partial deletion).
+      GetFilesystemUsage and ListSubvolumes are read-only and return CSV text;
+      the subvolume list is truncated by count, size and time and says so in
+      its first line.
+    -->
     <method name="ListConfigs">
       <arg name="configs" type="as" direction="out"/>
     </method>
@@ -125,6 +181,42 @@
     <method name="SetupQuota">
       <arg name="configName" type="s" direction="in"/>
       <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="GetConfig">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="settings" type="a{ss}" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QMap&lt;QString,QString&gt;"/>
+    </method>
+    <method name="GetTimerStates">
+      <arg name="states" type="a{s(ss)}" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="SnapperTimerStateMap"/>
+    </method>
+    <method name="SetTimerEnabled">
+      <arg name="unit" type="s" direction="in"/>
+      <arg name="enabled" type="b" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="CreateConfig">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="subvolume" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="DeleteConfig">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+    <method name="DeleteSnapshots">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="numbers" type="au" direction="in"/>
+      <arg name="deleted" type="au" direction="out"/>
+    </method>
+    <method name="GetFilesystemUsage">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="usage" type="s" direction="out"/>
+    </method>
+    <method name="ListSubvolumes">
+      <arg name="configName" type="s" direction="in"/>
+      <arg name="subvolumes" type="s" direction="out"/>
     </method>
     <signal name="restorePlanProgress">
       <arg name="manifestId" type="s"/>

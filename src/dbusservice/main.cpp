@@ -198,6 +198,9 @@ int main(int argc, char *argv[])
 
     // QMap<QString,QString> を D-Bus a{ss} としてマーシャリングするために登録
     qDBusRegisterMetaType<QMap<QString, QString>>();
+    // GetTimerStatesの戻り値 a{s(ss)} をマーシャリングするために登録する (未登録の型を返すスロットは公開されないため)
+    qDBusRegisterMetaType<SnapperTimerState>();
+    qDBusRegisterMetaType<SnapperTimerStateMap>();
 
     QCoreApplication app(argc, argv);
     app.setOrganizationName("Presire");

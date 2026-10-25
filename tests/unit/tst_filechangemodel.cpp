@@ -158,4 +158,33 @@ void TestFileChangeModel::treeBuildHandlesPrefixHeavyPaths()
     QCOMPARE(model.data(lastBranchIndex, FileChangeModel::PathRole).toString(), QStringLiteral("/prefix/branch999/"));
 }
 
+void TestFileChangeModel::hasCheckedItemsTracksCheckState()
+{
+    TestableFileChangeModel model;
+    QVERIFY(!model.hasCheckedItems());
+
+    const QString output = QStringLiteral("c.... /etc/ld.so.cache\n"
+                                          "+.... /usr/lib/new.so\n");
+    model.setupModelData(output, false);
+    QCOMPARE(model.rowCount(), 2);
+    QVERIFY(!model.hasCheckedItems());
+
+    // フォルダの下にあるファイルだけにチェックを入れた場合も、チェックありと判定されること
+    model.setItemChecked(QStringLiteral("/etc/ld.so.cache"), true);
+    QVERIFY(model.hasCheckedItems());
+    model.setItemChecked(QStringLiteral("/etc/ld.so.cache"), false);
+    QVERIFY(!model.hasCheckedItems());
+
+    // フォルダにチェックを入れると配下のファイルにもチェックが入り、フォルダのチェックを外すとチェックなしに戻ること
+    model.setItemChecked(QStringLiteral("/usr/"), true);
+    QVERIFY(model.hasCheckedItems());
+    model.setItemChecked(QStringLiteral("/usr/"), false);
+    QVERIFY(!model.hasCheckedItems());
+
+    // setupModelData()で一覧を読み直した後は、読み直す前に入れたチェックが残らないこと
+    model.setItemChecked(QStringLiteral("/etc/ld.so.cache"), true);
+    model.setupModelData(output, false);
+    QVERIFY(!model.hasCheckedItems());
+}
+
 QTEST_APPLESS_MAIN(TestFileChangeModel)

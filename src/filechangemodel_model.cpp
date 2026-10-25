@@ -440,6 +440,40 @@ QStringList FileChangeModel::getCheckedItems() const
 }
 
 /**
+ * @brief チェックされたアイテムが1つでもあるかどうかを返す
+ *
+ * RestorePreviewDialogは、チェックの状態が変わるたびに本メソッドを呼び出し、復元ボタンの有効状態を判定する
+ * getCheckedItems()は全てのパスを集めて互いに比較するため、項目数が多いと呼び出しのたびに時間がかかる
+ * そのため、本メソッドはパスを集めず、チェックされたアイテムが最初に見つかった時点で探索を終える
+ *
+ * @return チェックされたアイテムが1つでもある場合はtrue、1つもない場合はfalse
+ */
+bool FileChangeModel::hasCheckedItems() const
+{
+    return containsCheckedItem(m_rootItem);
+}
+
+/**
+ * @brief 指定されたアイテムの配下に、チェックされたアイテムがあるかどうかを再帰的に調べる
+ * @param parent 探索を開始するアイテム (parent自身のチェック状態は判定に含めない)
+ * @return 配下にチェックされたアイテムがある場合はtrue、parentがnullptrまたは配下にない場合はfalse
+ */
+bool FileChangeModel::containsCheckedItem(FileChangeItem *parent) const
+{
+    if (!parent) {
+        return false;
+    }
+
+    for (int i = 0; i < parent->childCount(); ++i) {
+        FileChangeItem *child = parent->child(i);
+        if (child->isChecked() || containsCheckedItem(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @brief 復元バッチサイズを更新する
  *
  * 入力値を 1..1000 に丸めた上で保持し、設定ファイルへ永続化する

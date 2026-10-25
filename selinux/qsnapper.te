@@ -19,6 +19,7 @@ module qsnapper 1.3.10;
 #   qsnapper_dbus_t  : スナップショットの作成・削除・比較・復元・ロールバック
 #                      file_type / exec_type属性に属する型への復元用の読み書きとラベルの付け替え
 #                      ログ(/var/log/qsnapper)への書き込み
+#                      systemd (timerの操作) とsnapperd (configの作成と削除、一括削除) とのD-Bus通信
 #
 # セキュリティモデル :
 #   アプリケーションの通常の経路では、GUIが閲覧と設定の保存を担当し、特権操作をD-Busサービスへ依頼する
@@ -159,7 +160,7 @@ require {
     class chr_file { getattr open read write ioctl map }; # キャラクタデバイス
     class blk_file { getattr open read write ioctl };     # ブロックデバイス
     class unix_stream_socket { create bind connect listen accept read write getattr setattr shutdown connectto }; # UNIXドメインのストリームソケット
-    class unix_dgram_socket { create bind connect read write sendto getattr setattr }; # UNIXドメインのデータグラムソケット
+    class unix_dgram_socket { create bind connect read write sendto getattr setattr ioctl }; # UNIXドメインのデータグラムソケット
     class shm { create destroy getattr setattr read write associate unix_read unix_write }; # System Vの共有メモリ
     class sem { create destroy getattr setattr read write associate unix_read unix_write }; # System Vのセマフォ
     class dbus { send_msg acquire_svc };                  # D-Busメッセージの送受信とサービス名の登録
@@ -230,6 +231,12 @@ optional {
 # データグラムソケット、共有メモリ、セマフォ、TCP/UDPソケット
 # QtとX11のライブラリが、プロセス間通信と描画のために内部で使用する
 allow qsnapper_t self:unix_dgram_socket { create bind connect read write sendto getattr setattr };
+# 自身が作成したデータグラムソケットへのioctl
+# qSnapper自身はioctlを発行しないが、内部で使用するライブラリがioctl(0x6447)を発行し、許可しないと起動のたびに拒否が記録される
+# UNIXソケットはこのコマンドに対応しないため、許可してもカーネルがENOTTYを返すだけで動作は変わらない
+# 対象は自身のソケットだけであり、UNIXソケットへのioctlは状態の取得に限られるため、コマンドは絞り込まない
+# (基本ポリシーも多くのドメインに自身のソケットへのioctlを許可している)
+allow qsnapper_t self:unix_dgram_socket ioctl;
 allow qsnapper_t self:shm { create destroy getattr setattr read write associate unix_read unix_write };
 allow qsnapper_t self:sem { create destroy getattr setattr read write associate unix_read unix_write };
 allow qsnapper_t self:tcp_socket { create bind connect listen accept read write getattr setattr shutdown };
@@ -803,6 +810,34 @@ optional {
     allow qsnapper_dbus_t policykit_t:dbus send_msg;
 }
 
+# systemd (init_t) とのD-Bus通信とsnapperのtimerの操作
+# Settings画面のtimerの管理 (GetTimerStates / SetTimerEnabled) で、systemdのManagerを呼び出すために必要
+# 外部コマンド (systemctl) を起動せず、D-Bus経由で操作するため、実行の権限は与えない
+# 対象のunitは、D-Busサービスの実装で固定の許可リスト (snapper-timeline / snapper-cleanup / snapper-boot) に限る
+# SELinuxではunitの名前を区別できないため、unit fileの型 (systemd_unit_file_t) に対する操作として許可する
+# 応答とJobRemovedシグナルを受け取るため、双方向のsend_msgを許可する
+allow qsnapper_dbus_t init_t:dbus send_msg;
+allow init_t qsnapper_dbus_t:dbus send_msg;
+
+# Managerに対する操作 (unit fileの状態の取得、enable / disable、設定の再読み込み)
+# systemdは、unitに依存しない呼び出しをinit_t自身のsystemクラスで検査する
+# 起動中のプロセスの停止や再起動 (halt / reboot) は不要なため許可しない
+optional {
+    require { class system { status reload enable disable }; } # systemdのManagerの操作
+    allow qsnapper_dbus_t init_t:system { status reload enable disable };
+}
+
+# unitに対する操作 (状態の取得、起動、停止)
+# systemdは、unit fileのラベルを対象にserviceクラスで検査する
+# 古いsystemdは、enable / disableもunit fileのラベルで検査するため、合わせて許可する
+optional {
+    require {
+        type systemd_unit_file_t;                             # systemdのunit file (snapperのtimerを含む)
+        class service { status start stop enable disable };  # unitの操作
+    }
+    allow qsnapper_dbus_t systemd_unit_file_t:service { status start stop enable disable };
+}
+
 # Snapperのgrubプラグイン
 # setDefault / rollbackの処理で、libsnapperから呼び出される
 optional {
@@ -829,11 +864,25 @@ optional {
         type snapperd_log_t;  # Snapperのログ
     }
     allow qsnapper_dbus_t snapperd_conf_t:dir { getattr open read search };
-    allow qsnapper_dbus_t snapperd_conf_t:file { getattr open read };
+    # Settings画面の保存 (WriteSnapperConfig) では、libsnapperが設定ファイルを同じ名前のまま上書きする
+    # 新しいファイルの作成や名前の変更は行わないため、ディレクトリへの書き込みは許可しない
+    allow qsnapper_dbus_t snapperd_conf_t:file { getattr open read write };
     allow qsnapper_dbus_t snapperd_data_t:dir { add_name create getattr ioctl open read remove_name rmdir search setattr write };
     allow qsnapper_dbus_t snapperd_data_t:file { create getattr open read rename setattr unlink write };
     allow qsnapper_dbus_t snapperd_exec_t:file { getattr open read };
     allow qsnapper_dbus_t snapperd_log_t:file { append getattr open };
+}
+
+# snapperd (snapperd_t) とのD-Bus通信
+# configの作成と削除、スナップショットの一括削除は、snapperdの排他と一覧のキャッシュを保つため、snapperdへ転送する
+# 応答を受け取るため、双方向の送信を許可する
+# snapperdのポリシーが無い環境でもビルドできるよう、optionalブロック内でrequireする
+optional {
+    require {
+        type snapperd_t; # snapperdのドメイン
+    }
+    allow qsnapper_dbus_t snapperd_t:dbus send_msg;
+    allow snapperd_t qsnapper_dbus_t:dbus send_msg;
 }
 
 # SELinuxの設定へのアクセス (ディストリビューションに依存する)

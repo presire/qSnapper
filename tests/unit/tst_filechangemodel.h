@@ -286,6 +286,12 @@ private slots:
      */
     void treeBuildHandlesPrefixHeavyPaths();
     /**
+     * @brief hasCheckedItems()が、チェックの追加・解除・一覧の読み直しに追従することを検証する
+     * @note RestorePreviewDialogは、hasCheckedItems()の結果で復元ボタンの有効状態を決める
+     *       1つもチェックしていない状態で復元ボタンを押せないことを保証するために検証する
+     */
+    void hasCheckedItemsTracksCheckState();
+    /**
      * @brief チャンク分割ステージングと確定の1回性を検証する
      */
     void stagedRestoreStagesBoundedChunksAndCommitsOnce();

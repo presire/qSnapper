@@ -218,6 +218,14 @@ bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
         return false;
     }
 
+    // systemdへ送信済みのtimerの変更は取り消せないため、その完了を待たずに復元を始めない
+    // 計画を凍結する前に拒否し、timerの操作が終わった後に同じ計画で再びcommitできるようにする
+    if (timerChangeInProgress()) {
+        replyError(QDBusError::Failed,
+                   QStringLiteral("A timer operation is in progress"));
+        return false;
+    }
+
     purgeExpiredRestorePlans();
 
     qsnapper::restore::ManifestError error =
@@ -321,6 +329,15 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         failRestorePlanAuthorization(manifestId, owner);
         replyError(QDBusError::Failed,
                    QStringLiteral("Another restore plan is already running"));
+        return false;
+    }
+
+    // 認可待ちの間にtimerの変更が始まっている可能性がある
+    // mountと実行の登録より前に拒否し、送信済みのsystemdの変更と復元が重ならないようにする
+    if (timerChangeInProgress()) {
+        failRestorePlanAuthorization(manifestId, owner);
+        replyError(QDBusError::Failed,
+                   QStringLiteral("A timer operation is in progress"));
         return false;
     }
 
@@ -499,8 +516,10 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             return false;
         }
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Staged restore preparation failed:" << e.what();
+    catch (const snapper::Exception &) {
+        // 例外本文にはlibsnapperが扱ったfilesystem pathが含まれ得るため記録しない
+        // (攻撃者由来の名前をログへ持ち込まない)
+        qWarning() << "Staged restore preparation failed";
         cleanupRestoreExecution(manifestId);
         m_restoreRegistry.markFailed(
             manifestId, owner, QStringLiteral("Failed to prepare restore source"),
@@ -509,9 +528,8 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
                         QStringLiteral("Failed to prepare restore plan"));
         return false;
     }
-    catch (const std::exception &e) {
-        qWarning() << "Staged restore preparation failed unexpectedly:"
-                   << e.what();
+    catch (const std::exception &) {
+        qWarning() << "Staged restore preparation failed unexpectedly";
         cleanupRestoreExecution(manifestId);
         m_restoreRegistry.markFailed(
             manifestId, owner, QStringLiteral("Failed to prepare restore source"),

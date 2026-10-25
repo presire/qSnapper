@@ -3,11 +3,13 @@
  * @brief qSnapperのメインアプリケーションウィンドウ
  *
  * Btrfs/Snapperスナップショット管理GUIのルートウィンドウ
- * SnapshotListPageを唯一の子として全画面に配置する
+ * 上部のTabBarで、スナップショット一覧 (SnapshotListPage)、設定画面 (SettingsPage)、
+ * ファイルシステム情報 (FilesystemPage) を切り替える
  *
  * 入力 : なし
  * 出力 : なし
- * 依存 : ThemeManager (Light/Darkの判定とパレット切り替え)、SnapshotListPage (メイン画面)
+ * 依存 : ThemeManager (Light/Dark/Systemに応じたパレットの各色)、SnapshotListPage (スナップショット一覧)、
+ *        SettingsPage (設定画面)、FilesystemPage (使用量とサブボリューム一覧)
  */
 import QtQuick
 import QtQuick.Controls
@@ -24,77 +26,62 @@ ApplicationWindow {
     visible: true                  // 起動時にウィンドウを表示
     title: qsTr("qSnapper - Snapshot Manager") // タイトルバーに表示するアプリ名
 
-    // ThemeManager::isDarkに応じてLight/Darkいずれかのパレットを選択する
-    palette: ThemeManager.isDark ? darkPalette : lightPalette
+    // ThemeManagerシングルトンへの参照 (qmllintはqmlRegisterSingletonInstanceの型を解決できず、参照ごとに警告するため、1か所に集約する)
+    readonly property var theme: ThemeManager
 
-    // ライトモード用のカラーパレット定義 (ThemeManagerがLightのときに適用)
-    Palette {
-        id: lightPalette
-        window: "#FFFFFF"
-        windowText: "#000000"
-        base: "#FFFFFF"
-        text: "#000000"
-        button: "#F5F5F5"
-        buttonText: "#000000"
-        highlight: "#2196F3"
-        highlightedText: "#FFFFFF"
-        light: "#FAFAFA"
-        midlight: "#F5F5F5"
-        mid: "#EEEEEE"
-        dark: "#E0E0E0"
-        shadow: "#BDBDBD"
-        alternateBase: "#FAFAFA"
-        toolTipBase: "#FFFFCC"
-        toolTipText: "#000000"
-        placeholderText: "#9E9E9E"
-        link: "#2196F3"
-        linkVisited: "#9C27B0"
-        // 無効状態 (グレーアウト) の色定義
+    // 全ての色をThemeManagerから取得する (Light/Darkの値はC++側に集約し、QML側に二重定義を持たない)
+    // ThemeManager::themeChangedでパレットの各ロールが再評価され、再起動なしにLight/Dark/Systemが切り替わる
+    palette {
+        window: theme.paletteWindow
+        windowText: theme.paletteWindowText
+        base: theme.paletteBase
+        text: theme.paletteText
+        button: theme.paletteButton
+        buttonText: theme.paletteButtonText
+        highlight: theme.paletteHighlight
+        highlightedText: theme.paletteHighlightedText
+        light: theme.paletteLight
+        midlight: theme.paletteMidlight
+        mid: theme.paletteMid
+        dark: theme.paletteDark
+        shadow: theme.paletteShadow
+        alternateBase: theme.paletteAlternateBase
+        toolTipBase: theme.paletteToolTipBase
+        toolTipText: theme.paletteToolTipText
+        placeholderText: theme.palettePlaceholderText
+        link: theme.paletteLink
+        linkVisited: theme.paletteLinkVisited
+
+        // 無効状態 (グレーアウト) の色
         disabled {
-            buttonText: "#BDBDBD"
-            windowText: "#BDBDBD"
-            text: "#BDBDBD"
-            button: "#EEEEEE"
-            highlight: "#BDBDBD"
-            highlightedText: "#FFFFFF"
+            buttonText: theme.paletteDisabledButtonText
+            windowText: theme.paletteDisabledWindowText
+            text: theme.paletteDisabledText
+            button: theme.paletteDisabledButton
+            highlight: theme.paletteDisabledHighlight
+            highlightedText: theme.paletteDisabledHighlightedText
         }
     }
 
-    // ダークモード用のカラーパレット定義 (ThemeManagerがDarkのときに適用)
-    Palette {
-        id: darkPalette
-        window: "#212121"
-        windowText: "#FFFFFF"
-        base: "#303030"
-        text: "#FFFFFF"
-        button: "#424242"
-        buttonText: "#FFFFFF"
-        highlight: "#42A5F5"
-        highlightedText: "#000000"
-        light: "#424242"
-        midlight: "#383838"
-        mid: "#2C2C2C"
-        dark: "#1E1E1E"
-        shadow: "#000000"
-        alternateBase: "#2C2C2C"
-        toolTipBase: "#616161"
-        toolTipText: "#FFFFFF"
-        placeholderText: "#757575"
-        link: "#42A5F5"
-        linkVisited: "#BA68C8"
-        // 無効状態 (グレーアウト) の色定義
-        disabled {
-            buttonText: "#6E6E6E"
-            windowText: "#6E6E6E"
-            text: "#6E6E6E"
-            button: "#383838"
-            highlight: "#6E6E6E"
-            highlightedText: "#1E1E1E"
-        }
+    // 画面の切り替えタブ (スナップショット一覧 / 設定 / ファイルシステム)
+    header: TabBar {
+        id: tabBar
+
+        TabButton { text: qsTr("Snapshots") }
+        TabButton { text: qsTr("Settings") }
+        TabButton { text: qsTr("Filesystem") }
     }
 
-    // メインコンテンツ: スナップショット一覧ページをウィンドウ全面に配置する
-    SnapshotListPage {
+    // メインコンテンツ: タブの選択に応じて1つのページだけを表示する
+    // 非選択のページはvisibleがfalseになる (設定画面とファイルシステム画面はこれを契機に特権サービスから読み込む)
+    StackLayout {
         anchors.fill: parent
+        currentIndex: tabBar.currentIndex
+
+        SnapshotListPage { }
+
+        SettingsPage { }
+
+        FilesystemPage { }
     }
 }

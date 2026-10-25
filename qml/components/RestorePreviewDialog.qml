@@ -1,15 +1,15 @@
 /**
  * @file RestorePreviewDialog.qml
- * @brief スナップショットとの差分を表示し、選択したファイルを復元するダイアログ
+ * @brief スナップショットとの差分を確認し、選択したファイルを復元するダイアログ
  *
- * SnapshotDetailDialogから開かれ、スナップショットとの差分をツリー表示する
- * 復元はFileChangeModel経由で段階的復元計画 (BeginRestorePlan -> StageRestoreEntries -> CommitRestorePlan) として実行し、
- * Commit時にPolkit認証を1度だけ受ける
- * Pre/PostペアではPre<-->Post間の変更だけを巻き戻す差分ビューのみ復元を許可し、「vs 現在」ビューは閲覧専用とする
+ * SnapshotDetailDialogから開く
+ * 復元はFileChangeModelがまとめて行うため、Polkitの認証は1回で済む
+ * Pre/Postペアでは、Pre <--> Post間の差分ビューからだけ復元できる (「vs 現在」ビューは閲覧専用)
  *
  * 入力 : configName、snapshotNumber、preSnapshotNumber、postSnapshotNumber (親からバインド)
- * 出力 : restoreConfirmed()シグナル
- * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリー・復元計画)、BorderedDialog (枠付きダイアログの基底)
+ * 出力 : restoreConfirmed()
+ * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリーと復元)、BorderedDialog (枠付きダイアログ)、
+ *        ThemedGroupBox (枠付きグループ)
  */
 import QtQuick
 import QtQuick.Controls
@@ -20,46 +20,50 @@ BorderedDialog {
     id: root
 
     property string configName: "root"               // Snapper設定名
-    property int snapshotNumber: 0                   // 親から渡される初期スナップショット番号 (入力専用)
+    property int snapshotNumber: 0                   // 開いたときに表示するスナップショット番号
     property int preSnapshotNumber: 0                // Preスナップショット番号 (0 = Pre/Postペアではない)
     property int postSnapshotNumber: 0               // Postスナップショット番号
-    // 現在のTreeViewに表示中のスナップショット番号 (ラジオボタン切替で変更される)
-    // snapshotNumberは親のQMLバインディング経由で渡されるため、ここで上書きするとバインディングが壊れ次回以降の表示が不正になる
-    // そのため内部状態は分離する
+    // snapshotNumberは親からバインドされており、書き換えるとバインドが外れるため、表示の切り替えにはこちらを使う
     property int activeSnapshotNumber: 0             // 現在表示中のスナップショット番号
     readonly property bool isPrePostPair: preSnapshotNumber > 0 && postSnapshotNumber > 0  // Pre/Postペアかどうか
 
-    // 表示モード定数
-    // FileChangeModelは比較の第1引数を復元元として扱うため、Pre <--> Post差分の向きは復元先で決まる
-    // 向きはラジオ選択の時点で確定させる (復元ボタン押下時に読み直すとユーザのチェック選択が消えるため)
-    readonly property int viewRevertToPre: 0     // Pre <--> Post差分をPreへ戻す向き (復元可)
-    readonly property int viewReapplyToPost: 1   // Pre <--> Post差分をPostへ再適用する向き (復元可)
-    readonly property int viewVsCurrent: 2       // 選択スナップショットと現在のシステムの差分 (Pre/Postペアでは閲覧専用)
-    property int viewMode: root.viewVsCurrent    // 現在の表示モード (初期値は対カレント比較)
+    // 表示モード
+    // 復元の向きはラジオボタンを選んだ時点で決める (復元時に読み直すと、チェックした内容が消えるため)
+    readonly property int viewRevertToPre: 0     // Pre <--> Post差分をPreへ戻す (復元可)
+    readonly property int viewReapplyToPost: 1   // Pre <--> Post差分をPostへ再適用する (復元可)
+    readonly property int viewVsCurrent: 2       // スナップショットと現在のシステムの差分 (Pre/Postペアでは閲覧専用)
+    property int viewMode: root.viewVsCurrent    // 現在の表示モード
 
-    // Pre <--> Post間の差分を表示しているかどうか
-    readonly property bool prePostDiffMode: root.viewMode === root.viewRevertToPre  // Pre<-->Post差分ビューかどうか
+    readonly property bool prePostDiffMode: root.viewMode === root.viewRevertToPre  // Pre <--> Post差分を表示中かどうか
                                             || root.viewMode === root.viewReapplyToPost
 
-    // 現在の表示から復元できるかどうか
-    // Pre/Postペアでは、Pre <--> Post間で起きた変更だけを巻き戻せる差分ビューのみ復元を許可し、
-    // 「vs 現在」ビューは閲覧専用とする (そちらから復元すると、Post以降の手動変更まで巻き戻るため)
-    readonly property bool restorable: root.isPrePostPair ? root.prePostDiffMode : true  // 復元可否
+    // Pre/Postペアの「vs 現在」ビューから復元すると、Post以降に手動で変えた内容まで戻るため閲覧専用にする
+    readonly property bool restorable: root.isPrePostPair ? root.prePostDiffMode : true  // 現在の表示から復元できるかどうか
 
-    // 復元元スナップショット番号 (0 = 現在の表示からは復元できない)
-    readonly property int restoreSourceNumber: {  // 復元元スナップショット番号
+    readonly property int restoreSourceNumber: {  // 復元元のスナップショット番号 (0 = 復元できない)
         if (!root.isPrePostPair) return root.activeSnapshotNumber
         if (root.viewMode === root.viewRevertToPre) return root.preSnapshotNumber
         if (root.viewMode === root.viewReapplyToPost) return root.postSnapshotNumber
         return 0
     }
 
-    signal restoreConfirmed()                        // 復元確認シグナル
+    // [選択項目を#Nへ復元]ボタンの有効状態の判定に使い、updateHasCheckedItemsだけが値を更新する
+    property bool hasCheckedItems: false  // 差分ツリーで復元するファイルに1つでもチェックが入っているかどうか
+
+    signal restoreConfirmed()                        // 復元の確定を親へ通知する
 
     /**
-     * @brief 右ペインの選択状態とdiff表示をクリアする
-     * @note 右ペインの各プロパティ (fileSelected、selectedFilePath など) とdiffTextAreaの内容を初期化する
-     *       モデル側の状態には影響しない
+     * @brief 差分ツリーにチェックの入ったファイルがあるかどうかを調べ直し、hasCheckedItemsへ反映する
+     * @note FileChangeModel::hasCheckedItemsを呼び出し、差分ツリーのチェック状態を調べる
+     *       hasCheckedItemsの変更により、[選択項目を#Nへ復元]ボタンの有効状態が切り替わる
+     */
+    function updateHasCheckedItems() {
+        root.hasCheckedItems = fileChangeModel.hasCheckedItems()
+    }
+
+    /**
+     * @brief 右ペインの選択ファイルと差分表示をクリアする
+     * @note FileChangeModelの状態は変更しない
      */
     function resetRightPane() {
         rightPane.fileSelected = false
@@ -73,24 +77,23 @@ BorderedDialog {
     }
 
     /**
-     * @brief 指定スナップショットとの対カレント比較ビューへ切り替える
-     * @param targetNumber 比較対象のスナップショット番号
-     * @note viewModeをviewVsCurrentへ変更し、FileChangeModel::loadChanges()でツリーを再読み込みする
-     *       右ペインの選択状態もクリアする
+     * @brief 指定したスナップショットと現在のシステムの差分表示へ切り替える
+     * @param targetNumber 比較するスナップショット番号
+     * @note FileChangeModel::loadChanges()でツリーを読み直し、右ペインもクリアする
      */
     function switchSnapshotView(targetNumber) {
         if (root.viewMode === root.viewVsCurrent && root.activeSnapshotNumber === targetNumber) return
         root.viewMode = root.viewVsCurrent
         root.activeSnapshotNumber = targetNumber
-        fileChangeModel.snapshotNumber = targetNumber  // betweenMode/flatModeをfalseにリセット
+        fileChangeModel.snapshotNumber = targetNumber  // 番号を設定すると、モデルは現在のシステムとの比較に戻る
         resetRightPane()
-        fileChangeModel.loadChanges()                  // ファイルツリーを再読み込み (切替先スナップショット vs 現在のシステムで比較)
+        fileChangeModel.loadChanges()
     }
 
     /**
-     * @brief Pre<-->Post間の差分ビューへ切り替える
+     * @brief Pre <--> Post間の差分表示へ切り替える
      * @param mode viewRevertToPre または viewReapplyToPost
-     * @note Pre/Postペアでない場合と既に同じモードの場合は何もしない
+     * @note Pre/Postペアでない場合と、既に同じモードの場合は何もしない
      */
     function switchPrePostDiffView(mode) {
         if (!root.isPrePostPair) return
@@ -101,14 +104,13 @@ BorderedDialog {
     }
 
     /**
-     * @brief 現在のviewModeに対応する向きでPre<-->Post差分を読み込む
-     * @note 第1引数が復元元になるため、復元先スナップショットを先頭に置いて向きを揃える
-     *       第4引数のtrueで、復元元と現在のシステムの間に差異が無いエントリ (既に復元済みなど) を非表示にする
-     *       FileChangeModel::loadChangesBetween()を呼び出す
+     * @brief 現在のviewModeの向きでPre <--> Post差分を読み込む
+     * @note FileChangeModel::loadChangesBetween()は第1引数を復元元とするため、戻したい側のスナップショットを先に渡す
+     *       第3引数のfalseでツリー表示にし、第4引数のtrueで復元済みなど現在のシステムと同じファイルを除外する
      */
     function loadPrePostDiff() {
         if (root.viewMode === root.viewRevertToPre) {
-            fileChangeModel.loadChangesBetween(root.preSnapshotNumber,   // flat=falseでツリー構築 (TreeView表示)
+            fileChangeModel.loadChangesBetween(root.preSnapshotNumber,
                                                root.postSnapshotNumber,
                                                false,
                                                true)
@@ -122,9 +124,8 @@ BorderedDialog {
     }
 
     /**
-     * @brief 現在の表示条件を保ったままファイルツリーを再読み込みする
+     * @brief 現在の表示条件のままファイルツリーを読み直す
      * @note 復元後の再表示に使う
-     *       Pre/Post差分ビューなら同じ向きで、対カレント比較なら現在のスナップショットで読み直す
      */
     function reloadCurrentView() {
         if (root.prePostDiffMode) {
@@ -148,20 +149,20 @@ BorderedDialog {
     title: qsTr("Snapshot Overview")
     anchors.centerIn: Overlay.overlay
 
-    // ダイアログ表示時の初期化処理
+    // 開くたびに表示を初期化する
     onOpened: {
         console.log("RestorePreviewDialog opened with configName:", configName, "snapshotNumber:", snapshotNumber)
         errorLabel.visible = false
         fileChangeModel.configName = configName
 
-        // 前回表示したスナップショットの右ペイン状態 (選択ファイル・diff等) を引き継がないようにクリアする
+        // 前回開いたときの選択ファイルと差分を残さない
         resetRightPane()
 
-        // 毎回開いた時点のsnapshotNumberを現在表示用の状態に同期する
+        // 表示するスナップショットを、親から渡された番号に戻す
         root.activeSnapshotNumber = snapshotNumber
 
         if (root.isPrePostPair) {
-            // Pre/Post ペア: 既定でPre <--> Post間の差分をPreへ戻す向きで表示する
+            // Pre/Postペアでは、まずPreへ戻す向きの差分を表示する
             root.viewMode = root.viewRevertToPre
             loadPrePostDiff()
         }
@@ -172,25 +173,30 @@ BorderedDialog {
         }
     }
 
-    // ダイアログを閉じた際の状態クリア
-    // 次回別スナップショットで開かれた場合に前回のdiffが残らないようにする
+    // 次に別のスナップショットで開いたとき、前回の差分が残らないようにする
     onClosed: {
         resetRightPane()
     }
 
-    // ファイル変更モデル
-    // FileChangeModel (C++) がSnapperの変更出力をツリー化し、選択状態とファイル差分取得と段階的復元計画を提供する
+    // 差分ツリー、ファイルごとの差分の取得、復元を担うC++のモデル
     FileChangeModel {
         id: fileChangeModel
 
-        // エラー発生時のハンドラ
+        // チェックを変更したときと差分ツリーを読み直したときに、復元ボタンの有効状態を更新する
+        // フォルダにチェックを入れると、配下の項目の数だけdataChangedシグナルが届く
+        // 通知のたびに調べ直すと無駄が多いため、Qt.callLaterで後回しにし、調べ直しを1回にまとめる
+        onDataChanged: Qt.callLater(root.updateHasCheckedItems)
+        onModelReset: Qt.callLater(root.updateHasCheckedItems)
+
+        // エラーはダイアログ下部のラベルに表示する
         onErrorOccurred: function(message) {
             errorLabel.text = message
             errorLabel.visible = true
         }
 
-        // ファイル差分＋詳細情報の非同期結果ハンドラ
+        // getFileDiffAndDetails()の応答 (選択したファイルの差分と詳細)
         onFileDiffAndDetailsReady: function(filePath, details, diff) {
+            // 応答を待つ間に別のファイルが選ばれた場合は、古い応答を捨てる
             if (filePath !== rightPane.selectedFilePath) return
             rightPane.fileLoading = false
             rightPane.fileDetails = details
@@ -211,24 +217,20 @@ BorderedDialog {
             }
         }
 
-        // 復元進捗更新ハンドラ
-        // シグナルは復元ファイル1件ごとに届くため、ここではバッファへ積むだけにする
-        // (1件ごとにUIを書き換えるとGUIスレッドが占有され、描画が更新されなくなる)
+        // 復元の進捗 (1ファイルごとに届く)
+        // 1件ごとに画面を更新すると描画が止まるため、ここでは貯めるだけにする
         onRestoreProgress: function(current, total, filePath) {
             progressDialog.queueProgress(current, total, filePath)
         }
 
-        // 復元完了ハンドラ
+        // 復元の完了
         onRestoreCompleted: function(success) {
             progressDialog.close()
             if (success) {
-                // 右ペインの選択状態をリセット
                 root.resetRightPane()
 
-                // 復元後は現在のシステムの状態を一覧へ反映させる
-                // Pre<-->Post差分はスナップショット同士の比較であり、復元しても内容は変わらないため、
-                // Pre/Postペアでは復元先スナップショット vs 現在 へ切り替える
-                // このビューには範囲外で追加されたファイルも現れるため、意図しない巻き戻りが無いことも確認できる
+                // 復元結果が分かるよう、現在のシステムとの差分を表示し直す
+                // Pre <--> Post差分はスナップショット同士の比較で復元しても変わらないため、復元先と現在の比較へ切り替える
                 var restoreTarget = root.restoreSourceNumber
                 if (root.isPrePostPair && restoreTarget > 0) {
                     root.switchSnapshotView(restoreTarget)
@@ -240,13 +242,12 @@ BorderedDialog {
                 successDialog.open()
             }
             else {
-                // 復元失敗時のエラーフィードバック
                 restoreFailDialog.open()
             }
         }
     }
 
-    // 読み込み中のオーバーレイ
+    // 読み込み中の表示 (読み込みが終わるまでメインレイアウトの代わりに表示する)
     Item {
         anchors.fill: parent
         visible: fileChangeModel.loading
@@ -271,28 +272,29 @@ BorderedDialog {
         }
     }
 
-    // メインレイアウト
+    // メインレイアウト (読み込み中は操作できないよう非表示にする)
     ColumnLayout {
         anchors.fill: parent
         spacing: 10
         visible: !fileChangeModel.loading
 
-        // 説明ヘッダ
+        // 対象のSnapper設定 (root以外の設定でも取り違えないように表示する)
         Label {
-            text: qsTr("Root Filesystem")
+            text: qsTr("Snapper configuration: %1").arg(root.configName)
             font.bold: true
         }
 
+        // 現在の表示内容の説明
         Label {
             text: root.prePostDiffMode
-                  ? qsTr("Shows only the changes made between the Pre and Post snapshots that still differ from the current system. Entries already matching the restore target are hidden. Restoring reverts just those changes; files modified afterwards are left untouched.")
+                  ? qsTr("Shows only the changes made between the Pre and Post snapshots that still differ from the current system.\nEntries already matching the restore target are hidden.\nRestoring reverts just those changes; files modified afterwards are left untouched.")
                   : qsTr("Shows the system state after applying the specified snapshot")
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
 
-        // Pre/Postペア時: 差分対象と復元の向きを切り替えるラジオボタン
-        GroupBox {
+        // 表示する差分と復元の向きの選択 (Pre/Postペアの場合だけ表示する)
+        ThemedGroupBox {
             visible: root.isPrePostPair
             Layout.fillWidth: true
 
@@ -333,14 +335,13 @@ BorderedDialog {
             }
         }
 
-        // メインコンテンツ: 左右分割ビュー
-        // 左: ファイルツリー、右: 差分表示
+        // 左にファイルツリー、右に選択したファイルの詳細を表示する
         SplitView {
             Layout.fillWidth: true
             Layout.fillHeight: true
             orientation: Qt.Horizontal
 
-            // 左ペイン: ファイル変更ツリービュー
+            // 左ペイン: 変更されたファイルのツリー
             Rectangle {
                 SplitView.minimumWidth: 300
                 SplitView.preferredWidth: 400
@@ -353,7 +354,7 @@ BorderedDialog {
                     anchors.margins: 5
                     spacing: 5
 
-                    // 変更がある場合: ファイル変更ツリー表示
+                    // 差分がある場合だけツリーを表示する
                     ScrollView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -361,7 +362,6 @@ BorderedDialog {
                         clip: true
                         contentWidth: availableWidth
 
-                        // ファイル変更階層ツリービュー
                         TreeView {
                             id: treeView
                             width: parent.width
@@ -373,25 +373,25 @@ BorderedDialog {
                                 model: fileChangeModel
                             }
 
-                            // ツリーアイテムデリゲート
+                            // ツリーの1行
                             Component {
                                 id: treeDelegate
 
                                 TreeViewDelegate {
                                     id: delegateItem
 
-                                    // モデルから自動的に提供されるプロパティ
-                                    required property int changeType           // 変更タイプ (作成/変更/削除/タイプ変更)
-                                    required property bool isDirectory         // ディレクトリフラグ
-                                    required property string fileName          // ファイル/ディレクトリ名
+                                    // FileChangeModelのロール
+                                    required property int changeType           // 変更種別 (0 = 作成、1 = 変更、2 = 削除、3 = 種別変更)
+                                    required property bool isDirectory         // ディレクトリかどうか
+                                    required property string fileName          // ファイル名またはディレクトリ名
                                     required property string filePath          // フルパス
-                                    required property bool isChecked           // 復元選択状態
-                                    required property string statusFlags       // 詳細ステータスフラグ
+                                    required property bool isChecked           // 復元対象としてチェックされているか
+                                    required property string statusFlags       // Snapperのステータスフラグ (p / u / gなど)
 
-                                    // 選択・ホバー時の背景をペイン全幅に表示
+                                    // 選択行とホバー行の背景 (ホバー色はLight/Darkで切り替える)
                                     background: Item {
                                         Rectangle {
-                                            // デリゲートのインデントを打ち消してTreeView左端から右端まで描画
+                                            // インデントに関係なく、ペインの左端から右端まで塗る
                                             x: -delegateItem.x
                                             width: treeView.width
                                             height: parent.height
@@ -401,25 +401,24 @@ BorderedDialog {
                                         }
                                     }
 
-                                    // 行の内容: 復元チェックボックス、変更タイプバッジ、種別アイコン、名前
+                                    // チェックボックス、変更種別のバッジ、アイコン、名前を並べる
                                     contentItem: RowLayout {
                                         spacing: 5
 
-                                        // 復元選択チェックボックス
-                                        // 閲覧専用ビュー (Pre/Postペアの「vs 現在」) では復元できないため非表示
+                                        // 復元対象のチェックボックス (閲覧専用ビューでは復元できないため非表示)
                                         CheckBox {
                                             visible: root.restorable
                                             checked: isChecked
                                             onToggled: {
                                                 fileChangeModel.setItemChecked(filePath, checked)
-                                                // ディレクトリで、チェックがONの場合は再帰的に展開
+                                                // ディレクトリをチェックしたら、配下のファイルも見えるように全て展開する
                                                 if (checked && isDirectory) {
                                                     treeView.expandRecursively(row, -1)
                                                 }
                                             }
                                         }
 
-                                        // 変更タイプバッジ (ファイルのみ)
+                                        // 変更種別のバッジ (ディレクトリには付けない)
                                         Rectangle {
                                             width: 18
                                             height: 18
@@ -427,10 +426,10 @@ BorderedDialog {
                                             visible: !isDirectory
                                             color: {
                                                 switch(changeType) {
-                                                case 0: return ThemeManager.fileChangeCreated       // Created - 緑
-                                                case 1: return ThemeManager.fileChangeModified      // Modified - 青
-                                                case 2: return ThemeManager.fileChangeDeleted       // Deleted - 赤
-                                                case 3: return ThemeManager.fileChangeTypeChanged   // TypeChanged - オレンジ
+                                                case 0: return ThemeManager.fileChangeCreated       // 作成 (緑)
+                                                case 1: return ThemeManager.fileChangeModified      // 変更 (青)
+                                                case 2: return ThemeManager.fileChangeDeleted       // 削除 (赤)
+                                                case 3: return ThemeManager.fileChangeTypeChanged   // 種別変更 (オレンジ)
                                                 default: return ThemeManager.snapshotTypeDefault
                                                 }
                                             }
@@ -439,10 +438,10 @@ BorderedDialog {
                                                 anchors.centerIn: parent
                                                 text: {
                                                     switch(changeType) {
-                                                    case 0: return "+"  // Created
-                                                    case 1: return "M"  // Modified
-                                                    case 2: return "-"  // Deleted
-                                                    case 3: return "T"  // TypeChanged
+                                                    case 0: return "+"  // 作成
+                                                    case 1: return "M"  // 変更
+                                                    case 2: return "-"  // 削除
+                                                    case 3: return "T"  // 種別変更
                                                     default: return "?"
                                                     }
                                                 }
@@ -452,7 +451,7 @@ BorderedDialog {
                                             }
                                         }
 
-                                        // ファイル/ディレクトリ種別アイコン
+                                        // ファイルかディレクトリかを示すアイコン
                                         Image {
                                             source: isDirectory ? "qrc:/QSnapper/icons/directory.svg" : "qrc:/QSnapper/icons/file.svg"
                                             width: 16
@@ -461,7 +460,7 @@ BorderedDialog {
                                             sourceSize: Qt.size(16, 16)
                                         }
 
-                                        // ファイル名/ディレクトリ名表示
+                                        // 名前 (名前の無いルートは(root)と表示する)
                                         Label {
                                             text: fileName || "(root)"
                                             color: palette.text
@@ -470,17 +469,16 @@ BorderedDialog {
                                         }
                                     }
 
-                                    // クリック時: 右ペインにファイル詳細を非同期で表示
+                                    // ファイルなら右ペインに詳細を表示し、ディレクトリなら右ペインを空にする
                                     onClicked: {
                                         if (!isDirectory) {
-                                            // 選択ファイル情報を右ペインに設定
                                             rightPane.selectedFilePath = filePath
                                             rightPane.selectedChangeType = changeType
                                             rightPane.selectedStatusFlags = statusFlags
                                             rightPane.fileSelected = true
                                             rightPane.fileLoading = true
 
-                                            // 非同期で統合リクエスト
+                                            // 差分と詳細をまとめて取得し、onFileDiffAndDetailsReadyで受け取る
                                             fileChangeModel.getFileDiffAndDetails(filePath)
                                         }
                                         else {
@@ -495,7 +493,7 @@ BorderedDialog {
                         }
                     }
 
-                    // 変更がない場合: メッセージ表示
+                    // 差分が無い場合のメッセージ
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -511,7 +509,7 @@ BorderedDialog {
                 }
             }
 
-            // 右ペイン: ファイル詳細・差分表示
+            // 右ペイン: 選択したファイルの状態と差分
             Rectangle {
                 id: rightPane
                 SplitView.minimumWidth: 500
@@ -520,13 +518,12 @@ BorderedDialog {
                 border.color: palette.mid
                 border.width: 1
 
-                // 選択ファイルの状態プロパティ
-                property bool fileSelected: false
-                property bool fileLoading: false
-                property string selectedFilePath: ""
-                property int selectedChangeType: -1
-                property string selectedStatusFlags: ""
-                property var fileDetails: ({})
+                property bool fileSelected: false           // ファイルを選択中かどうか
+                property bool fileLoading: false            // 差分と詳細を取得中かどうか
+                property string selectedFilePath: ""        // 選択中のファイルのパス
+                property int selectedChangeType: -1         // 選択中のファイルの変更種別 (-1 = 未選択)
+                property string selectedStatusFlags: ""     // 選択中のファイルのステータスフラグ
+                property var fileDetails: ({})              // 権限や所有者などの詳細
 
                 /**
                  * @brief 差分を省略した理由を表示用の文言へ変換する
@@ -558,10 +555,10 @@ BorderedDialog {
                 }
 
                 /**
-                 * @brief diffテキストを行単位で着色したHTMLへ変換する
-                 * @param diffText 整形前のdiff文字列
-                 * @return pre要素で包んだHTML文字列
-                 * @note 追加行は新規色、削除行は削除色、ヘッダ行は変更色とタイプ変更色で着色する
+                 * @brief diffを行ごとに色分けしたHTMLへ変換する
+                 * @param diffText diffの文字列
+                 * @return pre要素で包んだHTML
+                 * @note ヘッダ行、ハンク行、追加行、削除行をThemeManagerの色で塗り分ける
                  */
                 function formatDiffHtml(diffText) {
                     var lines = diffText.split('\n')
@@ -603,7 +600,7 @@ BorderedDialog {
                     anchors.margins: 8
                     spacing: 8
 
-                    // ファイル未選択時のプレースホルダー
+                    // ファイルを選ぶまでの案内
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -617,8 +614,7 @@ BorderedDialog {
                         }
                     }
 
-                    // ファイル選択時のコンテンツ
-                    // ファイルパスヘッダ
+                    // 選択したファイルのパス
                     Label {
                         visible: rightPane.fileSelected
                         text: rightPane.selectedFilePath
@@ -628,7 +624,7 @@ BorderedDialog {
                         Layout.fillWidth: true
                     }
 
-                    // ローディング中のインジケーター
+                    // 詳細の取得中に表示する
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -651,8 +647,8 @@ BorderedDialog {
                         }
                     }
 
-                    // ステータス情報セクション
-                    GroupBox {
+                    // ファイルの状態 (取得が終わってから表示する)
+                    ThemedGroupBox {
                         visible: rightPane.fileSelected && !rightPane.fileLoading
                         title: qsTr("File Status")
                         Layout.fillWidth: true
@@ -661,7 +657,7 @@ BorderedDialog {
                             anchors.fill: parent
                             spacing: 4
 
-                            // コンテンツ変更ステータス
+                            // 内容の変更
                             Label {
                                 text: rightPane.getContentStatusText()
                                 wrapMode: Text.WordWrap
@@ -675,7 +671,7 @@ BorderedDialog {
                                 }
                             }
 
-                            // パーミッション変更
+                            // 権限の変更 (ステータスフラグにpがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('p') !== -1
                                 text: {
@@ -688,7 +684,7 @@ BorderedDialog {
                                 Layout.fillWidth: true
                             }
 
-                            // ユーザ所有者変更
+                            // 所有ユーザの変更 (uがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('u') !== -1
                                 text: {
@@ -701,7 +697,7 @@ BorderedDialog {
                                 Layout.fillWidth: true
                             }
 
-                            // グループ所有者変更
+                            // 所有グループの変更 (gがある場合だけ表示する)
                             Label {
                                 visible: rightPane.selectedStatusFlags.indexOf('g') !== -1
                                 text: {
@@ -716,7 +712,7 @@ BorderedDialog {
                         }
                     }
 
-                    // カラーdiff表示
+                    // 色分けした差分
                     ScrollView {
                         visible: rightPane.fileSelected && !rightPane.fileLoading
                         Layout.fillWidth: true
@@ -739,8 +735,7 @@ BorderedDialog {
                         }
                     }
 
-                    // 個別ファイル復元ボタン
-                    // 閲覧専用ビューでは復元できないため非表示
+                    // このファイルだけを復元するボタン (閲覧専用ビューでは非表示)
                     RowLayout {
                         visible: rightPane.fileSelected && !rightPane.fileLoading && root.restorable
                         Layout.fillWidth: true
@@ -748,6 +743,7 @@ BorderedDialog {
 
                         Item { Layout.fillWidth: true }
 
+                        // 新規作成されたファイルは、復元すると削除されるため[Remove]と表示する
                         Button {
                             text: rightPane.selectedChangeType === 0
                                   ? qsTr("Remove")
@@ -762,7 +758,7 @@ BorderedDialog {
             }
         }
 
-        // エラーメッセージ表示ラベル
+        // エラーメッセージ (エラーが起きたときだけ表示する)
         Label {
             id: errorLabel
             Layout.fillWidth: true
@@ -771,13 +767,13 @@ BorderedDialog {
             wrapMode: Text.WordWrap
         }
 
-        // アクションボタン行
+        // ダイアログ下部のボタン
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
 
-            // 閲覧専用ビューであることの案内
-            // 無効化されたButtonはホバーを受け取らずToolTipが出ないため、常設のラベルで示す
+            // 閲覧専用であることの案内
+            // 無効なボタンにはツールチップが出ないため、ラベルで常に表示する
             Label {
                 visible: root.isPrePostPair && !root.restorable
                 text: qsTr("View only. Choose a Pre / Post difference above to restore.")
@@ -796,15 +792,18 @@ BorderedDialog {
                 onClicked: root.close()
             }
 
-            // 復元ボタン
-            // 復元元はラジオ選択で確定済みのrestoreSourceNumberを使う
+            // 復元ボタン (選択したスナップショットからファイルを復元する)
             Button {
                 id: restoreButton
                 text: (root.isPrePostPair && root.restorable)
                       ? qsTr("Restore Selected to #%1").arg(root.restoreSourceNumber)
                       : qsTr("Restore Selected")
                 highlighted: true
-                enabled: fileChangeModel.hasChanges && root.restorable
+                // 次のいずれかの場合は、ボタンを無効にする
+                // 差分が1つもない場合、閲覧専用の表示の場合、復元するファイルに1つもチェックが入っていない場合
+                // チェックが1つもないまま押しても、復元の開始時にエラーになるだけのため、押せないようにする
+                enabled: fileChangeModel.hasChanges && root.restorable && root.hasCheckedItems
+                opacity: enabled ? 1.0 : 0.45                            // 強調表示のボタンは無効でも見分けにくいため半透明にする
                 onClicked: {
                     if (!root.restorable || root.restoreSourceNumber <= 0) return
                     confirmRestoreDialog.restoreTargetNumber = root.restoreSourceNumber
@@ -814,7 +813,7 @@ BorderedDialog {
         }
     }
 
-    // ファイル復元確認ダイアログ
+    // 選択したファイルを復元する前の確認ダイアログ
     BorderedDialog {
         id: confirmRestoreDialog
         title: qsTr("Confirmation")
@@ -832,7 +831,7 @@ BorderedDialog {
             return Math.min(Math.max(calculated, 380), 750)
         }
 
-        property int restoreTargetNumber: 0  // 復元対象のスナップショット番号 (open前に明示的にセット)
+        property int restoreTargetNumber: 0  // 復元元のスナップショット番号 (開く前に設定する)
 
         ColumnLayout {
             spacing: 10
@@ -863,14 +862,14 @@ BorderedDialog {
             }
 
             // 復元オプション
-            GroupBox {
+            ThemedGroupBox {
                 title: qsTr("Restore Options")
                 Layout.fillWidth: true
 
                 ColumnLayout {
                     spacing: 8
 
-                    // 復元方式選択
+                    // 復元方式 (直接コピーまたはYaST互換)
                     RowLayout {
                         spacing: 10
                         Label {
@@ -889,7 +888,7 @@ BorderedDialog {
                         }
                     }
 
-                    // バッチサイズ設定
+                    // 1回の要求でまとめて復元するファイル数
                     RowLayout {
                         spacing: 10
                         Label {
@@ -912,8 +911,8 @@ BorderedDialog {
             }
         }
 
-        // 復元実行
-        // snapshotNumberへの代入は比較モードをリセットしてしまうため、復元元は引数で渡す
+        // 復元を始める
+        // snapshotNumberを書き換えると比較モードが戻ってしまうため、復元元は引数で渡す
         onAccepted: {
             progressDialog.resetProgress()
             progressDialog.open()
@@ -921,7 +920,7 @@ BorderedDialog {
         }
     }
 
-    // 復元進捗表示ダイアログ
+    // 復元の進捗ダイアログ (復元が終わるまで、ダイアログの外をクリックしても閉じない)
     BorderedDialog {
         id: progressDialog
         title: qsTr("Restoring Files")
@@ -940,18 +939,18 @@ BorderedDialog {
         }
         standardButtons: Dialog.Cancel
 
-        property int currentProgress: 0              // 現在の進捗
-        property int totalProgress: 0                // 総ファイル数
-        property string currentFile: ""              // 現在処理中のファイル
+        property int currentProgress: 0              // 処理済みのファイル数
+        property int totalProgress: 0                // 全体のファイル数
+        property string currentFile: ""              // 処理中のファイル
 
-        // 進捗シグナルの保留分 (flushTimerで一括反映する)
-        property int pendingProgress: 0              // 最新の進捗
-        property int pendingTotal: 0                 // 最新の総ファイル数
-        property string pendingFile: ""              // 最新の処理中ファイル
+        // まだ画面に反映していない進捗 (flushTimerがまとめて反映する)
+        property int pendingProgress: 0              // 最新の処理済みファイル数
+        property int pendingTotal: 0                 // 最新の全体のファイル数
+        property string pendingFile: ""              // 最新の処理中のファイル
         property var pendingLines: []                // 未反映のログ行
 
-        // 保留分を一定間隔でUIへ反映する
-        // 保留が無くなったら停止し、次のqueueProgressで再開する
+        // 進捗を100[ms]ごとに画面へ反映する
+        // 反映するものが無くなったら止まり、次の進捗が届くと再開する
         Timer {
             id: flushTimer
             interval: 100
@@ -966,11 +965,11 @@ BorderedDialog {
         }
 
         /**
-         * @brief 受信した進捗をバッファへ蓄積する
-         * @param current 現在の処理済み件数
-         * @param total 総件数
-         * @param filePath 現在処理中のファイルパス
-         * @note UIへは即時反映せず、flushTimerで一定間隔ごとにまとめて反映する
+         * @brief 届いた進捗を貯める
+         * @param current 処理済みのファイル数
+         * @param total 全体のファイル数
+         * @param filePath 処理中のファイルのパス
+         * @note 画面への反映はflushTimerがまとめて行う (止まっていれば開始する)
          */
         function queueProgress(current, total, filePath) {
             pendingProgress = current
@@ -983,29 +982,27 @@ BorderedDialog {
         }
 
         /**
-         * @brief 保留中の進捗をUIへ一括反映する
-         * @note 進捗バー、件数表示、ログをまとめて更新する
-         *       ログは全置換ではなくappend()で増分追記し、最下行へ自動スクロールする
+         * @brief 貯めた進捗をまとめて画面に反映する
+         * @note ログは追記し、最下行までスクロールする
          */
         function flushProgress() {
             if (pendingLines.length === 0) {
                 return
             }
-            // ProgressBarはvalueをtoの範囲へ丸めるため、totalProgressを先に更新する
+            // ProgressBarはvalueをtoの範囲に丸めるため、先にtotalProgressを更新する
             totalProgress = pendingTotal
             currentProgress = pendingProgress
             currentFile = pendingFile
-            // textの全置換はドキュメント全体を再構築するため、増分のみ追記する
+            // textを丸ごと置き換えると全体を作り直して重いため、追記だけにする
             restoreLogArea.append(pendingLines.join("\n"))
             pendingLines = []
-            // lengthはO(1)
-            // text.lengthはドキュメント全体を文字列化するため使わない
+            // text.lengthは全体を文字列にして重いため、lengthを使う
             restoreLogArea.cursorPosition = restoreLogArea.length
         }
 
         /**
-         * @brief 進捗表示とログを初期化する
-         * @note タイマを停止し、保留中の進捗と表示中のログをクリアする
+         * @brief 進捗とログを初期状態に戻す
+         * @note flushTimerも止める
          */
         function resetProgress() {
             flushTimer.stop()
@@ -1037,22 +1034,21 @@ BorderedDialog {
                 value: progressDialog.currentProgress
             }
 
-            // 進捗数値表示
+            // 進捗の件数
             Label {
                 Layout.fillWidth: true
                 text: qsTr("Progress: %1 / %2").arg(progressDialog.currentProgress).arg(progressDialog.totalProgress)
                 color: palette.text
             }
 
-            // 復元済みファイルのログ表示
+            // 復元したファイルのログ
             ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 ScrollBar.vertical.policy: ScrollBar.AsNeeded
                 ScrollBar.horizontal.policy: ScrollBar.AsNeeded
 
-                // テキストはflushProgress()がappend()で増分追記し、
-                // 最下行への自動スクロールもそこでcursorPositionを更新して行う
+                // ログの追記と最下行へのスクロールはflushProgress()が行う
                 TextArea {
                     id: restoreLogArea
                     readOnly: true
@@ -1068,7 +1064,7 @@ BorderedDialog {
                 }
             }
 
-            // 現在処理中のファイル名表示
+            // 処理中のファイル
             Label {
                 Layout.fillWidth: true
                 Layout.maximumWidth: 500
@@ -1079,13 +1075,13 @@ BorderedDialog {
             }
         }
 
-        // キャンセル時
+        // [Cancel]ボタンで復元を中止する
         onRejected: {
             fileChangeModel.cancelRestore()
         }
     }
 
-    // 個別ファイル復元確認ダイアログ
+    // 1つのファイルを復元する前の確認ダイアログ
     BorderedDialog {
         id: confirmSingleRestoreDialog
         title: qsTr("Confirmation")
@@ -1135,6 +1131,7 @@ BorderedDialog {
             }
         }
 
+        // 進捗ダイアログを1件分の表示にして復元を始める
         onAccepted: {
             if (!root.restorable || root.restoreSourceNumber <= 0) return
             progressDialog.resetProgress()
@@ -1145,7 +1142,7 @@ BorderedDialog {
         }
     }
 
-    // 復元成功ダイアログ
+    // 復元の成功を伝えるダイアログ
     BorderedDialog {
         id: successDialog
         title: qsTr("Success")
@@ -1172,6 +1169,7 @@ BorderedDialog {
                 Layout.preferredWidth: 400
             }
 
+            // Pre/Postペアでは、復元後に表示を切り替えたことを伝える
             Label {
                 visible: root.isPrePostPair
                 text: qsTr("Switched to the differences between snapshot #%1 and the current system.")
@@ -1180,6 +1178,7 @@ BorderedDialog {
                 Layout.preferredWidth: 400
             }
 
+            // 再読み込みが終わり、差分が残っていない場合だけ表示する
             Label {
                 visible: !fileChangeModel.hasChanges && !fileChangeModel.loading
                 text: qsTr("No more differences with snapshot.")
@@ -1189,12 +1188,13 @@ BorderedDialog {
             }
         }
 
+        // 復元が済んだので、差分ダイアログも閉じる
         onAccepted: {
             root.close()
         }
     }
 
-    // 復元失敗ダイアログ
+    // 復元の失敗を伝えるダイアログ
     BorderedDialog {
         id: restoreFailDialog
         title: qsTr("Restore Failed")

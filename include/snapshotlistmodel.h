@@ -91,28 +91,47 @@ public:
     /**
      * @brief 単発スナップショットを作成する
      * @param description 説明文
+     * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は"")
+     * @param important 重要フラグ
      * @param userdata ユーザデータマップ
      */
     Q_INVOKABLE void createSingleSnapshot(const QString &description,
+                                          const QString &cleanup,
+                                          bool important,
                                           const QVariantMap &userdata = QVariantMap());
 
     /**
      * @brief Preスナップショットを作成する
      * @param description 説明文
+     * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は"")
+     * @param important 重要フラグ
      * @param userdata ユーザデータマップ
      */
     Q_INVOKABLE void createPreSnapshot(const QString &description,
+                                       const QString &cleanup,
+                                       bool important,
                                        const QVariantMap &userdata = QVariantMap());
 
     /**
      * @brief Postスナップショットを作成する
      * @param description 説明文
      * @param previousNumber 紐付け元のPreスナップショット番号
+     * @param cleanup クリーンアップアルゴリズム ("" / "number" / "timeline"、未知の値は"")
+     * @param important 重要フラグ
      * @param userdata ユーザデータマップ
      */
     Q_INVOKABLE void createPostSnapshot(const QString &description,
                                         int previousNumber,
+                                        const QString &cleanup,
+                                        bool important,
                                         const QVariantMap &userdata = QVariantMap());
+
+    /**
+     * @brief 選択中のスナップショットから、Postを作成できるPreスナップショットの番号を求める
+     * @param selectedNumbers 選択中のスナップショット番号の一覧
+     * @return 選択がPreスナップショット1件だけで、そのPreに対応するPostが一覧にまだ無い場合はPreの番号、それ以外は-1
+     */
+    Q_INVOKABLE int pendingPreNumber(const QVariantList &selectedNumbers) const;
 
     /**
      * @brief 指定番号へロールバックする
@@ -127,8 +146,12 @@ public:
     Q_INVOKABLE void deleteSnapshot(int number);
 
     /**
-     * @brief 複数スナップショットを削除する
+     * @brief 複数スナップショットを一括削除する
      * @param numbers 削除するスナップショット番号の一覧
+     * @note 複数件の場合は、認証を1回で済ませるため、番号ごとに削除せずDeleteSnapshotsを1回だけ呼び出す
+     *       1件だけの場合は、DeleteSnapshotを呼び出す
+     *       DeleteSnapshotは、polkitが認可を一時保持する間は再認証を求めない
+     *       1未満の番号と重複した番号は、D-Busを呼び出す前に除外する
      */
     Q_INVOKABLE void deleteSnapshots(const QVariantList &numbers);
 
@@ -187,10 +210,18 @@ signals:
 
     /**
      * @brief 複数削除完了時に発行する
-     * @param successCount 成功件数
-     * @param failureCount 失敗件数
+     * @param successCount 削除を確認できた件数
+     * @param failureCount 削除を確認できなかった件数
+     * @note failureCountが0より大きい場合は一部失敗であり、成功として扱ってはならない
      */
     void snapshotsDeletionCompleted(int successCount, int failureCount);
+
+    /**
+     * @brief 複数削除を開始できなかった、または応答がエラーのときに発行する
+     * @param error 利用者へ表示する失敗理由
+     * @note この場合はsnapshotsDeletionCompletedを発行しない (成功件数を知らせる手段がないため)
+     */
+    void snapshotsDeletionFailed(const QString &error);
 
     /**
      * @brief 変更成功時に発行する
@@ -246,6 +277,7 @@ private:
     // モデルデータ
     QList<FsSnapshot*> m_snapshots;     // スナップショットオブジェクトのリスト
     SnapperService *m_snapperService;   // SnapperServiceシングルトンインスタンスへのポインタ
+    quint64 m_deletionGeneration;       // 一括削除の世代番号 (古い応答を捨てるため)
 };
 
 #endif // SNAPSHOTLISTMODEL_H

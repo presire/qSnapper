@@ -3,12 +3,12 @@
  * @brief スナップショットの一覧表示と作成・削除・編集・比較を提供するページ
  *
  * Main.qmlから生成され、SnapshotListModelの一覧をSnapshotGroupModelでPre/Postペア単位にまとめて表示する
- * ツールバーで設定 (config) の切り替えとテーマ切り替えを行い、各操作は確認ダイアログを挟んで実行する
+ * ツールバーで設定 (config) の切り替えを行い、各操作は確認ダイアログを挟んで実行する
  *
  * 入力 : なし (SnapperServiceとThemeManagerのシングルトンを直接参照)
  * 出力 : なし
- * 依存 : SnapshotListModel (一覧・作成・削除)、SnapshotGroupModel (Pre/Postのグループ化)、
- *        SnapperService (設定一覧・現在設定・スナップショット検索)、ThemeManager (テーマ色とLight/Dark切替)
+ * 依存 : SnapshotListModel (一覧・作成・削除、Post作成の紐付け先を求めるpendingPreNumber)、SnapshotGroupModel (Pre/Postのグループ化)、
+ *        SnapperService (設定一覧・現在設定・スナップショット検索)、ThemeManager (テーマ色)
  */
 import QtQuick
 import QtQuick.Controls
@@ -70,8 +70,12 @@ Page {
     SnapshotListModel {
         id: snapshotListModel
 
-        // スナップショット作成成功時のシグナルハンドラ
+        // SnapshotListModel::snapshotCreatedシグナルを受け取り、スナップショットの作成成功を表示する
+        // 作成後の一覧の再読み込みで行が作り直されても、選択中の番号の配列 (selectedSnapshots) はそのまま残る
+        // Postを作成する前に選択していたPreの番号だけが残ると、PreとPostの組の行は選択済みに見える
+        // しかし、[選択を削除]ボタンはPreだけを削除してしまうため、作成に成功したら選択を解除する
         onSnapshotCreated: {
+            root.clearSelection()
             statusBar.showMessage(qsTr("Snapshot created successfully"), 3000)
         }
 
@@ -93,14 +97,26 @@ Page {
         }
 
         // 複数スナップショット削除完了時のシグナルハンドラ
+        // 一部でも削除できなかった場合は成功として扱わず、残ったスナップショットを確認できるようエラーで示す
         onSnapshotsDeletionCompleted: function(successCount, failureCount) {
             deletingBusyDialog.close()
             root.clearSelection()
             if (failureCount === 0) {
                 statusBar.showMessage(qsTr("Deleted %1 snapshot(s)").arg(successCount), 3000)
             } else {
-                statusBar.showMessage(qsTr("Deletion completed: %1 succeeded, %2 failed").arg(successCount).arg(failureCount), 5000)
+                errorDialog.text = qsTr("Deleted %1 of %2 snapshots. %3 could not be deleted.")
+                    .arg(successCount).arg(successCount + failureCount).arg(failureCount)
+                errorDialog.open()
             }
+        }
+
+        // 複数スナップショット削除がD-Busエラーで失敗したときのシグナルハンドラ
+        // この場合はSnapshotsDeletionCompletedを発行しないため、待機表示をここで閉じる
+        onSnapshotsDeletionFailed: function(error) {
+            deletingBusyDialog.close()
+            root.clearSelection()
+            errorDialog.text = qsTr("Failed to delete snapshots: %1").arg(error)
+            errorDialog.open()
         }
 
         // 起動直後に一覧を取得して表示する
@@ -121,10 +137,11 @@ Page {
         property int typeWidth: 140     // 種別列の幅
         property int dateWidth: 170     // 日時列の幅
         property int userdataWidth: 150 // ユーザデータ列の幅
+        property int importantWidth: 40 // 重要フラグ列の幅
     }
 
     // ツールバーヘッダ
-    // アプリケーションタイトル、操作ボタン、テーマ切り替えを配置
+    // アプリケーションタイトル、設定切替、操作ボタンを配置
     header: ToolBar {
         RowLayout {
             anchors.fill: parent
@@ -159,19 +176,24 @@ Page {
                     currentIndex = idx >= 0 ? idx : 0
                 }
 
+                // 設定の切替 (本画面と設定画面のどちらで切り替えた場合も) に追従して、選択をクリアし一覧を再取得する
+                // 設定画面で切り替えた場合、本画面のComboBoxのonActivatedは呼ばれないため、ここで一括して処理する
                 Connections {
                     target: SnapperService
                     function onConfigsChanged() { configCombo.syncCurrentIndex() }
-                    function onCurrentConfigChanged() { configCombo.syncCurrentIndex() }
+                    function onCurrentConfigChanged() {
+                        configCombo.syncCurrentIndex()
+                        root.clearSelection()
+                        snapshotListModel.refresh()
+                    }
                 }
 
-                // 設定切替時: SnapperService.currentConfig (C++) を更新し、選択をクリアして一覧を再取得する
+                // 設定切替時: SnapperService.currentConfig (C++) を更新する
+                // 選択のクリアと一覧の再取得は、設定画面からの切替にも対応するため上のConnectionsで行う
                 onActivated: {
                     var name = model[currentIndex]
                     if (name && name !== SnapperService.currentConfig) {
                         SnapperService.currentConfig = name
-                        root.clearSelection()
-                        snapshotListModel.refresh()
                     }
                 }
                 // 初回に設定一覧を取得し、現在設定に合わせて選択位置を同期する
@@ -252,30 +274,6 @@ Page {
                     compareDialog.num2 = root.selectedSnapshots[1]
                     compareDialog.configName = SnapperService.currentConfig
                     compareDialog.open()
-                }
-            }
-
-            // セパレータ
-            Rectangle {
-                width: 1
-                height: 30
-                color: palette.mid
-                Layout.leftMargin: 5
-                Layout.rightMargin: 5
-            }
-
-            // ダークモード切り替えラベル
-            Label {
-                text: qsTr("Dark Mode")
-                font.pixelSize: 14
-            }
-
-            // テーマ切り替えスイッチ
-            Switch {
-                id: themeSwitch
-                checked: ThemeManager.isDark
-                onToggled: {
-                    ThemeManager.themeMode = checked ? ThemeManager.Dark : ThemeManager.Light
                 }
             }
         }
@@ -402,10 +400,20 @@ Page {
             var calculated = ApplicationWindow.window.width * 0.5
             return Math.min(Math.max(calculated, 600), 1200)
         }
+        // ダイアログの高さは、ウィンドウの高さの半分 (400以上800以下) を基本にする
+        // ただし、種類にPreを選ぶと案内のラベルが増え、本文 (ColumnLayout) が基本の高さに収まらなくなる
+        // 本文より低くすると、フッターの[OK]ボタンと[キャンセル]ボタンが[ユーザデータ]の入力欄に重なるため、本文の高さより低くしない
+        // 本文はanchors.topMarginで20だけ下へずらして配置するため、本文の高さに20を加える
+        // ウィンドウより高くすると、ボタンが画面の外に出て押せなくなるため、ウィンドウの高さを上限にする
         height: {
-            if (!ApplicationWindow.window) return 400
+            var fitted = implicitHeight + 20
+            if (!ApplicationWindow.window) {
+                return Math.max(fitted, 400)
+            }
+
             var calculated = ApplicationWindow.window.height * 0.5
-            return Math.min(Math.max(calculated, 400), 800)
+            var preferred = Math.min(Math.max(calculated, 400), 800)
+            return Math.min(Math.max(preferred, fitted), ApplicationWindow.window.height)
         }
 
         ColumnLayout {
@@ -426,12 +434,39 @@ Page {
                 placeholderText: qsTr("Enter snapshot description")
             }
 
-            // スナップショットタイプ選択コンボボックス
+            // スナップショットタイプ選択コンボボックス (0: Single、1: Pre、2: Post)
+            // availableがfalseの項目は無効表示にする
+            // Postは紐付け先のPreが決まっている場合だけ選べる (紐付け先が無いままPostを作成するとサーバが拒否するため、選択前に止める)
             ComboBox {
                 id: snapshotTypeCombo
                 Layout.fillWidth: true
-                model: [qsTr("Single Snapshot"), qsTr("Pre Snapshot")]
+                textRole: "text"
+                model: [
+                    { text: qsTr("Single Snapshot"), available: true },
+                    { text: qsTr("Pre Snapshot"), available: true },
+                    { text: qsTr("Post Snapshot"), available: createSnapshotDialog.pendingPre > 0 }
+                ]
                 currentIndex: 0
+
+                delegate: ItemDelegate {
+                    required property var modelData
+                    required property int index
+
+                    width: ListView.view.width
+                    text: modelData.text
+                    enabled: modelData.available
+                    // Main.qmlがパレットの色をバインディングで指定しているため、Fusionスタイルは無効状態でも文字色を灰色に切り替えない
+                    // そのため、無効状態であることは不透明度を下げて示す
+                    opacity: enabled ? 1.0 : 0.45
+                    highlighted: ListView.view.currentIndex === index
+                }
+
+                // キーボード操作で無効な項目に移った場合は、Singleへ戻して不正な組み合わせで作成させない
+                onActivated: function(index) {
+                    if (index === 2 && createSnapshotDialog.pendingPre <= 0) {
+                        currentIndex = 0
+                    }
+                }
             }
 
             // Preスナップショットの説明ラベル
@@ -441,6 +476,58 @@ Page {
                 font.italic: true
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
+            }
+
+            // Postを選べない理由の案内
+            // 一覧でPre (Postが未作成のもの) を1件だけ選択している場合にだけPostを作成できるため、その手順を示す
+            Label {
+                visible: createSnapshotDialog.pendingPre <= 0
+                text: qsTr("To create a post snapshot, first select a pre snapshot that has no post snapshot.")
+                font.italic: true
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            // Postの紐付け先の案内
+            Label {
+                visible: snapshotTypeCombo.currentIndex === 2 && createSnapshotDialog.pendingPre > 0
+                text: qsTr("This snapshot will be paired with pre snapshot #%1").arg(createSnapshotDialog.pendingPre)
+                font.italic: true
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            // クリーンアップアルゴリズムと重要フラグ
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                Label {
+                    text: qsTr("Cleanup:")
+                }
+
+                // 値は""、number、timelineの順 (空文字列は自動削除の対象外を表す)
+                ComboBox {
+                    id: cleanupCombo
+                    Layout.preferredWidth: 160
+                    textRole: "text"
+                    valueRole: "value"
+                    model: [
+                        { text: qsTr("None"), value: "" },
+                        { text: "number", value: "number" },
+                        { text: "timeline", value: "timeline" }
+                    ]
+                    currentIndex: 0
+                }
+
+                // 重要なスナップショットは、番号クリーンアップで別の保持上限 (NUMBER_LIMIT_IMPORTANT) が適用される
+                CheckBox {
+                    id: importantCheck
+                    text: qsTr("Important")
+                    checked: false
+                }
+
+                Item { Layout.fillWidth: true }
             }
 
             // ユーザデータ入力 (key=value, 1 行 1 ペア, カンマ区切りも可)
@@ -495,7 +582,33 @@ Page {
             return result
         }
 
-        // [OK]押下時: 説明文を検証し、種別に応じて SnapshotListModel::createSingleSnapshot / createPreSnapshot を呼び出す
+        /**
+         * @brief 入力欄を初期値へ戻す
+         * @note 次回の作成に前回の入力 (特にImportantとクリーンアップ) が残らないようにする
+         */
+        function resetFields() {
+            descriptionField.text = ""
+            userdataField.text = ""
+            snapshotTypeCombo.currentIndex = 0
+            cleanupCombo.currentIndex = 0
+            importantCheck.checked = false
+        }
+
+        // Postの紐付け先となるPreスナップショット番号 (選択がPre1件で、Postが未作成の場合のみ正の値)
+        // SnapshotListModel::pendingPreNumberで判定する
+        // 選択の変更に加え、一覧の更新 (PostやPreの作成後) でも判定が変わるため、
+        // 件数の変更通知 (countChanged) を依存に含めて再評価させる
+        readonly property int pendingPre: createModel.count >= 0 ? createModel.pendingPreNumber(root.selectedSnapshots) : -1
+
+        // 作成系メソッドの呼び出し先 (SnapshotListModel)
+        // qmllintはC++側で登録された型のメンバを解決できないため、var経由で参照して警告の増加を避ける
+        readonly property var createModel: snapshotListModel
+
+        // 表示のたびに種別をSingleへ戻す
+        // 前回Postを選んだまま、選択の変更でPostが使えなくなった状態が残るのを避ける
+        onAboutToShow: snapshotTypeCombo.currentIndex = 0
+
+        // [OK]押下時: 説明文を検証し、種別に応じて SnapshotListModel::createSingleSnapshot / createPreSnapshot / createPostSnapshot を呼び出す
         onAccepted: {
             if (descriptionField.text.trim() === "") {
                 errorDialog.text = qsTr("Please enter a description")
@@ -504,21 +617,27 @@ Page {
             }
 
             var ud = createSnapshotDialog.parseUserdata(userdataField.text)
+            var cleanup = cleanupCombo.currentValue
+            var important = importantCheck.checked
             if (snapshotTypeCombo.currentIndex === 0) {
-                snapshotListModel.createSingleSnapshot(descriptionField.text, ud)
+                createSnapshotDialog.createModel.createSingleSnapshot(descriptionField.text, cleanup, important, ud)
+            } else if (snapshotTypeCombo.currentIndex === 1) {
+                createSnapshotDialog.createModel.createPreSnapshot(descriptionField.text, cleanup, important, ud)
+            } else if (createSnapshotDialog.pendingPre > 0) {
+                createSnapshotDialog.createModel.createPostSnapshot(descriptionField.text, createSnapshotDialog.pendingPre,
+                                                     cleanup, important, ud)
             } else {
-                snapshotListModel.createPreSnapshot(descriptionField.text, ud)
+                // 選択が変わってPostの紐付け先が無くなっている場合は作成しない
+                errorDialog.text = qsTr("Select a pre snapshot that has no post snapshot to create a post snapshot")
+                errorDialog.open()
+                return
             }
 
-            descriptionField.text = ""
-            userdataField.text = ""
+            createSnapshotDialog.resetFields()
         }
 
         // [Cancel]押下時: 入力内容を破棄して次回に残さない
-        onRejected: {
-            descriptionField.text = ""
-            userdataField.text = ""
-        }
+        onRejected: createSnapshotDialog.resetFields()
     }
 
     // スナップショット編集ダイアログ
@@ -584,12 +703,15 @@ Page {
             }
         }
 
-        // 削除実行
-        // Polkit認証はD-Busサービス側 DeleteSnapshot 呼び出し時に
-        // 都度実行される (P0-2 で事前認証APIを撤廃)
-        // 連続削除のプロンプト抑止はpolkitのauth_admin_keepに委ねる
+        // 削除の確認で[OK]ボタンが押されたときに、選択中のスナップショットを削除する
+        // SnapshotListModel::deleteSnapshotsは、1件ならヘルパのDeleteSnapshotを呼び出す
+        // DeleteSnapshotは、polkitが認可を一時保持する間は再認証を求めない
+        // 複数件ならヘルパのDeleteSnapshotsを呼び出し、件数にかかわらず認証を1回だけ求める
+        // 削除の結果は、どちらの場合もsnapshotsDeletionCompletedシグナルとsnapshotsDeletionFailedシグナルで受け取る
+        // deleteSnapshotsはD-Busを非同期に呼び出すため、先に処理中の表示 (deletingBusyDialog) を開いてもGUIは固まらない
         onAccepted: {
             deletingBusyDialog.open()
+            snapshotListModel.deleteSnapshots(root.selectedSnapshots)
         }
     }
 
@@ -605,12 +727,6 @@ Page {
             if (!ApplicationWindow.window) return 400
             var calculated = ApplicationWindow.window.width * 0.3
             return Math.min(Math.max(calculated, 400), 600)
-        }
-
-        // ダイアログが完全に表示されてからタイマを起動する
-        // 削除処理でGUIスレッドが占有される前に、待機表示を確実に描画させるため
-        onOpened: {
-            deletionDelayTimer.start()
         }
 
         ColumnLayout {
@@ -629,17 +745,6 @@ Page {
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
-        }
-    }
-
-    // ダイアログ描画完了後に削除処理を開始するためのタイマ
-    Timer {
-        id: deletionDelayTimer
-        interval: 200
-        repeat: false
-        // SnapshotListModel::deleteSnapshotsを呼び出し、完了はsnapshotsDeletionCompletedシグナルで受け取る
-        onTriggered: {
-            snapshotListModel.deleteSnapshots(root.selectedSnapshots)
         }
     }
 

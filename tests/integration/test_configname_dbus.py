@@ -4,12 +4,16 @@
 @brief configNameの検証が全12メソッドで機能することを網羅的に検査する
 
 configNameを引数に取る以下の12メソッドに対し6種の悪性configNameを投入し、
-全てがorg.freedesktop.DBus.Error.InvalidArgsで拒否されることを検証する
+NULを含まない名前はヘルパーがorg.freedesktop.DBus.Error.InvalidArgsで拒否し、
+NULを含む名前はpython3-dbusが送信の前に拒否することを検証する (両者は別に集計する)
 対象 : ListSnapshots, CreateSnapshot, ModifySnapshot, DeleteSnapshot,
        RollbackSnapshot, GetFileChanges, GetFileChangesBetween,
        GetFileDiffAndDetails, GetFileDiffBetween, BeginRestorePlan,
        WriteSnapperConfig, SetupQuota
-読み取り系 (ListSnapshots等) で試すため副作用はない
+全ての名前が認可の前の検証で拒否される前提のため、通常は副作用はない
+空文字は、ヘルパーの契約でrootのconfigとして扱われる (resolveConfigOrFail) ため対象に含めない
+含めるとrootのconfigへのCreateSnapshot、DeleteSnapshot、RollbackSnapshotが実際に実行され得るため
+NULを含む名前は、D-Busの文字列に含められずpython3-dbusが送信の前に拒否するため、拒否として数える
 
 修正前 (v1.3.2) : 多くのメソッドで検証を通過してsnapper層まで到達し、
                   snapper例外や予期せぬエラーを返して漏洩の兆候を観測した
@@ -41,7 +45,7 @@ DBUS_IFACE = "com.presire.qsnapper.Operations"     # インタフェース名
 MALICIOUS_NAMES = [                # 検証に用いる悪性configName
     "../etc/snapper",              # 親ディレクトリ参照の混入
     "/etc/snapper/configs/root",   # 絶対パスの指定
-    "",                            # 空文字
+    "root\n",                      # 末尾の改行 (正規表現の行末の扱いで通過しないこと)
     "root/../etc",                 # 正規名に親ディレクトリ参照を混入
     "root\x00evil",                # NULバイトの混入
     "root; rm -rf /",              # シェルメタ文字の混入
@@ -108,6 +112,8 @@ def main() -> int:
     total = 0
     blocked = 0
     leaked = 0
+    helper_rejected = 0    # ヘルパーがInvalidArgsで拒否した件数
+    client_rejected = 0    # NULを含むためpython3-dbusが送信の前に拒否した件数
 
     for spec in SPECS:
         method = getattr(ops, spec.name)
@@ -117,20 +123,34 @@ def main() -> int:
                 method(*spec.make_args(String(payload)))
                 print(f"[LEAK] {spec.name}({payload!r}) returned without error")
                 leaked += 1
+            except (ValueError, TypeError) as e:
+                # D-Busの文字列はNULを含められず、python3-dbusが送信の前に拒否するため、ヘルパーへ届かない
+                # NUL以外での例外は引数の組み立ての誤りであり、拒否として数えると全件が偽って成功するため失敗にする
+                if "\x00" not in payload:
+                    print(f"[ERROR] {spec.name}({payload!r}) client error: {e}")
+                    continue
+                print(f"[PROTOCOL] {spec.name}({payload!r}) rejected before sending")
+                client_rejected += 1
+                blocked += 1
             except DBusException as e:
                 name = e.get_dbus_name()
                 if "InvalidArgs" in name:
+                    helper_rejected += 1
                     blocked += 1
                 else:
                     # TODO: 修正前はsnapper由来の例外が多数混じる
                     # baselineとfixedで判定を分けるかどうか検討する
                     print(f"[OTHER] {spec.name}({payload!r}) → {name}: {e}")
 
-    print(f"\ntotal={total} blocked={blocked} leaked={leaked}")
+    print(f"\ntotal={total} blocked={blocked} leaked={leaked} "
+          f"helper_rejected={helper_rejected} client_rejected={client_rejected}")
     mode = "baseline" if os.environ.get("BASELINE") else "fixed"
     if mode == "fixed":
-        # 修正版では全てがInvalidArgsで弾かれるべき
-        return 0 if blocked == total else 1
+        # 修正版では、NULを含む名前は送信の前に、それ以外はヘルパーのInvalidArgsで、全てが弾かれるべき
+        nul_cases = len(SPECS) * sum(1 for n in MALICIOUS_NAMES if "\x00" in n)
+        expected = (blocked == total and client_rejected == nul_cases
+                    and helper_rejected == total - nul_cases)
+        return 0 if expected else 1
     else:
         # baselineでは少なくとも一部が検証をすり抜けるはず
         return 0 if blocked < total else 1

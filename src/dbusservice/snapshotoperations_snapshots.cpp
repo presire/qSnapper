@@ -67,8 +67,9 @@ bool SnapshotOperations::IsConfigured()
         std::list<snapper::ConfigInfo> configList = snapper::Snapper::getConfigs("/");
         return !configList.empty();
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to check if snapper is configured:" << e.what();
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Failed to check if snapper is configured";
         return false;
     }
 }
@@ -107,44 +108,63 @@ bool SnapshotOperations::WriteSnapperConfig(const QString &configName,
 /**
  * @brief 認可済みのWriteSnapperConfig本体
  *
+ * 共有のSnapperインスタンスのsetConfigInfo()は使わず、設定ファイルをその場で読み直したConfigInfoへ書き込む
+ *   - 共有のインスタンスは同じ名前の設定を再利用するため、設定が削除・再作成されていると、古い内容で上書きしてしまう
+ *   - setConfigInfo()はTIMELINE_CREATE=yesのときにsystemctlを起動してtimerを有効にする
+ *     本サービスは外部コマンドを起動せず、timerの操作は専用の認可 (manage-timers) を通すSetTimerEnabledに分ける
+ * 書き込む前に比較キャッシュ、一覧の指紋、共有のインスタンスの順に破棄し、古い設定に基づく結果を再利用させない
+ *
  * @param configName 検証済みSnapper設定名
  * @param settings 設定のキー/バリューマップ
  * @return 成功時: true、失敗時: false
+ * @note 認可を待つ間に入力が変わることはないが、検証を本体の直前にもう一度行い、検証を通らない値を決して書き込まない
  */
 bool SnapshotOperations::writeSnapperConfigAuthorized(
     const QString &configName, const QMap<QString, QString> &settings)
 {
-    try {
-        snapper::Snapper *snapper = getSnapper(configName);
-        if (!snapper) {
-            replyError(QDBusError::Failed, "Failed to initialize Snapper");
-            return false;
-        }
-
-        // 設定変更前にComparisonキャッシュを無効化 (mount/Filesが古い設定状態に依存しないように)
-        m_comparisonCache.clear();
-        m_snapshotListFingerprint.clear();
-
-        std::map<std::string, std::string> info;
-        for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
-            info[it.key().toStdString()] = it.value().toStdString();
-        }
-
-        snapper->setConfigInfo(info);
-        return true;
-    }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to write snapper config:" << e.what();
-        replyError(QDBusError::Failed, QStringLiteral("Failed to write config"));
+    if (!qsnapper::security::validateConfigName(configName)
+            || !qsnapper::security::validateSnapperConfigSettings(settings)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid config settings"));
         return false;
     }
+
+    // 共通ゲートで確認済みだが、共有のインスタンスを破棄する直前にも復元の実行中でないことを確かめる
+    if (rejectWhileRestoreRunning()) {
+        return false;
+    }
+
+    m_comparisonCache.clear();
+    m_snapshotListFingerprint.clear();
+    m_snapper.reset();
+    m_currentConfig.clear();
+
+    try {
+        // 設定ファイルが存在しない場合はコンストラクタが例外を送出するため、新しい設定ファイルを作ることはない
+        snapper::ConfigInfo info(configName.toStdString(), "/");
+        for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
+            info.set_value(it.key().toStdString(), it.value().toStdString());
+        }
+        // デストラクタによる暗黙の保存は失敗を握りつぶすため、明示的に保存して失敗を検出する
+        info.save();
+        return true;
+    }
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Failed to write snapper config";
+    }
+    catch (const std::exception &) {
+        qWarning() << "Failed to write snapper config";
+    }
+    replyError(QDBusError::Failed, QStringLiteral("Failed to write config"));
+    return false;
 }
 
 /**
  * @brief Snapperのクォータを設定
  *
  * 指定されたSnapper設定のクォータ機能を設定する
- * PolicyKit認証を必要とする
+ * qgroupの作成と設定ファイルのQGROUPの書き換えを伴い、設定値の編集とは影響の範囲が異なるため、
+ * configureとは別の専用のアクション (setup-quota) で認可する
  *
  * @param configName Snapper設定名
  * @return 成功時: true、失敗時: false
@@ -157,7 +177,7 @@ bool SnapshotOperations::SetupQuota(const QString &configName)
     }
 
     return authorizeThen<bool>(
-        QStringLiteral("com.presire.qsnapper.configure"),
+        QStringLiteral("com.presire.qsnapper.setup-quota"),
         [this, config = *cfg]() { return setupQuotaAuthorized(config); });
 }
 
@@ -179,9 +199,16 @@ bool SnapshotOperations::setupQuotaAuthorized(const QString &configName)
         snapper->setupQuota();
         return true;
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to setup quota:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to setup quota: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to setup quota";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
+        return false;
+    }
+    catch (const std::exception &) {
+        // libsnapper以外の例外 (メモリ不足など) でも、内容を載せずに固定の文言で失敗を返す
+        qWarning() << "Failed to setup quota";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return false;
     }
 }
@@ -194,12 +221,15 @@ bool SnapshotOperations::setupQuotaAuthorized(const QString &configName)
  * PolicyKit認証 (list-snapshots) を必要とする
  *
  * @return 設定名の配列、失敗時は空配列
+ * @note 共有のSnapperインスタンス・比較キャッシュ・mount状態に触れず、静的なgetConfigs()だけを使うため、
+ *       復元の実行中も許可する (復元中もGUIが設定の一覧を表示し続けられるようにするため)
  */
 QStringList SnapshotOperations::ListConfigs()
 {
     return authorizeThen<QStringList>(
         QStringLiteral("com.presire.qsnapper.list-snapshots"),
-        [this]() { return listConfigsAuthorized(); });
+        [this]() { return listConfigsAuthorized(); },
+        RestoreGatePolicy::AllowWhileRestoring);
 }
 
 /**
@@ -220,8 +250,9 @@ QStringList SnapshotOperations::listConfigsAuthorized()
         }
         return configs;
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to list snapper configs:" << e.what();
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログには載せない
+        qWarning() << "Failed to list snapper configs";
         return QStringList();
     }
 }
@@ -267,9 +298,10 @@ QString SnapshotOperations::listSnapshotsAuthorized(const QString &configName)
 
         return formatSnapshotToCSV(snapper);
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to list snapshots:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to list snapshots: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to list snapshots";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
 }
@@ -296,6 +328,12 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
         return QString();
     }
 
+    // 不正な値のために認可のプロンプトを出さないよう、認可の前にも判定する
+    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
+        return QString();
+    }
+
     return authorizeThen<QString>(
         QStringLiteral("com.presire.qsnapper.create-snapshot"),
         [this, config = *cfg, type, description, preNumber, cleanup, userdata,
@@ -316,6 +354,12 @@ QString SnapshotOperations::createSnapshotAuthorized(
     int preNumber, const QString &cleanup,
     const QMap<QString, QString> &userdata, bool important)
 {
+    // 本体を実行する直前にも判定し、検証を通らない値を決して保存しない
+    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
+        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
+        return QString();
+    }
+
     try {
         snapper::Snapper *snapper = getSnapper(configName);
         if (!snapper) {
@@ -439,9 +483,10 @@ QString SnapshotOperations::createSnapshotAuthorized(
         return csv;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to create snapshot:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to create snapshot: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to create snapshot";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return QString();
     }
 }
@@ -536,9 +581,10 @@ bool SnapshotOperations::modifySnapshotAuthorized(
         return true;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to modify snapshot:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to modify snapshot: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to modify snapshot";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return false;
     }
 }
@@ -616,9 +662,10 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
         return true;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to delete snapshot:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to delete snapshot: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to delete snapshot";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
@@ -787,9 +834,10 @@ bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, i
         return true;
 
     }
-    catch (const snapper::Exception &e) {
-        qWarning() << "Failed to rollback snapshot:" << e.what();
-        replyError(QDBusError::Failed, QString("Failed to rollback snapshot: %1").arg(e.what()));
+    catch (const snapper::Exception &) {
+        // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
+        qWarning() << "Failed to rollback snapshot";
+        replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
         return false;
     }
 }

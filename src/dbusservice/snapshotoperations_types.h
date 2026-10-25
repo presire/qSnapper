@@ -132,6 +132,30 @@ namespace qsnapper::security {
 
 namespace qsnapper::dbusservice {
 
+    // 復元の実行中に非復元操作を拒否するときのD-Busエラー
+    // クライアントはエラー名で判別するため、名前と本文は固定とし、config名やpathを含めない
+    // 隔離環境のテスト用サービスも同じ定数を使い、本番と同じ応答を返す
+    inline constexpr char RESTORE_IN_PROGRESS_ERROR_NAME[] = "com.presire.qsnapper.Error.RestoreInProgress";    // エラー名
+    inline constexpr char RESTORE_IN_PROGRESS_ERROR_TEXT[] = "A restore is in progress";                        // エラー本文
+
+    // snapperdへ転送したconfigやスナップショットの変更の実行中に、他の操作を拒否するときのD-Busエラー
+    // 変更の途中で共有のSnapperインスタンスを作り直したり復元を始めたりすると、変更前の状態を前提に動いてしまうため、完了まで拒否する
+    inline constexpr char OPERATION_IN_PROGRESS_ERROR_NAME[] = "com.presire.qsnapper.Error.OperationInProgress";  // エラー名
+    inline constexpr char OPERATION_IN_PROGRESS_ERROR_TEXT[] = "Another configuration change is in progress";    // エラー本文
+
+    // snapperdへ転送した変更の結果が分からないときのD-Busエラー
+    // 応答の期限切れやsnapperdの終了の後は、変更が行われたかどうかを判断できないため、成功とも失敗とも扱わず読み直しを促す
+    inline constexpr char OUTCOME_UNKNOWN_ERROR_NAME[] = "com.presire.qsnapper.Error.OutcomeUnknown";             // エラー名
+    inline constexpr char OUTCOME_UNKNOWN_ERROR_TEXT[] = "The result of the operation could not be confirmed";   // エラー本文
+
+    // 終わっていない復元計画があるため、configやスナップショットの削除を拒否するときのD-Busエラー
+    inline constexpr char RESTORE_PLAN_PENDING_ERROR_NAME[] = "com.presire.qsnapper.Error.RestorePlanPending";   // エラー名
+    inline constexpr char RESTORE_PLAN_PENDING_ERROR_TEXT[] = "A restore plan is pending";                       // エラー本文
+
+    // snapperdが保持するスナップショット一覧が本サービスの一覧と一致しないため、削除を転送しないときのD-Busエラー
+    inline constexpr char SNAPSHOT_LIST_OUTDATED_ERROR_NAME[] = "com.presire.qsnapper.Error.SnapshotListOutdated";   // エラー名
+    inline constexpr char SNAPSHOT_LIST_OUTDATED_ERROR_TEXT[] = "The snapshot list is out of date";                 // エラー本文
+
     /** @class RestoreExecution
      *  @brief 非同期復元計画がchunk間で必要とする固定実行コンテキスト
      */

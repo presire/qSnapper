@@ -5,7 +5,7 @@
  * SnapshotListPageのテーブル上部に表示する列見出し
  * 親から渡されたcolumnWidthsで各列幅を決め、行デリゲート (SnapshotTableRow) と列位置を揃える
  *
- * 入力 : columnWidths (親が管理する列幅オブジェクト、null時は既定幅を使用)
+ * 入力 : columnWidths (親が管理する列幅オブジェクト、重要フラグ列のimportantWidthを含む、null時は既定幅を使用)
  * 出力 : なし
  * 依存 : なし (QSnapperのC++型は未使用)
  */
@@ -51,6 +51,23 @@ Rectangle {
             Layout.preferredWidth: columnWidths ? columnWidths.typeWidth : 140
             horizontalAlignment: Text.AlignLeft
             leftPadding: 5
+        }
+
+        // 重要フラグ列
+        // SnapshotTableRowの重要マーカー列と同じ幅を確保して列を揃える
+        Label {
+            text: "!"
+            font.bold: true
+            font.pixelSize: 15
+            Layout.preferredWidth: root.columnWidths ? root.columnWidths.importantWidth : 40
+            horizontalAlignment: Text.AlignHCenter
+
+            HoverHandler {
+                id: importantHeaderHover
+            }
+
+            ToolTip.visible: importantHeaderHover.hovered
+            ToolTip.text: qsTr("Important snapshot")
         }
 
         // 開始日列

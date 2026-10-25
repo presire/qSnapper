@@ -142,6 +142,22 @@ cat >"$MAIN_CONF" <<'EOF'
            send_interface="org.freedesktop.DBus.Monitoring"/>
     <allow send_destination="org.freedesktop.DBus"
            send_interface="org.freedesktop.DBus.Debug.Stats"/>
+    <!-- タイマーのテストで使う偽のsystemd (fake_systemd1.py) のためのルール
+         偽物が org.freedesktop.systemd1 を所有し、ヘルパーとテストが宛先として呼び出せるようにする
+         制御用のインタフェースも同じバス名に載せるため、追加のルールは不要である
+         rootのポリシーだけに置き、既定の拒否は緩めない -->
+    <allow own="org.freedesktop.systemd1"/>
+    <allow send_destination="org.freedesktop.systemd1"/>
+    <!-- snapperd操作のテストで使う偽のsnapperd (fake_snapperd.py) のためのルール
+         偽物が org.opensuse.Snapper を所有し、ドライバが実際のsnapperdと同じ宛先へ変更要求を送れるようにする
+         実snapperdは起動せず、この隔離バス上の偽物だけを相手にする
+         rootのポリシーだけに置き、既定の拒否は緩めない -->
+    <allow own="org.opensuse.Snapper"/>
+    <allow send_destination="org.opensuse.Snapper"/>
+    <!-- 完了を確かめる照会をバスが拒否した場合の検査に使うメソッド名だけを拒否する
+         偽のsnapperdへは届かず、バスがエラーを返す -->
+    <deny send_destination="org.opensuse.Snapper" send_interface="org.opensuse.Snapper"
+          send_member="DeniedBarrier"/>
   </policy>
 
   <!-- Real qSnapper ACL: root-only ownership + per-member allowlist.

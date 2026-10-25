@@ -221,23 +221,6 @@ target_link_libraries(tst_csvrecord PRIVATE
 set_target_properties(tst_csvrecord PROPERTIES AUTOMOC ON)
 add_test(NAME tst_csvrecord COMMAND tst_csvrecord)
 
-# --- tst_fssnapshotstore ---
-# クライアント側のPreスナップショット番号ストアを確認する
-# 特に、保存先がユーザー単位のデータディレクトリであることを確認する
-add_executable(tst_fssnapshotstore
-    tst_fssnapshotstore.cpp
-    ${CMAKE_SOURCE_DIR}/src/fssnapshotstore.cpp
-)
-target_include_directories(tst_fssnapshotstore PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-)
-target_link_libraries(tst_fssnapshotstore PRIVATE
-    Qt6::Core
-    Qt6::Test
-)
-set_target_properties(tst_fssnapshotstore PROPERTIES AUTOMOC ON)
-add_test(NAME tst_fssnapshotstore COMMAND tst_fssnapshotstore)
-
 # --- tst_snapshotoperations ---
 # 実際のSnapshotOperationsを生成し、D-Busを介さずにスロットを直接呼んで復元計画の終端処理を検証する
 # 特権操作 (rootサブボリュームのrw化) はテスト用の差し替え関数で観測し、実システムには触れない
@@ -247,6 +230,12 @@ add_executable(tst_snapshotoperations
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_auth.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_snapshots.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/systemdtimeroperation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapperdoperation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/configpathvalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_configs.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/btrfsinfo.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_changes.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_diff.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_restore.cpp
@@ -260,6 +249,10 @@ add_executable(tst_snapshotoperations
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/systemdtimeroperation.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapperdoperation.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/configpathvalidation.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/btrfsinfo.h
 )
 target_include_directories(tst_snapshotoperations PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice
@@ -300,6 +293,33 @@ target_link_libraries(tst_singleinstanceguard PRIVATE
 set_target_properties(tst_singleinstanceguard PROPERTIES AUTOMOC ON)
 add_test(NAME tst_singleinstanceguard COMMAND tst_singleinstanceguard)
 
+# --- tst_snapshotdelete ---
+# GUIからスナップショットを削除する処理 (src/snapshotlistmodel.cpp) が、呼び出すD-Busメソッドを件数で使い分けることを確認する
+# 1件ならDeleteSnapshot、複数件ならDeleteSnapshotsを呼び出すことを確認する
+# テスト専用のdbus-daemonと偽のcom.presire.qsnapper.Operationsサービスを使うため、実際のシステムバスとヘルパには接続しない
+# snapperservice.cppがincludeするexternalurlopener.hはQDesktopServicesを使うため、Qt6::Guiもリンクする
+find_package(Qt6 REQUIRED COMPONENTS Gui DBus)
+add_executable(tst_snapshotdelete
+    tst_snapshotdelete.cpp
+    ${CMAKE_SOURCE_DIR}/src/snapshotlistmodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/snapperservice.cpp
+    ${CMAKE_SOURCE_DIR}/src/fssnapshot.cpp
+    ${CMAKE_SOURCE_DIR}/include/snapshotlistmodel.h
+    ${CMAKE_SOURCE_DIR}/include/snapperservice.h
+    ${CMAKE_SOURCE_DIR}/include/fssnapshot.h
+)
+target_include_directories(tst_snapshotdelete PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_snapshotdelete PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Gui
+    Qt6::Test
+)
+set_target_properties(tst_snapshotdelete PROPERTIES AUTOMOC ON)
+add_test(NAME tst_snapshotdelete COMMAND tst_snapshotdelete)
+
 # --- tst_externalurlopener ---
 # 外部ブラウザで開くURLの検証と、ポータル失敗時の直接起動への切り替え判定 (include/externalurlopener.h) を確認する
 find_package(Qt6 REQUIRED COMPONENTS Gui DBus)
@@ -319,11 +339,51 @@ target_link_libraries(tst_externalurlopener PRIVATE
 set_target_properties(tst_externalurlopener PROPERTIES AUTOMOC ON)
 add_test(NAME tst_externalurlopener COMMAND tst_externalurlopener)
 
+# --- tst_btrfsinfo ---
+# Btrfs情報のパス判定と表示用CSV整形を確認する
+# btrfsinfo.cppはlibbtrfsutilとinputvalidator.cppのsanitizeRecordText()に依存する
+add_executable(tst_btrfsinfo
+    tst_btrfsinfo.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/btrfsinfo.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/btrfsinfo.h
+    ${INPUTVALIDATOR_SOURCES}
+)
+target_include_directories(tst_btrfsinfo PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_btrfsinfo PRIVATE
+    Qt6::Core
+    Qt6::Test
+    btrfsutil
+)
+set_target_properties(tst_btrfsinfo PROPERTIES AUTOMOC ON)
+add_test(NAME tst_btrfsinfo COMMAND tst_btrfsinfo)
+
+# --- tst_configpathvalidation ---
+# 設定名とsubvolumeパスの検証、およびroot所有を前提としたパス判定を確認する
+# configpathvalidation.cppはQt Coreだけに依存し、D-Bus層を介さずに検証できる
+add_executable(tst_configpathvalidation
+    tst_configpathvalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/configpathvalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/configpathvalidation.h
+)
+target_include_directories(tst_configpathvalidation PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_configpathvalidation PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_configpathvalidation PROPERTIES AUTOMOC ON)
+add_test(NAME tst_configpathvalidation COMMAND tst_configpathvalidation)
+
 # ASan / UBSanを全テストに適用する
 # Debugビルドで"-DQSNAPPER_TEST_SANITIZE=ON"を指定した場合だけ有効になる
 # テストを追加した場合は、下記のターゲット一覧にも追加すること
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_fssnapshotstore tst_singleinstanceguard tst_externalurlopener)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

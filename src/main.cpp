@@ -25,6 +25,9 @@
 #include "snapshotgroupmodel.h"
 #include "singleinstanceguard.h"
 #include "windowstatemanager.h"
+#include "snappersettingsmodel.h"
+#include "configmanagermodel.h"
+#include "filesysteminfomodel.h"
 
 /**
  * @brief アプリケーションを起動する
@@ -97,6 +100,11 @@ int main(int argc, char *argv[])
     qmlRegisterType<SnapshotListModel>("QSnapper", 1, 0, "SnapshotListModel");
     qmlRegisterType<FileChangeModel>("QSnapper", 1, 0, "FileChangeModel");
     qmlRegisterType<SnapshotGroupModel>("QSnapper", 1, 0, "SnapshotGroupModel");
+    // SnapperSettingsModelとConfigManagerModelのQML_ELEMENTは、qmllintが参照する型情報を生成するために付けている
+    // 現在の構成では生成された登録だけでは起動できないため (実行時にSnapperSettingsModel is not a typeとなりMain.qmlを読み込めない)、既存の明示的な登録を残す
+    qmlRegisterType<SnapperSettingsModel>("QSnapper", 1, 0, "SnapperSettingsModel");
+    qmlRegisterType<ConfigManagerModel>("QSnapper", 1, 0, "ConfigManagerModel");
+    qmlRegisterType<FilesystemInfoModel>("QSnapper", 1, 0, "FilesystemInfoModel");
     qmlRegisterSingletonInstance("QSnapper", 1, 0, "SnapperService", SnapperService::instance());
     qmlRegisterSingletonInstance("QSnapper", 1, 0, "ThemeManager", ThemeManager::instance());
 

@@ -3,7 +3,7 @@
 Linux向けのBtrfs/Snapperファイルシステムスナップショットを管理するモダンなQt6/QML GUIアプリケーションです。  
 
 ![License](https://img.shields.io/badge/License-GPL%20v2%2B-blue.svg)  
-![Qt Version](https://img.shields.io/badge/Qt-6.2+-green.svg)  
+![Qt Version](https://img.shields.io/badge/Qt-6.5+-green.svg)  
 ![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)  
 
 <p align="center">
@@ -19,11 +19,19 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 ### 機能
 
 - **スナップショット管理**:  
-  ファイルシステムスナップショットの作成、表示、削除  
+  ファイルシステムスナップショットの作成、表示、比較、削除。複数選択による一括削除は1回の認証で実行し、削除できなかったスナップショットを報告  
 - **スナップショットタイプ**:  
   Single、Pre、Postスナップショットをサポート  
 - **クリーンアップポリシー**:  
-  NumberまたはTimelineアルゴリズムを使用した自動クリーンアップの設定  
+  スナップショット作成時にNumberまたはTimelineを選択可能。重要スナップショットは専用のNumber上限で数える  
+- **スナップショット設定**:  
+  選択中の設定のクリーンアップ上限、タイムライン上限、容量上限、バックグラウンド比較を編集  
+- **設定管理**:  
+  マウント済みのBtrfsサブボリュームに対するSnapper設定の作成と、名前入力による確認付きの設定削除  
+- **systemdタイマー**:  
+  snapperのタイマー状態を表示し、設定タブから有効化 / 無効化  
+- **ファイルシステム情報**:  
+  Btrfsのチャンクタイプ別 / デバイス別の割り当てと使用量、および要求時に読み込むサブボリューム一覧を読み取り専用で表示  
 - **ファイル比較**:
   スナップショット間の変更を詳細なdiffプレビューで表示
 - **Pre/Postスナップショット比較**:
@@ -33,7 +41,7 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 - **高速復元**:
   2つの復元モード — Direct Copy (高速、btrfs reflink対応)とYaST互換 — を搭載し、バッチサイズ設定とリアルタイム進捗ログを提供
 - **テーマサポート**:  
-  ライト/ダークモード切り替え対応  
+  ライト / ダークモードの切り替え、およびシステムテーマへの追従  
 - **国際化対応**:
   多言語サポート (英語、日本語、ドイツ語)
 - **モダンなUI**:  
@@ -45,13 +53,13 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 
 ### メインウィンドウ - スナップショット一覧
 
-メインウィンドウには、すべての利用可能なスナップショットがスナップショット番号、タイプ、タイムスタンプ、説明などの詳細情報とともに表示されます。  
+メインウィンドウにはスナップショット、設定、ファイルシステムの3つのタブがあります。スナップショットタブには、すべての利用可能なスナップショットがスナップショット番号、タイプ、重要マーク、開始 / 終了日時、説明、ユーザデータなどの詳細情報とともに表示されます。  
 
 <p align="center"><img src="ScreenShot/01_main_snapshot_list_jp.png" width="600" alt="スナップショット一覧"></p>
 
 ### スナップショット作成ダイアログ
 
-スナップショットタイプ (Single/Pre/Post)、説明、クリーンアップアルゴリズムなど、  
+スナップショットタイプ (Single/Pre/Post)、説明、クリーンアップアルゴリズム、重要フラグ、ユーザデータなど、  
 カスタマイズ可能なオプションで新しいスナップショットを作成できます。  
 
 <p align="center"><img src="ScreenShot/02_create_snapshot_dialog_jp.png" width="600" alt="スナップショット作成ダイアログ"></p>
@@ -69,15 +77,15 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 
 <p align="center"><img src="ScreenShot/04_restore_preview_dialog_jp.png" width="600" alt="復元プレビューダイアログ"></p>
 
-### 復元設定ダイアログ
+### 復元オプションダイアログ
 
-ファイル復元前に、復元方式（ダイレクトコピー / YaST互換）とバッチサイズを設定できます。  
+復元時に、復元方式 (ダイレクトコピー / YaST互換) とバッチサイズを復元オプションダイアログで設定できます。  
 
-<p align="center"><img src="ScreenShot/06_restore_settings_dialog_jp.png" width="600" alt="復元設定ダイアログ"></p>
+<p align="center"><img src="ScreenShot/06_restore_settings_dialog_jp.png" width="600" alt="復元オプションダイアログ"></p>
 
 ### スナップショット削除ダイアログ
 
-削除されるスナップショットを表示する安全確認ダイアログでスナップショットの削除を確認します。  
+削除されるスナップショットを確認する安全確認ダイアログでスナップショットの削除を確認します。操作が取り消せないことと管理者権限が必要なことを表示し、複数選択時は件数を示します。  
 
 <p align="center"><img src="ScreenShot/05_delete_snapshot_dialog_jp.png" width="600" alt="スナップショット削除ダイアログ"></p>  
 
@@ -86,7 +94,7 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 ### 実行時依存関係
 
 - Linuxオペレーティングシステム (必須)
-- Qt6 (>= 6.2)
+- Qt6 (>= 6.5)
   - Qt6 Core
   - Qt6 GUI
   - Qt6 Quick
@@ -94,6 +102,8 @@ Btrfsやその他のサポートされているファイルシステム上でフ
   - Qt6 Qml
   - Qt6 DBus
 - Snapper (>= 0.8.0)
+- SnapperのD-Busサービス (`org.opensuse.Snapper`、`snapper`パッケージが提供。設定の作成 / 削除と一括削除に必要)
+- libbtrfsutil (ファイルシステムタブに必要)
 - PolicyKit (polkit)
 - D-Bus
 
@@ -104,6 +114,7 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 - Qt6開発パッケージ
 - PolicyKit-Qt6開発ファイル
 - Snapper開発ヘッダー
+- libbtrfsutil開発ヘッダー
 - scdoc (オプション、manページ生成用。未インストールの場合はmanページ生成をスキップ)
 
 ## インストール
@@ -217,19 +228,34 @@ qSnapperは以下の方法で起動できます：
 ### スナップショットの作成
 
 1. 「スナップショット作成」ボタンをクリック
-2. スナップショットタイプを選択 (Single、Pre、Post)
-3. 説明を入力
-4. クリーンアップアルゴリズムを選択 (オプション)
-5. 「作成」をクリック
+2. 説明を入力 (必須)
+3. スナップショットタイプを選択
+   - **Single** は単独のスナップショットを作成します
+   - **Pre** は後でPostスナップショットとペアにできるPreスナップショットを作成します
+   - **Post** はPostを持たないPreスナップショットを選択している場合のみ選択でき、そのPreとペアになります
+4. クリーンアップアルゴリズム (None、Number、Timeline) を選択
+5. 必要に応じて重要スナップショットとしてマークします。重要スナップショットは一覧に `!` で表示され、Numberクリーンアップでは専用の上限で数えられます
+6. 必要に応じてユーザデータを `key=value` の行、またはカンマ区切りで入力
+7. 「作成」をクリック
 
 ### スナップショットの表示
 
-メインウィンドウには、すべてのスナップショットのリストが以下の情報とともに表示されます：  
+スナップショットタブには、すべてのスナップショットが以下の情報とともに表示されます：  
 - スナップショット番号
 - タイプ (Single、Pre、Post)
-- 日付と時刻
-- 作成したユーザ
+- 重要マーク (`!`)
+- 開始 / 終了日時
 - 説明
+- ユーザデータ
+
+Pre/Postのペアは1行にまとまり、ペアを選択すると両方のスナップショットが選択されます。  
+
+### スナップショットの削除
+
+チェックボックスで1つ以上のスナップショットを選択し、「選択を削除」をクリックします。  
+選択全体は1つの要求として送信され、認証は1回だけ必要です。  
+アクティブなローカルセッションで1つだけを削除する場合は、polkitが認可を一時的に保持するため、続けて1つずつ削除しても、保持の期間内であれば再度の認証は求められません。  
+一部のスナップショットを削除できなかった場合は、残りを削除したうえで失敗した件数を報告します。  
 
 ### スナップショットの比較
 
@@ -285,12 +311,35 @@ qSnapperは2つの復元方式を提供しており、復元確認ダイアロ�
 **注意**:  
 PreスナップショットとPostスナップショットの間の変更で新しいディレクトリ全体が作成された場合 (例えばパッケージインストールが `/etc/foo/` を追加した場合)、Preへ戻すとそのディレクトリは再帰的に削除され、その後で中に追加したファイル (例えば `/etc/foo/mine.conf`) も削除されます。これは `snapper undochange` と同じ動作であり、意図的なものです。  
 
+### 設定タブ
+
+設定タブでは、選択中のSnapper設定を編集できます：  
+- 設定情報 (サブボリューム、ファイルシステムタイプ、qgroup) は読み取り専用で表示されます
+- Numberクリーンアップ、Timelineクリーンアップ、空のPre/Postペアのクリーンアップ、容量上限、バックグラウンド比較の値を変更できます
+- Timeline作成の設定は `snapper-timeline.timer` が有効な間だけ効果があります
+- snapperのsystemdタイマーを有効化 / 無効化できます。タイマーはすべての設定で共有されます
+- テーマをライト、ダーク、システム追従から選択できます
+
+「新規...」はマウント済みのBtrfsサブボリュームに対する設定を作成します。`.snapshots` サブボリュームは自動的に作成され、ファイルシステムのルートは使用できません。  
+「削除...」は設定名を入力して確認したうえで設定を削除し、その設定内のすべてのスナップショットも削除されます。ルート設定はここでは作成も削除もできません。  
+
+### ファイルシステム
+
+ファイルシステムタブでは、選択中の設定についてBtrfsの情報を読み取り専用で表示します：  
+- 全体のサイズ、割り当て済み領域、未割り当て領域、ノードサイズ、セクタサイズ
+- チャンクタイプ別の領域 (プロファイル、割り当て済み合計、使用量)
+- デバイス別のサイズと割り当て済み領域
+- 要求時に読み込むサブボリューム一覧。Snapperのスナップショットを隠すオプション付き
+
+値はカーネルのBtrfs ioctlから取得するため、`btrfs filesystem usage` の出力と異なる場合があります。  
+サブボリューム一覧の読み込みには認証が必要で、読み取り専用です。長い一覧は上限で切り詰められ、その旨が表示されます。  
+
 ## 設定
 
 ### Snapperの設定
 
-qSnapperは既存のSnapper設定を使用します。  
-ルートファイルシステムのSnapper設定を行うには：  
+qSnapperは既存のSnapper設定を使用し、設定タブから設定の作成と削除も行えます。  
+ルートファイルシステムの設定は設定タブからは作成できないため、ルートで使用する前に以下のコマンドで作成してください。  
 
 ```bash
 sudo snapper -c root create-config /
@@ -307,7 +356,7 @@ sudo snapper -c <設定名> create-config <マウントポイント>
 - `~/.config/Presire/qSnapper.conf`
 
 設定内容：  
-- テーマモード (ライト、ダーク)
+- テーマモード (ライト、ダーク、システム追従)
 - ウィンドウの位置とサイズ
 - 復元方式 (Direct Copy / YaST互換)
 - 復元バッチサイズ (1〜1000)
@@ -321,8 +370,10 @@ qSnapperは、組み込みのThemeManagerを通じてテーマ切り替えをサ
    マテリアルデザインカラーに基づいた最適化された明るい配色  
 2. **ダークモード**:  
    低照度環境に適した快適なダーク配色  
+3. **システム**:  
+   デスクトップのライト / ダーク設定に追従  
 
-テーマ設定はアプリケーション設定に自動的に保存され、UIから切り替えることができます。  
+テーマ設定はユーザごとにアプリケーション設定へ保存され、設定タブで選択して「保存」ボタンを押すと反映されます。  
 
 ## トラブルシューティング
 
@@ -362,13 +413,14 @@ D-Bus接続エラーが表示される場合：
 
 ### Snapperが設定されていない
 
-Snapperが設定されていない場合：  
+Snapperが設定されていない場合、スナップショット一覧は空になります。  
+既存の設定を確認：  
 
 ```bash
 sudo snapper list-configs
 ```
 
-設定が存在しない場合は、設定セクションに示されているように作成してください。  
+使用するサブボリュームの設定が存在しない場合は、設定タブの「新規...」または設定セクションに示されているコマンドで作成してください。  
 
 ## 開発
 
@@ -394,48 +446,67 @@ qSnapper/
 │   ├── main.cpp                                    # GUIアプリケーションのエントリポイント
 │   ├── snapperservice.cpp                          # D-Busサービスを呼び出すクライアント側のインターフェース
 │   ├── fssnapshot.cpp                              # スナップショットのデータモデル (1件分)
-│   ├── fssnapshotstore.cpp                         # Preスナップショット番号のユーザ単位の永続化
 │   ├── snapshotlistmodel.cpp                       # スナップショットのリストモデル
 │   ├── snapshotgroupmodel.cpp                      # Pre/Postスナップショットのグループ化モデル
-│   ├── filechangemodel.cpp                         # ファイル変更のツリーモデル (比較、差分、復元計画)
-│   ├── thememanager.cpp                            # テーマ管理 (ライト/ダークモード)
+│   ├── configmanagermodel.cpp                      # Snapper設定のリストモデル
+│   ├── snappersettingsmodel.cpp                    # 設定値とタイマー状態のモデル
+│   ├── filesysteminfomodel.cpp                     # ファイルシステムの割り当て、使用量、サブボリュームのモデル
+│   ├── filechangemodel_loading.cpp                 # ファイル変更の読み込み (libsnapperの比較入力)
+│   ├── filechangemodel_model.cpp                   # ファイル変更のツリーモデル
+│   ├── filechangemodel_restore.cpp                 # 復元計画のステージングと実行
+│   ├── filechangemodel_transport.cpp               # 復元計画のD-Bus転送
+│   ├── thememanager.cpp                            # テーマ管理 (ライト、ダーク、システム)
 │   ├── windowstatemanager.cpp                      # ウィンドウサイズと最大化状態の永続化
 │   ├── singleinstanceguard.cpp                     # 多重起動の防止 (ロックファイルとローカルソケット)
 │   └── dbusservice/                                # 特権D-Busサービス (rootで動作)
 │       ├── main.cpp                                # サービスのエントリポイント (オブジェクト登録、ログ、アイドル終了)
-│       ├── snapshotoperations.{cpp,h}              # D-Busメソッドの実装 (スナップショット操作、復元計画、polkit認可)
+│       ├── snapshotoperations.{cpp,h}              # D-Busメソッドの入口とpolkit認可
+│       ├── snapshotoperations_*.cpp                # メソッド群 (スナップショット、変更、設定、タイマー、復元)
+│       ├── snapperdoperation.{cpp,h}               # 設定の作成 / 削除と一括削除でorg.opensuse.Snapperを呼び出す
+│       ├── btrfsinfo.{cpp,h}                       # カーネルのBtrfs ioctlとlibbtrfsutilのラッパー
+│       ├── systemdtimeroperation.{cpp,h}           # systemdタイマーの状態取得と有効化 / 無効化
 │       ├── inputvalidator.{cpp,h}                  # D-Bus経由の信頼できない入力の検証
+│       ├── configpathvalidation.{cpp,h}            # 設定名とサブボリュームパスの検証
 │       ├── filesystemhelpers.{cpp,h}               # ルート配下での安全なファイル操作 (symlinkを辿らない)
 │       ├── restoremanifest.{cpp,h}                 # 復元計画の管理 (呼び出し元への束縛、上限、保持期間)
 │       ├── restoreplanexecutor.{cpp,h}             # 凍結済み復元計画の分割実行
 │       ├── restorevalidation.{cpp,h}               # 復元先の組み立てと復元エントリの検証
 │       └── comparisoncache.h                       # libsnapperの比較結果の1件キャッシュ
 ├── include/                                        # GUIアプリケーションのヘッダーファイル
+│   ├── configmanagermodel.h                        # 設定のリストモデル
 │   ├── csvrecord.h                                 # CSVのクォートと解析 (サービスとクライアントで共用)
 │   ├── externalurlopener.h                         # http/httpsリンクをデスクトップポータル経由で開く
 │   ├── filechangemodel.h                           # ファイル変更モデルと復元計画の転送
+│   ├── filesysteminfomodel.h                       # ファイルシステム情報のモデル
 │   ├── fssnapshot.h                                # スナップショットのデータモデル
-│   ├── fssnapshotstore.h                           # Preスナップショット番号のストア
 │   ├── singleinstanceguard.h                       # 多重起動の防止
 │   ├── snapperservice.h                            # クライアント側のD-Busインターフェース
+│   ├── snappersettingsmodel.h                      # 設定値とタイマー状態のモデル
+│   ├── snappertimerstate.h                         # タイマーユニットの状態
 │   ├── snapshotgroupmodel.h                        # Pre/Postのグループ化モデル
 │   ├── snapshotlistmodel.h                         # スナップショットのリストモデル
 │   ├── thememanager.h                              # テーママネージャ
 │   └── windowstatemanager.h                        # ウィンドウ状態の管理
 ├── qml/                                            # QMLユーザインターフェース
-│   ├── Main.qml                                    # メインウィンドウ (テーマ対応)
+│   ├── Main.qml                                    # スナップショット、設定、ファイルシステムのタブを持つメインウィンドウ
 │   ├── pages/                                      # ページコンポーネント
-│   │   └── SnapshotListPage.qml                    # スナップショット一覧ページ
+│   │   ├── SnapshotListPage.qml                    # スナップショット一覧ページ
+│   │   ├── SettingsPage.qml                        # 設定の編集、タイマー、外観
+│   │   └── FilesystemPage.qml                      # Btrfsの割り当て、使用量、サブボリューム
 │   └── components/                                 # 再利用可能なコンポーネント
 │       ├── AboutQtDialog.qml                       # Qtについてのダイアログ
 │       ├── AboutqSnapperDialog.qml                 # qSnapperについてのダイアログ
 │       ├── BorderedDialog.qml                      # テーマに追従する枠付きダイアログの基底型
 │       ├── CompareSnapshotsDialog.qml              # 任意の2スナップショット間のファイル差分
+│       ├── CreateConfigDialog.qml                  # Snapper設定の作成
+│       ├── DeleteConfigDialog.qml                  # 名前入力による確認付きの設定削除
 │       ├── RestorePreviewDialog.qml                # 復元のプレビュー、オプション、進捗
+│       ├── SettingsFieldRow.qml                    # 設定値1項目の編集行
 │       ├── SnapshotDetailDialog.qml                # スナップショットの詳細、ファイル復元、ロールバック
 │       ├── SnapshotEditDialog.qml                  # スナップショットのメタデータ編集
 │       ├── SnapshotTableHeader.qml                 # スナップショットテーブルのヘッダ行
-│       └── SnapshotTableRow.qml                    # スナップショットテーブルの行デリゲート
+│       ├── SnapshotTableRow.qml                    # スナップショットテーブルの行デリゲート
+│       └── TimerSettingsSection.qml                # systemdタイマーの状態と有効化 / 無効化
 ├── dbus/                                           # D-Bus設定ファイル
 │   ├── com.presire.qsnapper.Operations.conf        # バスポリシー (許可するメソッド)
 │   ├── com.presire.qsnapper.Operations.service.in  # サービス起動定義のテンプレート

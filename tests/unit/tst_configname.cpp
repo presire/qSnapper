@@ -8,10 +8,15 @@
  */
 
 #include <QtTest/QtTest>
+#include <QSet>
 #include <QString>
+#include <QStringList>
 
 #include "inputvalidator.h"
 
+using qsnapper::security::canonicalSnapperTimerUnit;
+using qsnapper::security::editableSnapperConfigKeys;
+using qsnapper::security::snapperTimerUnits;
 using qsnapper::security::validateConfigName;
 using qsnapper::security::validateSnapperConfigSettings;
 
@@ -54,6 +59,20 @@ private slots:
     void settingsReject_data();
     /** @brief 設定マップが拒否されることを確認する */
     void settingsReject();
+
+    // 設定画面が編集する18キー
+    /** @brief 編集可能キーの一覧が18個で、すべて検証を通ることを確認する */
+    void editableKeysAccepted();
+    /** @brief 編集可能キーの値に注入用の文字が含まれる場合に拒否されることを確認する */
+    void editableKeysRejectInjection();
+
+    // SetTimerEnabledのユニット名
+    /** @brief 管理対象の3つのタイマだけが受け入れられることを確認する */
+    void timerUnitAccept();
+    /** @brief ユニット名として拒否すべき入力のデータ行を定義する */
+    void timerUnitReject_data();
+    /** @brief 許可リスト外のユニット名が拒否されることを確認する */
+    void timerUnitReject();
 };
 
 /**
@@ -158,7 +177,7 @@ void TestConfigName::settingsAccept_data()
 {
     QTest::addColumn<SettingsMap>("settings");
 
-    // クライアント (SnapperService::writeSnapperConfig) が実際に送る組み合わせ
+    // 削除前のクライアントが送っていた組み合わせ (互換性の確認として残す)
     QTest::newRow("client defaults") << SettingsMap{
         { QStringLiteral("NUMBER_CLEANUP"),         QStringLiteral("yes") },
         { QStringLiteral("NUMBER_LIMIT"),           QStringLiteral("2-10") },
@@ -235,6 +254,112 @@ void TestConfigName::settingsReject()
 {
     QFETCH(SettingsMap, settings);
     QVERIFY(!validateSnapperConfigSettings(settings));
+}
+
+/**
+ * @brief 編集可能キーの一覧が18個で、各キーが検証を通ることを確認する
+ *
+ * 設定画面は一覧の全キーを送り得るため、一覧と検証の許可リストが食い違うと、画面からの保存が必ず失敗する
+ * 種別ごとに有効な値を1つずつ与えて確認する
+ */
+void TestConfigName::editableKeysAccepted()
+{
+    const QStringList &keys = editableSnapperConfigKeys();
+    QCOMPARE(keys.size(), 18);
+    QCOMPARE(QSet<QString>(keys.begin(), keys.end()).size(), 18);
+
+    const QStringList validValues = {
+        QStringLiteral("yes"), QStringLiteral("0"), QStringLiteral("2-10"), QStringLiteral("0.5"),
+    };
+    for (const QString &key : keys) {
+        bool accepted = false;
+        for (const QString &value : validValues) {
+            if (validateSnapperConfigSettings(SettingsMap{ { key, value } })) {
+                accepted = true;
+                break;
+            }
+        }
+        QVERIFY2(accepted, qPrintable(key));
+    }
+
+    // 読み取り専用の項目は一覧に含めない (設定画面から書き換えさせないため)
+    QVERIFY(!keys.contains(QStringLiteral("SUBVOLUME")));
+    QVERIFY(!keys.contains(QStringLiteral("FSTYPE")));
+    QVERIFY(!keys.contains(QStringLiteral("QGROUP")));
+    QVERIFY(!keys.contains(QStringLiteral("ALLOW_USERS")));
+}
+
+/**
+ * @brief 編集可能キーの値に改行、NUL、制御文字、引用符が含まれる場合に拒否されることを確認する
+ *
+ * libsnapperは値を引用符で囲んで書き出すだけでエスケープしないため、これらの文字は別のキーの注入につながる
+ */
+void TestConfigName::editableKeysRejectInjection()
+{
+    const QStringList suffixes = {
+        QStringLiteral("\n"), QStringLiteral("\r"), QString(QChar(u'\0')), QString(QChar(0x01)),
+        QString(QChar(0x7F)), QStringLiteral("\""), QStringLiteral("'"), QStringLiteral(" "),
+    };
+    for (const QString &key : editableSnapperConfigKeys()) {
+        for (const QString &suffix : suffixes) {
+            for (const QString &value : { QStringLiteral("yes"), QStringLiteral("0"), QStringLiteral("0.5") }) {
+                QVERIFY2(!validateSnapperConfigSettings(SettingsMap{ { key, value + suffix } }), qPrintable(key));
+                QVERIFY2(!validateSnapperConfigSettings(SettingsMap{ { key, suffix + value } }), qPrintable(key));
+            }
+        }
+    }
+}
+
+/**
+ * @brief 管理対象の3つのタイマだけが受け入れられ、許可リスト内の定数が返ることを確認する
+ */
+void TestConfigName::timerUnitAccept()
+{
+    const QStringList expected = {
+        QStringLiteral("snapper-timeline.timer"),
+        QStringLiteral("snapper-cleanup.timer"),
+        QStringLiteral("snapper-boot.timer"),
+    };
+    QCOMPARE(snapperTimerUnits(), expected);
+    for (const QString &unit : expected) {
+        const std::optional<QString> canonical = canonicalSnapperTimerUnit(unit);
+        QVERIFY(canonical.has_value());
+        QCOMPARE(*canonical, unit);
+    }
+}
+
+/**
+ * @brief ユニット名として拒否すべき入力を定義する
+ *
+ * 別のサービス、テンプレートユニット、パス区切り、改行、大文字小文字違い、前後の空白、ユニットのパスを含む
+ */
+void TestConfigName::timerUnitReject_data()
+{
+    QTest::addColumn<QString>("unit");
+
+    QTest::newRow("empty")            << QString();
+    QTest::newRow("other service")    << QStringLiteral("sshd.service");
+    QTest::newRow("other timer")      << QStringLiteral("fstrim.timer");
+    QTest::newRow("snapper service")  << QStringLiteral("snapper-timeline.service");
+    QTest::newRow("template")         << QStringLiteral("snapper-timeline@root.timer");
+    QTest::newRow("absolute path")    << QStringLiteral("/usr/lib/systemd/system/snapper-timeline.timer");
+    QTest::newRow("relative path")    << QStringLiteral("../snapper-timeline.timer");
+    QTest::newRow("slash")            << QStringLiteral("x/snapper-timeline.timer");
+    QTest::newRow("trailing LF")      << QStringLiteral("snapper-timeline.timer\n");
+    QTest::newRow("trailing NUL")     << QStringLiteral("snapper-timeline.timer") + QChar(u'\0');
+    QTest::newRow("leading space")    << QStringLiteral(" snapper-timeline.timer");
+    QTest::newRow("uppercase")        << QStringLiteral("SNAPPER-TIMELINE.TIMER");
+    QTest::newRow("no suffix")        << QStringLiteral("snapper-timeline");
+    QTest::newRow("glob")             << QStringLiteral("snapper-*.timer");
+}
+
+/**
+ * @brief 許可リスト外のユニット名が拒否されることを確認する
+ */
+void TestConfigName::timerUnitReject()
+{
+    QFETCH(QString, unit);
+    QVERIFY(!canonicalSnapperTimerUnit(unit).has_value());
 }
 
 QTEST_APPLESS_MAIN(TestConfigName)

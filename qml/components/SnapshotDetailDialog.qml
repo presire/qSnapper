@@ -9,7 +9,8 @@
  * 出力 : なし (ロールバック結果はsnapshotListModelのシグナルで受け取る)
  * 依存 : BorderedDialog (基底)、RestorePreviewDialog (個別復元)、
  *        SnapshotListModel::rollbackSnapshot / rollbackCompleted / rollbackFailed (ロールバック)、
- *        SnapperService::currentConfig (ロールバック可否判定)、ThemeManager (警告色とダーク判定)
+ *        SnapperSettingsModel::rollbackSupported (ロールバック可否判定)、SnapperService::currentConfig (判定対象の設定名)、
+ *        ThemedGroupBox (情報のグループ枠)、ThemeManager (警告色とダーク判定)
  */
 import QtQuick
 import QtQuick.Controls
@@ -36,6 +37,25 @@ BorderedDialog {
     property var snapshot: null                       // 表示するスナップショット情報
     property var postSnapshot: null                   // Pre/Postペア時のPost情報
     property var snapshotListModel: null              // スナップショットリストモデルへの参照
+
+    // ロールバック可否の判定に使う設定情報 (SUBVOLUMEとFSTYPE)
+    // 設定名からでは判定できないため、特権サービスから実際の設定を読み込んで判定する
+    // SnapperSettingsModelとSnapperServiceはmain.cppで実行時に登録する型のため、qmllintは型情報を持たず警告する
+    // 既存の型 (SnapshotListModelなど) と同じ理由の警告なので、この宣言と参照の箇所だけ抑止する
+    // qmllint disable import missing-property unqualified
+    SnapperSettingsModel {
+        id: rollbackSettings
+        configName: SnapperService.currentConfig
+    }
+    // qmllint enable import missing-property unqualified
+
+    // ダイアログを開くたびに設定を読み込み直す
+    // 設定画面での変更や設定の切り替えを反映するためで、読み込みが終わるまではrollbackSupportedがfalseのため
+    // ロールバックは無効のままになる (判定できない場合に許可しない)
+    // SnapperSettingsModel::reloadを呼び出し、特権サービスのGetConfigで取得する
+    // qmllint disable missing-property
+    onOpened: rollbackSettings.reload()
+    // qmllint enable missing-property
 
     // 復元プレビューダイアログ
     // 個別ファイル/ディレクトリ復元用
@@ -70,7 +90,7 @@ BorderedDialog {
 
                 // 基本情報グループ
                 // スナップショット番号、タイプ、日時、ユーザ等を表示する
-                GroupBox {
+                ThemedGroupBox {
                     title: qsTr("Basic Information")
                     Layout.fillWidth: true
 
@@ -171,7 +191,7 @@ BorderedDialog {
                 }
 
                 // 説明グループ
-                GroupBox {
+                ThemedGroupBox {
                     title: qsTr("Description")
                     Layout.fillWidth: true
 
@@ -185,7 +205,7 @@ BorderedDialog {
 
                 // ユーザデータグループ
                 // Snapperに保存されたカスタムメタデータを表示する
-                GroupBox {
+                ThemedGroupBox {
                     title: qsTr("User Data")
                     Layout.fillWidth: true
                     visible: snapshot && snapshot.userdata && Object.keys(snapshot.userdata).length > 0
@@ -239,12 +259,20 @@ BorderedDialog {
             }
 
             // システムロールバックボタン
-            // ロールバックはrootファイルシステムの設定でのみ可能 (サービス側でもSUBVOLUMEとFSTYPEで拒否する)
+            // ロールバックは、btrfsのルート (SUBVOLUMEが/) の設定でのみ可能 (サービス側でもSUBVOLUMEとFSTYPEで拒否する)
+            // 設定名では判定せず、読み込んだ設定の内容で判定する
+            // 読み込み中と読み込み失敗では無効のままにする (判定できない場合に許可しない)
             Button {
                 text: qsTr("System Rollback")
                 icon.name: "view-refresh"
                 icon.color: ThemeManager.isDark ? "#FFFFFF" : palette.buttonText
-                enabled: SnapperService.currentConfig === "root"   // root設定以外では無効化する
+                // 再表示時は前回の判定が残っているため、読み込み中も無効にして今回の結果だけで判定する
+                // qmllint disable missing-property
+                enabled: rollbackSettings.rollbackSupported && !rollbackSettings.configBusy
+                // qmllint enable missing-property
+                // Main.qmlがパレットの色をバインディングで指定しているため、Fusionスタイルは無効状態でも文字色を灰色に切り替えない
+                // そのため、無効状態であることは不透明度を下げて示す
+                opacity: enabled ? 1.0 : 0.45
                 onClicked: confirmDialog.open()
             }
 
@@ -261,7 +289,7 @@ BorderedDialog {
     }
 
     // システムロールバック確認ダイアログ
-    // 破壊的操作のため、実行前に管理者権限が必要な旨を提示して確認する
+    // 破壊的操作のため、実行前に管理者権限が必要な旨と、再起動が必要な点を提示して確認する
     BorderedDialog {
         id: confirmDialog
         title: qsTr("Confirmation")
@@ -274,11 +302,11 @@ BorderedDialog {
             var calculated = ApplicationWindow.window.width * 0.4
             return Math.min(Math.max(calculated, 500), 800)
         }
-        // ウィンドウ高さの30%を基準に、250から600の範囲へクランプする
+        // ウィンドウ高さの30%を基準に、360から600の範囲へクランプする (再起動に関する警告文を含めるため下限を大きくしている)
         height: {
-            if (!ApplicationWindow.window) return 250
+            if (!ApplicationWindow.window) return 360
             var calculated = ApplicationWindow.window.height * 0.3
-            return Math.min(Math.max(calculated, 250), 600)
+            return Math.min(Math.max(calculated, 360), 600)
         }
 
         ColumnLayout {
@@ -299,6 +327,16 @@ BorderedDialog {
             // 管理者権限が必要である点を警告色で明示する
             Label {
                 text: qsTr("Note: This operation requires administrator privileges.")
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 400
+                color: ThemeManager.warningColor
+                font.italic: true
+            }
+
+            // ロールバック後は再起動が必要で、再起動までに行った変更は既定では起動されないことを警告する
+            // (ロールバックは既定のサブボリュームを切り替えるだけで、再起動までの変更は現在起動中のサブボリューム側に残るため)
+            Label {
+                text: qsTr("A reboot is required after the rollback. Changes made after the rollback and before the reboot are not booted by default, because they remain in the currently running subvolume.")
                 wrapMode: Text.WordWrap
                 Layout.preferredWidth: 400
                 color: ThemeManager.warningColor

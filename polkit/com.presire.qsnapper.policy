@@ -102,4 +102,130 @@
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
   </action>
+
+  <action id="com.presire.qsnapper.view-config">
+    <description>View Snapper configuration</description>
+    <description xml:lang="ja">Snapper設定を表示</description>
+    <description xml:lang="de">Snapper-Konfiguration anzeigen</description>
+    <message>Authentication is required to view the Snapper configuration</message>
+    <message xml:lang="ja">Snapper設定を表示するには認証が必要です</message>
+    <message xml:lang="de">Zum Anzeigen der Snapper-Konfiguration ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.view-timers">
+    <description>View the state of the Snapper timers</description>
+    <description xml:lang="ja">Snapperタイマーの状態を表示</description>
+    <description xml:lang="de">Status der Snapper-Timer anzeigen</description>
+    <message>Authentication is required to view the state of the Snapper timers</message>
+    <message xml:lang="ja">Snapperタイマーの状態を表示するには認証が必要です</message>
+    <message xml:lang="de">Zum Anzeigen des Status der Snapper-Timer ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.manage-timers">
+    <description>Enable or disable the Snapper timers</description>
+    <description xml:lang="ja">Snapperタイマーを有効化または無効化</description>
+    <description xml:lang="de">Snapper-Timer aktivieren oder deaktivieren</description>
+    <message>Authentication is required to enable or disable the Snapper timers</message>
+    <message xml:lang="ja">Snapperタイマーを有効化または無効化するには認証が必要です</message>
+    <message xml:lang="de">Zum Aktivieren oder Deaktivieren der Snapper-Timer ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.setup-quota">
+    <description>Set up the Btrfs quota for Snapper</description>
+    <description xml:lang="ja">SnapperのBtrfsクォータを設定</description>
+    <description xml:lang="de">Btrfs-Quota für Snapper einrichten</description>
+    <message>Authentication is required to set up the Btrfs quota for Snapper</message>
+    <message xml:lang="ja">SnapperのBtrfsクォータを設定するには認証が必要です</message>
+    <message xml:lang="de">Zum Einrichten der Btrfs-Quota für Snapper ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.create-config">
+    <description>Create a Snapper configuration</description>
+    <description xml:lang="ja">Snapperの設定を作成</description>
+    <description xml:lang="de">Snapper-Konfiguration erstellen</description>
+    <message>Authentication is required to create a Snapper configuration</message>
+    <message xml:lang="ja">Snapperの設定を作成するには認証が必要です</message>
+    <message xml:lang="de">Zum Erstellen einer Snapper-Konfiguration ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.delete-config">
+    <description>Delete a Snapper configuration and all of its snapshots</description>
+    <description xml:lang="ja">Snapperの設定と、その全てのスナップショットを削除</description>
+    <description xml:lang="de">Snapper-Konfiguration und alle ihre Schnappschüsse löschen</description>
+    <message>Authentication is required to delete a Snapper configuration and all of its snapshots</message>
+    <message xml:lang="ja">Snapperの設定と、その全てのスナップショットを削除するには認証が必要です</message>
+    <message xml:lang="de">Zum Löschen einer Snapper-Konfiguration und aller ihrer Schnappschüsse ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.delete-snapshots">
+    <description>Delete multiple snapshots</description>
+    <description xml:lang="ja">複数のスナップショットを削除</description>
+    <description xml:lang="de">Mehrere Schnappschüsse löschen</description>
+    <message>Authentication is required to delete multiple snapshots</message>
+    <message xml:lang="ja">複数のスナップショットを削除するには認証が必要です</message>
+    <message xml:lang="de">Zum Löschen mehrerer Schnappschüsse ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.view-filesystem">
+    <description>View the Btrfs space usage</description>
+    <description xml:lang="ja">Btrfsの使用量を表示</description>
+    <description xml:lang="de">Btrfs-Speichernutzung anzeigen</description>
+    <message>Authentication is required to view the Btrfs space usage</message>
+    <message xml:lang="ja">Btrfsの使用量を表示するには認証が必要です</message>
+    <message xml:lang="de">Zum Anzeigen der Btrfs-Speichernutzung ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.presire.qsnapper.list-subvolumes">
+    <description>List the Btrfs subvolumes</description>
+    <description xml:lang="ja">Btrfsのサブボリュームの一覧を表示</description>
+    <description xml:lang="de">Btrfs-Subvolumes auflisten</description>
+    <message>Authentication is required to list the Btrfs subvolumes</message>
+    <message xml:lang="ja">Btrfsのサブボリュームの一覧を表示するには認証が必要です</message>
+    <message xml:lang="de">Zum Auflisten der Btrfs-Subvolumes ist eine Legitimierung erforderlich.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

@@ -3,7 +3,7 @@
  * @brief スナップショットテーブルの行デリゲート
  *
  * SnapshotGroupModelの1グループをテーブル行として表示する
- * 選択チェックボックス、種別、開始/終了日時、説明、ユーザデータ、詳細ボタンを持つ
+ * 選択チェックボックス、種別、重要マーカー、開始/終了日時、説明、ユーザデータ、詳細ボタンを持つ
  *
  * 入力 : SnapshotGroupModelのロール (displayId / groupType / groupTypeString / startTime / endTime /
  *        description / user / userdata / preNumber / postNumber / cleanupAlgoString / isImportant)、
@@ -32,6 +32,9 @@ ItemDelegate {
     required property int postNumber            // Post番号 (無い場合は0)
     required property string cleanupAlgoString  // クリーンアップアルゴリズム文字列
     required property bool isImportant          // 重要フラグ
+
+    // ThemeManagerシングルトンへの参照を1か所に集約する (qmllintはqmlRegisterSingletonInstanceの型を解決できず、参照ごとに警告するため)
+    readonly property var theme: ThemeManager
 
     property var listModel: null                // SnapshotListModelへの参照 (現状は未使用)
     property var detailDialog: null             // 詳細ダイアログへの参照
@@ -81,15 +84,15 @@ ItemDelegate {
                 color: {
                     switch (root.groupTypeString) {
                     case "single":
-                        return ThemeManager.snapshotTypeSingle
+                        return root.theme.snapshotTypeSingle
                     case "prepost":
-                        return ThemeManager.snapshotTypePost
+                        return root.theme.snapshotTypePost
                     case "pre":
-                        return ThemeManager.snapshotTypePre
+                        return root.theme.snapshotTypePre
                     case "post":
-                        return ThemeManager.snapshotTypePost
+                        return root.theme.snapshotTypePost
                     default:
-                        return ThemeManager.snapshotTypeDefault
+                        return root.theme.snapshotTypeDefault
                     }
                 }
             }
@@ -114,6 +117,41 @@ ItemDelegate {
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
+        }
+
+        // 重要フラグ列
+        // 重要なスナップショットだけにマーカーを描き、それ以外は空欄にして一覧での見分けを付けやすくする
+        Item {
+            Layout.preferredWidth: root.columnWidths ? root.columnWidths.importantWidth : 40
+            Layout.maximumWidth: Layout.preferredWidth   // 親の伸縮に追従せず固定幅を維持する
+            Layout.fillHeight: true
+
+            // 重要色の円と感嘆符 (色だけに頼らず形でも伝える)
+            Rectangle {
+                visible: root.isImportant
+                anchors.centerIn: parent
+                width: 20
+                height: 20
+                radius: 10
+                color: root.theme.importantColor
+
+                Label {
+                    anchors.centerIn: parent
+                    text: "!"
+                    font.bold: true
+                    font.pixelSize: 14
+                    // 重要色 (黄系) の上でLight/Darkとも読めるよう、暗い文字色に固定する
+                    color: "#212121"
+                }
+            }
+
+            HoverHandler {
+                id: importantHover
+                enabled: root.isImportant
+            }
+
+            ToolTip.visible: root.isImportant && importantHover.hovered
+            ToolTip.text: qsTr("Important snapshot")
         }
 
         // 開始日列

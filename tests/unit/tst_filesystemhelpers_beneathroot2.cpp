@@ -411,7 +411,7 @@ void TestFilesystemHelpers::beneathRootStaleResolutionStillRejected()
     swapComponentToSymlink(rootDir, outsideDir, {QStringLiteral("a")});
 
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -457,7 +457,7 @@ void TestFilesystemHelpers::beneathRootRepeatedSwapsDoNotLeakDescriptors()
 
     for (int i = 0; i < 50; ++i) {
         errno = 0;
-        const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+        const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
         const int err = errno;
         QVERIFY(fd < 0);
         QVERIFY(isAttackRejectionErrno(err));
@@ -473,7 +473,7 @@ void TestFilesystemHelpers::beneathRootRepeatedSwapsDoNotLeakDescriptors()
     QVERIFY(beforeSuccess >= 0);
     for (int i = 0; i < 10; ++i) {
         const QString okPath = rootDir.path() + QStringLiteral("/ok/loop%1.txt").arg(i);
-        const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), okPath, 0644);
+        const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), okPath, 0644);
         QVERIFY(fd >= 0);
         QCOMPARE(::write(fd, "x", 1), 1);
         ::close(fd);
@@ -494,11 +494,11 @@ void TestFilesystemHelpers::beneathRootHandlesMalformedInputsSafely()
     QVERIFY(rootDir.isValid());
 
     // 空の宛先 / "/" / root自身
-    QVERIFY(safeOpenRegularFileWriteBeneathRoot(rootDir.path(), QString(), 0644) < 0);
+    QVERIFY(safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), QString(), 0644) < 0);
     QCOMPARE(errno, EINVAL);
-    QVERIFY(safeOpenRegularFileWriteBeneathRoot(rootDir.path(), QStringLiteral("/"), 0644) < 0);
+    QVERIFY(safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), QStringLiteral("/"), 0644) < 0);
     QCOMPARE(errno, EINVAL);
-    QVERIFY(safeOpenRegularFileWriteBeneathRoot(rootDir.path(), rootDir.path(), 0644) < 0);
+    QVERIFY(safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), rootDir.path(), 0644) < 0);
     QCOMPARE(errno, EINVAL);
 
     // 連続スラッシュは正規化されてroot配下に収まる (write系は親を作らないため先に作成)
@@ -507,7 +507,7 @@ void TestFilesystemHelpers::beneathRootHandlesMalformedInputsSafely()
     QVERIFY(QDir(rootDir.path() + QStringLiteral("/messy/dir")).exists());
 
     const QString messyPath = messyDir + QStringLiteral("/file.txt");
-    const int messyFd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), messyPath, 0644);
+    const int messyFd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), messyPath, 0644);
     QVERIFY(messyFd >= 0);
     ::close(messyFd);
     QVERIFY(QFile::exists(rootDir.path() + QStringLiteral("/messy/dir/file.txt")));
@@ -518,7 +518,7 @@ void TestFilesystemHelpers::beneathRootHandlesMalformedInputsSafely()
         deepRelative += QStringLiteral("d%1/").arg(i % 10);
     }
     deepRelative += QStringLiteral("leaf.txt");
-    const int deepFd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), deepRelative, 0644);
+    const int deepFd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), deepRelative, 0644);
     if (deepFd >= 0) {
         ::close(deepFd);
         QVERIFY(QFile::exists(rootDir.path() + QLatin1Char('/') + deepRelative));
@@ -530,7 +530,7 @@ void TestFilesystemHelpers::beneathRootHandlesMalformedInputsSafely()
     // 非UTF8バイト列はQString化時に置換文字へ正規化され、root配下で安全に扱われる
     const QString nonUtf8 = QString::fromUtf8(QByteArray("\xff\xfe\x80" "bad"));
     const QString nonUtf8Destination = rootDir.path() + QLatin1Char('/') + nonUtf8;
-    const int nonUtf8Fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), nonUtf8Destination,
+    const int nonUtf8Fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), nonUtf8Destination,
                                                               0644);
     if (nonUtf8Fd >= 0) {
         ::close(nonUtf8Fd);
@@ -547,7 +547,7 @@ void TestFilesystemHelpers::beneathRootHandlesMalformedInputsSafely()
     QVERIFY(safeCreateDirectoryBeneathRoot(rootDir.path(),
                                            rootDir.path() + QStringLiteral("/a"), 0755));
     errno = 0;
-    QVERIFY(safeOpenRegularFileWriteBeneathRoot(rootDir.path(), nulDestination, 0644) < 0);
+    QVERIFY(safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), nulDestination, 0644) < 0);
     QCOMPARE(errno, EINVAL);
 }
 
@@ -579,7 +579,7 @@ void TestFilesystemHelpers::beneathRootRejectsSymlinkInRootPathAncestry()
                                         | QDir::NoDotAndDotDot).isEmpty());
 
     errno = 0;
-    QVERIFY(safeOpenRegularFileWriteBeneathRoot(swappedRoot,
+    QVERIFY(safeOpenRegularFileWriteBeneathRootForTesting(swappedRoot,
                                                 swappedRoot + QStringLiteral("/f.txt"),
                                                 0644) < 0);
     QVERIFY(isAttackRejectionErrno(errno));

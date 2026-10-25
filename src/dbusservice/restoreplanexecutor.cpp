@@ -352,6 +352,16 @@ void RestorePlanExecutor::processChunk(const QString &id)
     }
 
     if (boundary->state == ManifestState::Cancelled) {
+        // 取消要求を受けたchunkで処理済みの件数と内訳を終端状態へ記録する
+        // cursorと削除・スキップの内訳を進めないと、GetRestorePlanStatusが実際より少ない件数を報告する
+        // Cancelledは終端でmarkRunningを受け付けないため、記録のためのadvanceで実行が再開されることはない
+        if (appliedCount > 0) {
+            ManifestError advanceError = ManifestError::None;
+            if (!m_registry.advance(id, owner, appliedCount, tally, &advanceError)) {
+                // 記録に失敗してもキャンセルを失敗へ変えない
+                // 利用者の取消意思を優先し、終端通知はCancelledのまま出す
+            }
+        }
         for (int index = 0; index < appliedCount; ++index) {
             if (!m_activePlans.contains(id)) {
                 return;

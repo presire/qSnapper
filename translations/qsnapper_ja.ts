@@ -343,187 +343,187 @@
         <translation>サブボリューム一覧を取得できませんでした: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="128"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="130"/>
         <source>Filesystem: %1</source>
         <translation>ファイルシステム: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="128"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="130"/>
         <source>(none)</source>
         <translation>(なし)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="145"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="147"/>
         <source>Refresh</source>
         <translation>更新</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="202"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="204"/>
         <source>No configuration is selected. Select a configuration on the Settings tab.</source>
         <translation>設定が選択されていません。設定タブで設定を選択してください</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="212"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="214"/>
         <source>Overview</source>
         <translation>概要</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="223"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="225"/>
         <source>These values come from the Btrfs space information and can differ from the output of btrfs filesystem usage.</source>
         <translation>これらの値はBtrfsのスペース情報から取得しており、btrfs filesystem usageの出力とは異なる場合があります</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="232"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="234"/>
         <source>Size:</source>
         <translation>サイズ:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="239"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="241"/>
         <source>Allocated:</source>
         <translation>割り当て済み:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="246"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="248"/>
         <source>Unallocated:</source>
         <translation>未割り当て:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="253"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="255"/>
         <source>Node size:</source>
         <translation>ノードサイズ:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="260"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="262"/>
         <source>Sector size:</source>
         <translation>セクタサイズ:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="272"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="274"/>
         <source>Size is the total size of all devices. Allocated is the space reserved for chunks on the devices. Unallocated = Size - Allocated.</source>
         <translation>サイズは全デバイスの合計です。割り当て済みはデバイス上でチャンクに確保された領域です。未割り当て = サイズ - 割り当て済みです</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="280"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="282"/>
         <source>No usage data has been loaded yet.</source>
         <translation>使用量はまだ取得していません</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="290"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="292"/>
         <source>Space by chunk type</source>
         <translation>チャンク種別ごとの領域</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="301"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="303"/>
         <source>Total is the space allocated to chunks of this type. Used is the space actually used inside those chunks. The global reserve is part of metadata.</source>
         <translation>合計はこの種別のチャンクに割り当てられた領域です。使用はチャンク内で実際に使われている領域です。グローバル予約はメタデータの一部です</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="309"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="311"/>
         <source>Type</source>
         <translation>種類</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="310"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="312"/>
         <source>Profile</source>
         <translation>プロファイル</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="311"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="313"/>
         <source>Total</source>
         <translation>合計</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="312"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="314"/>
         <source>Used</source>
         <translation>使用</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="371"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="373"/>
         <source>Devices</source>
         <translation>デバイス</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="381"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="383"/>
         <source>Device ID</source>
         <translation>デバイスID</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="382"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="384"/>
         <source>Size</source>
         <translation>サイズ</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="383"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="385"/>
         <source>Allocated</source>
         <translation>割り当て済み</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="431"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="433"/>
         <source>Allocated is the space reserved for chunks on this device.</source>
         <translation>割り当て済みはこのデバイス上でチャンクに確保された領域です</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="443"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="445"/>
         <source>Subvolumes</source>
         <translation>サブボリューム</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="454"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="456"/>
         <source>Loading the subvolume list requires administrator authentication. This page only displays the list.</source>
         <translation>サブボリューム一覧の読み込みには管理者認証が必要です。この画面は一覧を表示するだけで、変更は行いません</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="462"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="464"/>
         <source>Load subvolumes</source>
         <translation>サブボリュームを読み込む</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="482"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="484"/>
         <source>Hide Snapper snapshots</source>
         <translation>Snapperのスナップショットを隠す</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="495"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="497"/>
         <source>The list was truncated to the maximum number of subvolumes. Some entries are not shown.</source>
         <translation>一覧が最大件数に達したため、一部のエントリは表示されていません</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="502"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="504"/>
         <source>ID</source>
         <translation>ID</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="503"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="505"/>
         <source>Parent</source>
         <translation>親</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="504"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="506"/>
         <source>Created</source>
         <translation>作成日時</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="505"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="507"/>
         <source>Read-only</source>
         <translation>読み取り専用</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="506"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="508"/>
         <source>Path</source>
         <translation>パス</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="546"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="548"/>
         <source>Yes</source>
         <translation>はい</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="546"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="548"/>
         <source>No</source>
         <translation>いいえ</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="586"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="588"/>
         <source>No subvolumes have been loaded yet.</source>
         <translation>サブボリュームはまだ読み込んでいません</translation>
     </message>
@@ -965,7 +965,7 @@ Restoring reverts just those changes; files modified afterwards are left untouch
     <name>SettingsPage</name>
     <message>
         <location filename="../qml/pages/SettingsPage.qml" line="120"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="364"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="366"/>
         <source>Settings saved.</source>
         <translation>設定を保存しました。</translation>
     </message>
@@ -1011,7 +1011,7 @@ Restoring reverts just those changes; files modified afterwards are left untouch
     </message>
     <message>
         <location filename="../qml/pages/SettingsPage.qml" line="174"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="503"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="505"/>
         <source>Set up quota</source>
         <translation>クォータを設定</translation>
     </message>
@@ -1021,194 +1021,194 @@ Restoring reverts just those changes; files modified afterwards are left untouch
         <translation>Btrfsのクォータを有効にするとファイルシステム操作が遅くなる場合があり、qSnapperからは元に戻せません。続行しますか?</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="214"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="216"/>
         <source>Config:</source>
         <translation>設定:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="256"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="258"/>
         <source>New...</source>
         <translation>新規...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="266"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="268"/>
         <source>Delete...</source>
         <translation>削除...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="293"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="295"/>
         <source>Reload</source>
         <translation>再読み込み</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="327"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="329"/>
         <source>Revert</source>
         <translation>元に戻す</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="344"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="346"/>
         <source>Save</source>
         <translation>保存</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="388"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="390"/>
         <source>The settings could not be loaded. Editing is disabled.</source>
         <translation>設定を読み込めませんでした。編集は無効です。</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="398"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="400"/>
         <source>Config information (read only)</source>
         <translation>設定の情報 (読み取り専用)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="419"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="421"/>
         <source>Number cleanup</source>
         <translation>番号によるクリーンアップ</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="426"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="428"/>
         <source>Enable number cleanup</source>
         <translation>番号によるクリーンアップを有効にする</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="427"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="455"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="475"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="429"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="457"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="477"/>
         <source>Minimum age</source>
         <translation>最小経過時間</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="428"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="430"/>
         <source>Number limit</source>
         <translation>保持数の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="429"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="431"/>
         <source>Number limit (important)</source>
         <translation>保持数の上限 (重要)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="435"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="437"/>
         <source>Timeline</source>
         <translation>タイムライン</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="442"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="444"/>
         <source>Create timeline snapshots</source>
         <translation>タイムラインのスナップショットを作成する</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="446"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="448"/>
         <source>This setting only takes effect while snapper-timeline.timer is enabled. Manage the timer in the timer section below.</source>
         <translation>この設定は、snapper-timeline.timer が有効な間だけ効果があります。タイマーは下のタイマーの欄で管理してください。</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="454"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="456"/>
         <source>Enable timeline cleanup</source>
         <translation>タイムラインのクリーンアップを有効にする</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="456"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="458"/>
         <source>Hourly limit</source>
         <translation>毎時の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="457"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="459"/>
         <source>Daily limit</source>
         <translation>毎日の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="458"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="460"/>
         <source>Weekly limit</source>
         <translation>毎週の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="459"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="461"/>
         <source>Monthly limit</source>
         <translation>毎月の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="460"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="462"/>
         <source>Quarterly limit</source>
         <translation>四半期ごとの上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="461"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="463"/>
         <source>Yearly limit</source>
         <translation>毎年の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="467"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="469"/>
         <source>Empty pre/post pairs</source>
         <translation>差分のない Pre/Post ペア</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="474"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="476"/>
         <source>Enable empty pre/post cleanup</source>
         <translation>差分のない Pre/Post ペアのクリーンアップを有効にする</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="481"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="483"/>
         <source>Space limits</source>
         <translation>容量の制限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="496"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="498"/>
         <source>Quota: enabled (qgroup %1)</source>
         <translation>クォータ: 有効 (qgroup %1)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="497"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="499"/>
         <source>Quota: not set up</source>
         <translation>クォータ: 未設定</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="516"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="518"/>
         <source>SPACE_LIMIT and FREE_LIMIT only take effect when the quota is set up.</source>
         <translation>SPACE_LIMITとFREE_LIMITはクォータを設定した場合だけ有効になります</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="524"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="526"/>
         <source>Space limit</source>
         <translation>使用容量の上限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="525"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="527"/>
         <source>Free space limit</source>
         <translation>空き容量の下限</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="531"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="533"/>
         <source>Background comparison</source>
         <translation>バックグラウンド比較</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="538"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="540"/>
         <source>Enable background comparison</source>
         <translation>バックグラウンド比較を有効にする</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="554"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="556"/>
         <source>Appearance</source>
         <translation>外観</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="570"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="572"/>
         <source>Light</source>
         <translation>ライト</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="576"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="578"/>
         <source>Dark</source>
         <translation>ダーク</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="582"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="584"/>
         <source>Follow system</source>
         <translation>システムに従う</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="589"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="591"/>
         <source>The theme is saved for this user only and applies when you press Save.</source>
         <translation>テーマはこのユーザだけに保存され、「保存」を押すと反映されます。</translation>
     </message>
@@ -1610,53 +1610,53 @@ reason=manual</translation>
         <translation type="vanished">削除完了: 成功 %1個、失敗 %2個</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="197"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="199"/>
         <source>qSnapper</source>
         <translation>qSnapper</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="257"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="259"/>
         <source>%1 selected</source>
         <translation>%1個選択中</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="264"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="266"/>
         <source>Refresh</source>
         <translation>更新</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="275"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="277"/>
         <source>Delete Selected</source>
         <translation>選択を削除</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="287"/>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="452"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="289"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="454"/>
         <source>Create Snapshot</source>
         <translation>スナップショット作成</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="204"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="206"/>
         <source>Config:</source>
         <translation>設定:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="295"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="297"/>
         <source>Modify</source>
         <translation>編集</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="321"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="323"/>
         <source>Compare</source>
         <translation>比較</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="594"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="596"/>
         <source>User data (key=value per line):</source>
         <translation>ユーザデータ (1行ごとに key=value):</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="613"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="615"/>
         <source>e.g.
 important=yes
 reason=manual-test</source>
@@ -1689,128 +1689,128 @@ reason=manual-test</translation>
         <translation>スナップショット #%1 の変更に失敗しました: %2</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="347"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="349"/>
         <source>Total Snapshots: %1</source>
         <translation>スナップショット総数: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="382"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="384"/>
         <source>No snapshots available</source>
         <translation>スナップショットがありません</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="422"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="424"/>
         <source>About qSnapper</source>
         <translation>qSnapper について</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="433"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="435"/>
         <source>Qt License</source>
         <translation>Qt ライセンス</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="485"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="487"/>
         <source>Description:</source>
         <translation>説明:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="492"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="494"/>
         <source>Enter snapshot description</source>
         <translation>スナップショットの説明を入力してください</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="503"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="505"/>
         <source>Single Snapshot</source>
         <translation>単一スナップショット</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="504"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="506"/>
         <source>Pre Snapshot</source>
         <translation>プリスナップショット</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="505"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="507"/>
         <source>Post Snapshot</source>
         <translation>Postスナップショット</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="533"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="535"/>
         <source>Pre snapshot can be paired with post snapshot later</source>
         <translation>プリスナップショットは後でポストスナップショットとペアにできます</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="543"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="545"/>
         <source>To create a post snapshot, first select a pre snapshot that has no post snapshot.</source>
         <translation>Postスナップショットを作成するには、Postスナップショットを持たないPreスナップショットを先に選択してください</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="553"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="555"/>
         <source>This snapshot will be paired with pre snapshot #%1</source>
         <translation>このスナップショットはPreスナップショット#%1と対になります</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="565"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="567"/>
         <source>Cleanup:</source>
         <translation>クリーンアップ:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="575"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="577"/>
         <source>None</source>
         <translation>なし</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="585"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="587"/>
         <source>Important</source>
         <translation>重要</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="680"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="682"/>
         <source>Please enter a description</source>
         <translation>説明を入力してください</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="702"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="704"/>
         <source>Select a pre snapshot that has no post snapshot to create a post snapshot</source>
         <translation>Postスナップショットを作成するには、Postスナップショットを持たないPreスナップショットを選択してください</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="735"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="737"/>
         <source>Confirmation</source>
         <translation>確認</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="757"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="759"/>
         <source>Delete selected snapshot?</source>
         <translation>選択したスナップショットを削除しますか？</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="758"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="760"/>
         <source>Delete %1 snapshots?</source>
         <translation>%1個のスナップショットを削除しますか？</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="766"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="768"/>
         <source>This operation cannot be undone.</source>
         <translation>この操作は元に戻せません。</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="774"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="776"/>
         <source>Note: This operation requires administrator privileges.</source>
         <translation>注意: この操作には管理者権限が必要です。</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="859"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="861"/>
         <source>Applying changes to the snapshot, please wait...</source>
         <translation>スナップショットに変更を適用しています。しばらくお待ちください...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="871"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="873"/>
         <source>Error</source>
         <translation>エラー</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="798"/>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="834"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="800"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="836"/>
         <source>Please wait</source>
         <translation>しばらくお待ちください</translation>
     </message>
@@ -1819,7 +1819,7 @@ reason=manual-test</translation>
         <translation type="vanished">認証に失敗しました。</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="819"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="821"/>
         <source>Deleting snapshots, please wait...</source>
         <translation>スナップショットを削除しています。しばらくお待ちください...</translation>
     </message>

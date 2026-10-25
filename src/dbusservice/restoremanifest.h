@@ -91,6 +91,10 @@ public:
 
     /**
      * @brief Running計画のcursorを進め、終端到達時にCompletedへ遷移する
+     *
+     * Cancelledへの適用は、終端状態へ適用済み件数を記録する用途だけに限る
+     * Cancelledのまま終端到達してもCompletedへは遷移しない
+     *
      * @param count 進める正のエントリ数
      * @param err 結果エラーの格納先 (省略可)
      * @return 更新成功時true
@@ -101,6 +105,7 @@ public:
      * @brief Running計画のcursorを進め、同じchunkで削除・スキップした件数を記録する
      *
      * cursorと内訳を同時に更新し、途中で失敗した場合も両者が食い違わないようにする
+     * Cancelledへの適用は、終端状態へ適用済み件数を記録する用途だけに限る
      *
      * @param count 進める正のエントリ数 (スキップを含む)
      * @param tally countに含まれるエントリの内訳 (削除数とスキップ数の合計はcount以下)

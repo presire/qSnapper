@@ -49,6 +49,18 @@ bool splitSafeAbsoluteComponents(const QString &absolutePath, QStringList *compo
 
 } // namespace
 
+bool canonicalizeRestorePlanPathKey(const QString &path, QString *keyOut)
+{
+    QStringList components;
+    if (!splitSafeAbsoluteComponents(path, &components)) {
+        return false;
+    }
+
+    // "/"自身は成分が空になるため、末尾のjoinだけでは空文字列になる
+    *keyOut = QLatin1Char('/') + components.join(QLatin1Char('/'));
+    return true;
+}
+
 RestorePathObservation restorePathObservationFromStat(const struct stat &info)
 {
     RestorePathObservation observation;

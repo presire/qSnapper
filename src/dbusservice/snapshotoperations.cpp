@@ -130,6 +130,11 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
                const QString &path) {
             Q_UNUSED(path);
             resetIdleTimer();
+            const QString owner = m_restorePlanOwners.value(manifestId);
+            if (sendRestorePlanSignalToOwner(owner, QStringLiteral("restorePlanProgress"),
+                                             QVariantList{manifestId, current, total})) {
+                return;
+            }
             emit restorePlanProgress(manifestId, current, total);
         });
     m_restoreExecutor.setFinishedSink(
@@ -478,6 +483,39 @@ bool SnapshotOperations::finalizeRestoreExecution(const QString &manifestId)
 }
 
 /**
+ * @brief 復元計画のシグナルを所有者のunique nameだけへ送る
+ *
+ * 進捗と終了はシステムバス上の全利用者へブロードキャストせず、計画を作成した接続だけに届ける
+ * 所有者が空の場合はD-Busを介さない単体テスト呼び出しなので、QSignalSpyで観測できるよう呼び出し側のemitに任せる
+ *
+ * @param owner 宛先のD-Bus unique name
+ * @param member シグナル名
+ * @param arguments シグナルの引数
+ * @return true = 宛先付きで送信を試みた (呼び出し側はemitしない)、false = ownerが空のため呼び出し側でemitする
+ */
+bool SnapshotOperations::sendRestorePlanSignalToOwner(const QString &owner,
+                                                      const QString &member,
+                                                      const QVariantList &arguments)
+{
+    if (owner.isEmpty()) {
+        return false;
+    }
+
+    QDBusMessage signal = QDBusMessage::createTargetedSignal(
+        owner,
+        QStringLiteral("/com/presire/qsnapper/Operations"),
+        QStringLiteral("com.presire.qsnapper.Operations"),
+        member);
+    signal.setArguments(arguments);
+    if (!QDBusConnection::systemBus().send(signal)) {
+        // 送信に失敗しても、全体へのブロードキャストには切り替えない
+        // 所有者へ通知が届かないことより、他の利用者に復元の進行状況が漏れることの方を避ける
+        qWarning() << "Failed to send restore plan signal" << member << "to" << owner;
+    }
+    return true;
+}
+
+/**
  * @brief 終端計画の安全ネット・unmount・signal・registry削除を実行する
  * @param manifestId 終端したマニフェストID
  * @param terminal 終端状態
@@ -512,9 +550,12 @@ void SnapshotOperations::finishRestorePlan(
     }
     m_finishedRestorePlans.record(owner, finishedStatus);
 
-    emit restorePlanFinished(manifestId,
-                             restoreManifestStateString(terminal),
-                             restorePlanFinishedSignalMessage(terminal));
+    const QString terminalState = restoreManifestStateString(terminal);
+    const QString signalMessage = restorePlanFinishedSignalMessage(terminal);
+    if (!sendRestorePlanSignalToOwner(owner, QStringLiteral("restorePlanFinished"),
+                                      QVariantList{manifestId, terminalState, signalMessage})) {
+        emit restorePlanFinished(manifestId, terminalState, signalMessage);
+    }
 
     m_restoreExecutions.remove(manifestId);
     m_restoreRegistry.remove(manifestId);

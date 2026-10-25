@@ -303,8 +303,11 @@ namespace qsnapper::security {
     bool parentDirectoryIsSafeForMetadata(const struct stat &parentStat);
 
     /**
-     * @brief rootPath配下の通常ファイルを安全に新規/上書きオープンする
+     * @brief テスト専用としてrootPath配下の通常ファイルを上書きオープンする
      *
+     * 本番コードからは呼び出さない
+     * O_EXCLを付けずにO_TRUNCで開くため、実際の復元先で使うと、ハードリンクで共有された既存ファイルの中身まで消してしまう
+     * この危険を呼び出し側が見落とさないよう、名前にForTestingを付けている
      * componentwiseなO_NOFOLLOW走査で親まで辿り、leafをopenat(..., O_NOFOLLOW)で開いた後、fstat()でregular fileであることを再確認する
      * leafがsymlinkの場合はELOOPで拒否する
      *
@@ -313,8 +316,9 @@ namespace qsnapper::security {
      * @param mode 作成時モード
      * @return 成功時: file descriptor (呼び出し側でclose)、失敗時: -1 (errno設定)
      */
-    int safeOpenRegularFileWriteBeneathRoot(const QString &rootPath, const QString &destinationPath,
-                                            mode_t mode);
+    int safeOpenRegularFileWriteBeneathRootForTesting(const QString &rootPath,
+                                                      const QString &destinationPath,
+                                                      mode_t mode);
 
     /**
      * @brief rootPath配下に通常ファイルを排他的に新規作成してオープンする
@@ -457,8 +461,9 @@ namespace qsnapper::security {
     /**
      * @brief スナップショットのSELinuxコンテキストのユーザ部分だけを、復元先の現在のユーザに置き換える
      *
-     * SELinuxの制約により、qsnapper_dbus_tはSELinuxユーザの異なるコンテキストを書き込めない
-     * ユーザ部分を変えるにはcan_change_object_identity権限が必要だが、qsnapper_dbus_tのポリシーはこれを持たないため
+     * SELinuxユーザの異なるコンテキストを書き込むにはcan_change_object_identity属性が必要になる
+     * 本パッケージのポリシーはqsnapper_dbus_tにこの属性を与えるが、属性を持たない古いモジュールが読み込まれていると書き込みが拒否される
+     * その場合に備えた代わりの手段として使う
      * 例えばunconfined_uのファイルを戻すとき、ユーザ部分だけを復元先の現在の値にすれば、ロール・タイプ・レベルはスナップショットのまま書き込める
      * タイプを保てば、/etc/shadowのshadow_tのようにアクセス制御に効く部分は失われない
      *

@@ -4,7 +4,7 @@
  *
  * 一時object作成からrename検証までの差し替え処理とmetadata適用、
  * snapshot一覧指紋を集める
- * SELinuxユーザが異なるsecurity.selinuxはqsnapper_dbus_tでは書き込めないため、ユーザ部分だけを復元先に合わせる
+ * SELinuxユーザが異なるsecurity.selinuxの書き込みが拒否された場合は、ユーザ部分だけを復元先に合わせて書き直す
  */
 #include <QByteArray>
 #include <QCryptographicHash>
@@ -58,6 +58,11 @@ namespace qsnapper::security {
 
                 QByteArray value(static_cast<qsizetype>(size), '\0');
                 const ssize_t length = ::fgetxattr(fd, name, value.data(), static_cast<size_t>(value.size()));
+                // 長さを調べた時点では空だった値に、その直後に別の処理が値を書き込むと、長さ0のバッファでの呼び出しは値を読まずに新しい長さだけを返す
+                // この戻り値を空の値と取り違えないよう、長さを調べるところからやり直す
+                if (length > 0 && size == 0) {
+                    continue;
+                }
                 if (length >= 0) {
                     value.truncate(static_cast<qsizetype>(length));
                     *valueOut = value;
@@ -109,7 +114,7 @@ namespace qsnapper::security {
         /**
          * @brief SELinuxユーザの違いで拒否されたsecurity.selinuxを、ユーザ部分だけ復元先に合わせて書き直す
          *
-         * qsnapper_dbus_tはcan_change_object_identityを持たないため、SELinuxユーザの異なるコンテキストの書き込みはSELinuxの制約で拒否される
+         * qsnapper_dbus_tがcan_change_object_identity属性を持たない古いポリシーでは、SELinuxユーザの異なるコンテキストの書き込みがSELinuxの制約で拒否される
          * ロール・タイプ・レベルはスナップショットの値を保ち、アクセス制御に効くタイプを失わないようにする
          *
          * @param destinationFd 復元先fd
@@ -402,10 +407,17 @@ namespace qsnapper::security {
         }
 
         // 所有者の変更はS_ISUID / S_ISGIDとsecurity.capabilityを落とすため、modeとcapabilityより先に行う
+        bool ownershipRestored = true;
         if (::fchown(destinationFd, sourceStat.st_uid, sourceStat.st_gid) < 0) {
             recordMandatoryFailure();
+            ownershipRestored = false;
         }
-        if (::fchmod(destinationFd, sourceStat.st_mode & 07777) < 0) {
+
+        // 所有者を復元できていない場合はsetuid/setgidを立てず、誤った所有者に特権が付くのを防ぐ
+        const mode_t restoredMode = ownershipRestored
+                ? (sourceStat.st_mode & 07777)
+                : (sourceStat.st_mode & (07777 & ~(S_ISUID | S_ISGID)));
+        if (::fchmod(destinationFd, restoredMode) < 0) {
             recordMandatoryFailure();
         }
 
@@ -419,8 +431,8 @@ namespace qsnapper::security {
         // ACLの設定はgroupのpermission bitを書き換えるため、最終的なmodeを復元元と一致させる
         struct stat destinationStat;
         if (::fstat(destinationFd, &destinationStat) == 0
-                && (destinationStat.st_mode & 07777) != (sourceStat.st_mode & 07777)
-                && ::fchmod(destinationFd, sourceStat.st_mode & 07777) < 0) {
+                && (destinationStat.st_mode & 07777) != restoredMode
+                && ::fchmod(destinationFd, restoredMode) < 0) {
             recordMandatoryFailure();
         }
 
@@ -428,7 +440,8 @@ namespace qsnapper::security {
 
         // file capabilityは所有者とmodeの変更で失われるため、最後に設定する
         // 新規inodeには存在しないため、復元元に無い場合の削除は不要
-        if (!isDirectory) {
+        // 所有者を復元できていない場合は、誤った所有者に権限を与えないよう付与しない
+        if (!isDirectory && ownershipRestored) {
             QByteArray capability;
             const int state = readXattrFd(sourceFd, kCapabilityXattr, &capability);
             if (state < 0 && errno != ENOTSUP) {

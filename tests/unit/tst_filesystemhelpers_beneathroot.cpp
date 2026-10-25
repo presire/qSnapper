@@ -213,7 +213,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsParentSymlinkSwap()
                            {QStringLiteral("a"), QStringLiteral("b")});
 
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -345,7 +345,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsGrandparentSymlinkSwap()
     swapComponentToSymlink(rootDir, outsideDir, {QStringLiteral("a")});
 
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -401,7 +401,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsLeafSymlinkToExternalFile()
                       victimPath.toUtf8().constData()) == 0);
 
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -435,7 +435,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsDanglingSymlinkComponent()
                       (rootDir.path() + QStringLiteral("/a")).toUtf8().constData()) == 0);
 
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), victimPath, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -461,7 +461,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsRegularFileAsDirectoryCompone
 
     const QString destination = filePath + QStringLiteral("/nested.txt");
     errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), destination, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), destination, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
     if (fd >= 0) {
@@ -481,7 +481,7 @@ void TestFilesystemHelpers::beneathRootHappyPathWritesNestedFileWithMode()
     QVERIFY(safeCreateDirectoryBeneathRoot(rootDir.path(), destDir, 0755));
     QVERIFY(QDir(destDir).exists());
 
-    const int fd = safeOpenRegularFileWriteBeneathRoot(rootDir.path(), destination, 0644);
+    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), destination, 0644);
     QVERIFY(fd >= 0);
 
     const QByteArray payload("restored-content\n");

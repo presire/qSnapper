@@ -874,6 +874,14 @@ QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
         status = m_finishedRestorePlans.status(manifestId, owner);
     }
     if (!status) {
+        // 期限切れ (Expired) またはregistryに存在しない (NotFound) 計画は再び使われないため、owner表とwatchから外してメモリを解放する
+        // OwnerMismatchでは他のownerの計画を消さないよう、ここでは何もしない
+        // NotFoundはIDがregistryから消えていることを示すため、終端記録の有無にかかわらず掃除してよい
+        if (error == qsnapper::restore::ManifestError::Expired
+                || error == qsnapper::restore::ManifestError::NotFound) {
+            m_restorePlanOwners.remove(manifestId);
+            removeUnusedRestoreOwnerWatches();
+        }
         sendManifestError(error);
         return {};
     }

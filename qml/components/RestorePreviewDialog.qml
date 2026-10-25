@@ -993,13 +993,13 @@ BorderedDialog {
         property var deletePaths: []                     // 削除されるパスの一覧 (先頭からmaxDeletePathsShown件まで)
         property int deleteListed: 0                     // deletePathsに載せたパスの件数
 
-        // ダイアログの本文 (確認の質問、復元の内容、注意書き、復元オプション)
-        // 幅はダイアログいっぱいに広げ、説明文がダイアログの右端まで使って折り返すようにする
-        // 本文が上に寄って下に大きな空白が残らないよう、縦方向は中央に置く
-        // ただし、本文がダイアログに収まらない場合は、先頭が隠れないよう上端から表示する
+        // ダイアログの本文 (上端から順に並べる)
+        // 説明文を右端まで使って折り返すため、幅はダイアログいっぱいに広げる
+        // 削除されるパスがある場合は、余った空白をパスの一覧に使うため、高さもダイアログに合わせる
+        // ない場合は、項目の間が空いて間延びするため、必要な高さだけにする
         ColumnLayout {
             width: parent.width
-            y: Math.max(0, (parent.height - height) / 2)
+            height: confirmRestoreDialog.deleteCount > 0 ? parent.height : implicitHeight
             spacing: 12
 
             Label {
@@ -1043,11 +1043,15 @@ BorderedDialog {
                 font.bold: true
             }
 
-            // 削除されるパスの一覧 (長い一覧でもダイアログが伸びないよう、スクロールで見せる)
-            // 外部由来の文字列のため、PlainTextの読み取り専用テキストとして表示する
+            // 削除されるパスの一覧 (パスが多くてもダイアログが伸びないよう、スクロールで見せる)
+            // パスは外部由来の文字列のため、書式なしの読み取り専用テキストで表示する
+            // 高さは余った空白まで広げ、ダイアログが小さくても数行は見えるよう110を下限にする
+            // 基準の高さを指定しないとパスの全行分になるため、基準も110にする
             ScrollView {
                 visible: confirmRestoreDialog.deleteCount > 0
                 Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 110
                 Layout.preferredHeight: 110
                 clip: true
 

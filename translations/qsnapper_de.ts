@@ -343,187 +343,187 @@
         <translation>Subvolumes konnten nicht geladen werden: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="128"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="130"/>
         <source>Filesystem: %1</source>
         <translation>Dateisystem: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="128"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="130"/>
         <source>(none)</source>
         <translation>(keine)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="145"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="147"/>
         <source>Refresh</source>
         <translation>Aktualisieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="202"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="204"/>
         <source>No configuration is selected. Select a configuration on the Settings tab.</source>
         <translation>Keine Konfiguration ausgewählt. Wählen Sie im Tab Einstellungen eine Konfiguration aus.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="212"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="214"/>
         <source>Overview</source>
         <translation>Übersicht</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="223"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="225"/>
         <source>These values come from the Btrfs space information and can differ from the output of btrfs filesystem usage.</source>
         <translation>Diese Werte stammen aus den Btrfs-Space-Informationen und können von der Ausgabe von btrfs filesystem usage abweichen.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="232"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="234"/>
         <source>Size:</source>
         <translation>Größe:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="239"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="241"/>
         <source>Allocated:</source>
         <translation>Zugewiesen:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="246"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="248"/>
         <source>Unallocated:</source>
         <translation>Nicht zugewiesen:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="253"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="255"/>
         <source>Node size:</source>
         <translation>Knotengröße:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="260"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="262"/>
         <source>Sector size:</source>
         <translation>Sektorgröße:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="272"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="274"/>
         <source>Size is the total size of all devices. Allocated is the space reserved for chunks on the devices. Unallocated = Size - Allocated.</source>
         <translation>Die Größe ist die Gesamtgröße aller Geräte. Zugewiesen ist der für Chunks auf den Geräten reservierte Bereich. Nicht zugewiesen = Größe - Zugewiesen.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="280"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="282"/>
         <source>No usage data has been loaded yet.</source>
         <translation>Es wurden noch keine Nutzungsdaten geladen.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="290"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="292"/>
         <source>Space by chunk type</source>
         <translation>Speicher nach Chunk-Typ</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="301"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="303"/>
         <source>Total is the space allocated to chunks of this type. Used is the space actually used inside those chunks. The global reserve is part of metadata.</source>
         <translation>Die Summe ist der diesem Typ zugewiesene Bereich. Verwendet ist der darin tatsächlich belegte Bereich. Der globale Reservebereich gehört zu den Metadaten.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="309"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="311"/>
         <source>Type</source>
         <translation>Typ</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="310"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="312"/>
         <source>Profile</source>
         <translation>Profil</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="311"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="313"/>
         <source>Total</source>
         <translation>Gesamt</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="312"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="314"/>
         <source>Used</source>
         <translation>Verwendet</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="371"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="373"/>
         <source>Devices</source>
         <translation>Geräte</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="381"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="383"/>
         <source>Device ID</source>
         <translation>Geräte-ID</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="382"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="384"/>
         <source>Size</source>
         <translation>Größe</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="383"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="385"/>
         <source>Allocated</source>
         <translation>Zugewiesen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="431"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="433"/>
         <source>Allocated is the space reserved for chunks on this device.</source>
         <translation>Zugewiesen ist der für Chunks auf diesem Gerät reservierte Bereich.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="443"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="445"/>
         <source>Subvolumes</source>
         <translation>Subvolumes</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="454"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="456"/>
         <source>Loading the subvolume list requires administrator authentication. This page only displays the list.</source>
         <translation>Das Laden der Subvolume-Liste erfordert eine Administratorauthentifizierung. Diese Seite zeigt die Liste nur an.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="462"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="464"/>
         <source>Load subvolumes</source>
         <translation>Subvolumes laden</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="482"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="484"/>
         <source>Hide Snapper snapshots</source>
         <translation>Snapper-Snapshots ausblenden</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="495"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="497"/>
         <source>The list was truncated to the maximum number of subvolumes. Some entries are not shown.</source>
         <translation>Die Liste wurde auf die maximale Anzahl von Subvolumes gekürzt. Einige Einträge werden nicht angezeigt.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="502"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="504"/>
         <source>ID</source>
         <translation>ID</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="503"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="505"/>
         <source>Parent</source>
         <translation>Übergeordnet</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="504"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="506"/>
         <source>Created</source>
         <translation>Erstellt</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="505"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="507"/>
         <source>Read-only</source>
         <translation>Schreibgeschützt</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="506"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="508"/>
         <source>Path</source>
         <translation>Pfad</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="546"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="548"/>
         <source>Yes</source>
         <translation>Ja</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="546"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="548"/>
         <source>No</source>
         <translation>Nein</translation>
     </message>
     <message>
-        <location filename="../qml/pages/FilesystemPage.qml" line="586"/>
+        <location filename="../qml/pages/FilesystemPage.qml" line="588"/>
         <source>No subvolumes have been loaded yet.</source>
         <translation>Es wurden noch keine Subvolumes geladen.</translation>
     </message>
@@ -965,7 +965,7 @@ Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dat
     <name>SettingsPage</name>
     <message>
         <location filename="../qml/pages/SettingsPage.qml" line="120"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="364"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="366"/>
         <source>Settings saved.</source>
         <translation>Einstellungen gespeichert.</translation>
     </message>
@@ -1011,7 +1011,7 @@ Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dat
     </message>
     <message>
         <location filename="../qml/pages/SettingsPage.qml" line="174"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="503"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="505"/>
         <source>Set up quota</source>
         <translation>Quota einrichten</translation>
     </message>
@@ -1021,194 +1021,194 @@ Die Wiederherstellung setzt nur diese Änderungen zurück; danach geänderte Dat
         <translation>Das Aktivieren von Btrfs-Quota kann Dateisystemoperationen verlangsamen und kann von qSnapper aus nicht rückgängig gemacht werden. Möchten Sie fortfahren?</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="214"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="216"/>
         <source>Config:</source>
         <translation>Konfiguration:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="256"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="258"/>
         <source>New...</source>
         <translation>Neu...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="266"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="268"/>
         <source>Delete...</source>
         <translation>Löschen...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="293"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="295"/>
         <source>Reload</source>
         <translation>Neu laden</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="327"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="329"/>
         <source>Revert</source>
         <translation>Zurücksetzen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="344"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="346"/>
         <source>Save</source>
         <translation>Speichern</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="388"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="390"/>
         <source>The settings could not be loaded. Editing is disabled.</source>
         <translation>Die Einstellungen konnten nicht geladen werden. Die Bearbeitung ist deaktiviert.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="398"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="400"/>
         <source>Config information (read only)</source>
         <translation>Konfigurationsinformationen (schreibgeschützt)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="419"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="421"/>
         <source>Number cleanup</source>
         <translation>Bereinigung nach Anzahl</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="426"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="428"/>
         <source>Enable number cleanup</source>
         <translation>Bereinigung nach Anzahl aktivieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="427"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="455"/>
-        <location filename="../qml/pages/SettingsPage.qml" line="475"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="429"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="457"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="477"/>
         <source>Minimum age</source>
         <translation>Mindestalter</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="428"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="430"/>
         <source>Number limit</source>
         <translation>Anzahlbegrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="429"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="431"/>
         <source>Number limit (important)</source>
         <translation>Anzahlbegrenzung (wichtig)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="435"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="437"/>
         <source>Timeline</source>
         <translation>Zeitleiste</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="442"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="444"/>
         <source>Create timeline snapshots</source>
         <translation>Zeitleisten-Schnappschüsse erstellen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="446"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="448"/>
         <source>This setting only takes effect while snapper-timeline.timer is enabled. Manage the timer in the timer section below.</source>
         <translation>Diese Einstellung wirkt nur, solange snapper-timeline.timer aktiviert ist. Verwalten Sie den Timer im Timer-Bereich unten.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="454"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="456"/>
         <source>Enable timeline cleanup</source>
         <translation>Zeitleisten-Bereinigung aktivieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="456"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="458"/>
         <source>Hourly limit</source>
         <translation>Stündliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="457"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="459"/>
         <source>Daily limit</source>
         <translation>Tägliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="458"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="460"/>
         <source>Weekly limit</source>
         <translation>Wöchentliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="459"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="461"/>
         <source>Monthly limit</source>
         <translation>Monatliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="460"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="462"/>
         <source>Quarterly limit</source>
         <translation>Vierteljährliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="461"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="463"/>
         <source>Yearly limit</source>
         <translation>Jährliche Begrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="467"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="469"/>
         <source>Empty pre/post pairs</source>
         <translation>Leere Vorher/Nachher-Paare</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="474"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="476"/>
         <source>Enable empty pre/post cleanup</source>
         <translation>Bereinigung leerer Vorher/Nachher-Paare aktivieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="481"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="483"/>
         <source>Space limits</source>
         <translation>Speicherplatzbegrenzungen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="496"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="498"/>
         <source>Quota: enabled (qgroup %1)</source>
         <translation>Quota: aktiviert (qgroup %1)</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="497"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="499"/>
         <source>Quota: not set up</source>
         <translation>Quota: nicht eingerichtet</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="516"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="518"/>
         <source>SPACE_LIMIT and FREE_LIMIT only take effect when the quota is set up.</source>
         <translation>SPACE_LIMIT und FREE_LIMIT wirken nur, wenn das Quota eingerichtet ist.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="524"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="526"/>
         <source>Space limit</source>
         <translation>Speicherplatzbegrenzung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="525"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="527"/>
         <source>Free space limit</source>
         <translation>Begrenzung des freien Speicherplatzes</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="531"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="533"/>
         <source>Background comparison</source>
         <translation>Hintergrundvergleich</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="538"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="540"/>
         <source>Enable background comparison</source>
         <translation>Hintergrundvergleich aktivieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="554"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="556"/>
         <source>Appearance</source>
         <translation>Darstellung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="570"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="572"/>
         <source>Light</source>
         <translation>Hell</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="576"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="578"/>
         <source>Dark</source>
         <translation>Dunkel</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="582"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="584"/>
         <source>Follow system</source>
         <translation>System folgen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SettingsPage.qml" line="589"/>
+        <location filename="../qml/pages/SettingsPage.qml" line="591"/>
         <source>The theme is saved for this user only and applies when you press Save.</source>
         <translation>Das Design wird nur für diesen Benutzer gespeichert und angewendet, wenn Sie auf Speichern klicken.</translation>
     </message>
@@ -1610,53 +1610,53 @@ reason=manual</translation>
         <translation type="vanished">Löschen beendet: %1 erfolgreich %2 fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="197"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="199"/>
         <source>qSnapper</source>
         <translation>qSnapper</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="257"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="259"/>
         <source>%1 selected</source>
         <translation>%1 selektiert</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="264"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="266"/>
         <source>Refresh</source>
         <translation>Aktualisieren</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="275"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="277"/>
         <source>Delete Selected</source>
         <translation>Ausgewählte löschen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="287"/>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="452"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="289"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="454"/>
         <source>Create Snapshot</source>
         <translation>Schnappschuss erstellen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="204"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="206"/>
         <source>Config:</source>
         <translation>Konfiguration:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="295"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="297"/>
         <source>Modify</source>
         <translation>Bearbeiten</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="321"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="323"/>
         <source>Compare</source>
         <translation>Vergleichen</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="594"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="596"/>
         <source>User data (key=value per line):</source>
         <translation>Benutzerdaten (key=value pro Zeile):</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="613"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="615"/>
         <source>e.g.
 important=yes
 reason=manual-test</source>
@@ -1689,133 +1689,133 @@ reason=manual-test</translation>
         <translation>Schnappschuss #%1 konnte nicht geändert werden: %2</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="347"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="349"/>
         <source>Total Snapshots: %1</source>
         <translation>Anzahl Schnappschüsse: %1</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="382"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="384"/>
         <source>No snapshots available</source>
         <translation>Keine Snapshots vorhanden</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="422"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="424"/>
         <source>About qSnapper</source>
         <translation>Über qSnapper</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="433"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="435"/>
         <source>Qt License</source>
         <translation>Qt Lizenz</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="485"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="487"/>
         <source>Description:</source>
         <translation>Beschreibung:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="492"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="494"/>
         <source>Enter snapshot description</source>
         <translation>Snapshot-Beschreibung eingeben</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="503"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="505"/>
         <source>Single Snapshot</source>
         <translation>Einzelner Schnappschuss</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="504"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="506"/>
         <source>Pre Snapshot</source>
         <translation>Vorher Schnappschuss</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="505"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="507"/>
         <source>Post Snapshot</source>
         <translation>Post-Snapshot</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="533"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="535"/>
         <source>Pre snapshot can be paired with post snapshot later</source>
         <translation>Ein Vorher-Snapshot kann später einem Nachher-Snapshot zugeordnet werden.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="543"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="545"/>
         <source>To create a post snapshot, first select a pre snapshot that has no post snapshot.</source>
         <translation>Um einen Post-Snapshot zu erstellen, wählen Sie zuerst einen Pre-Snapshot ohne Post-Snapshot aus.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="553"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="555"/>
         <source>This snapshot will be paired with pre snapshot #%1</source>
         <translation>Dieser Snapshot wird mit dem Pre-Snapshot #%1 gepaart.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="565"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="567"/>
         <source>Cleanup:</source>
         <translation>Bereinigung:</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="575"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="577"/>
         <source>None</source>
         <translation>Keine</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="585"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="587"/>
         <source>Important</source>
         <translation>Wichtig</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="680"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="682"/>
         <source>Please enter a description</source>
         <translation>Bitte geben Sie eine Beschreibung ein</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="702"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="704"/>
         <source>Select a pre snapshot that has no post snapshot to create a post snapshot</source>
         <translation>Wählen Sie einen Pre-Snapshot ohne Post-Snapshot aus, um einen Post-Snapshot zu erstellen.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="735"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="737"/>
         <source>Confirmation</source>
         <translation>Bestätigung</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="757"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="759"/>
         <source>Delete selected snapshot?</source>
         <translation>Ausgewählten Snapshot löschen？</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="758"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="760"/>
         <source>Delete %1 snapshots?</source>
         <translation>Schnappschuss %1 löschen？</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="766"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="768"/>
         <source>This operation cannot be undone.</source>
         <translation>Diese Aktion kann nicht rückgängig gemacht werden.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="774"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="776"/>
         <source>Note: This operation requires administrator privileges.</source>
         <translation>Hinweis: Für diesen Vorgang sind Administratorrechte erforderlich.</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="798"/>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="834"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="800"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="836"/>
         <source>Please wait</source>
         <translation>Bitte warten</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="819"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="821"/>
         <source>Deleting snapshots, please wait...</source>
         <translation>Schnappschüsse werden gelöscht, bitte warten...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="859"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="861"/>
         <source>Applying changes to the snapshot, please wait...</source>
         <translation>Änderungen werden auf den Schnappschuss angewendet. Bitte warten...</translation>
     </message>
     <message>
-        <location filename="../qml/pages/SnapshotListPage.qml" line="871"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="873"/>
         <source>Error</source>
         <translation>Fehler</translation>
     </message>

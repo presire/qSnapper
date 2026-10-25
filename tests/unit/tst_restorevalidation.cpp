@@ -131,6 +131,8 @@ private slots:
     void snapshotMetadataNameIsDetectedAfterNormalization();
     /** @brief rootサブボリュームのrw安全ネットが全条件を要求することを確認する */
     void rootReadWriteSafetyNetRequiresAllConditions();
+    /** @brief 同じ復元先を指すパスが同じ正規化キーになり、安全でないパスが拒否されることを確認する */
+    void canonicalPathKeysCollapseEquivalentPaths();
 };
 
 /**
@@ -540,6 +542,32 @@ void TestRestoreValidation::rootReadWriteSafetyNetRequiresAllConditions()
     RootReadWriteSafetyNetState unknown = started;
     unknown.preRestoreStateKnown = false;
     QVERIFY(!shouldRestoreRootReadWrite(unknown, true));
+}
+
+/**
+ * @brief 同じ復元先を指すパスが同じ正規化キーになり、安全でないパスが拒否されることを確認する
+ *
+ * 正規化キーが実行時の宛先の組み立てと食い違うと、重複排除を取りこぼすか、別の場所を重複扱いする
+ */
+void TestRestoreValidation::canonicalPathKeysCollapseEquivalentPaths()
+{
+    QString key;
+    QVERIFY(canonicalizeRestorePlanPathKey(QStringLiteral("/a"), &key));
+    QCOMPARE(key, QStringLiteral("/a"));
+    QVERIFY(canonicalizeRestorePlanPathKey(QStringLiteral("//a"), &key));
+    QCOMPARE(key, QStringLiteral("/a"));
+    QVERIFY(canonicalizeRestorePlanPathKey(QStringLiteral("/a/"), &key));
+    QCOMPARE(key, QStringLiteral("/a"));
+    QVERIFY(canonicalizeRestorePlanPathKey(QStringLiteral("/a//b/"), &key));
+    QCOMPARE(key, QStringLiteral("/a/b"));
+    QVERIFY(canonicalizeRestorePlanPathKey(QStringLiteral("/"), &key));
+    QCOMPARE(key, QStringLiteral("/"));
+
+    // 実行時の宛先を変えうるパスは、重複判定の前に拒否する
+    QVERIFY(!canonicalizeRestorePlanPathKey(QStringLiteral("a"), &key));
+    QVERIFY(!canonicalizeRestorePlanPathKey(QStringLiteral("/a/../b"), &key));
+    QVERIFY(!canonicalizeRestorePlanPathKey(QStringLiteral("/a/./b"), &key));
+    QVERIFY(!canonicalizeRestorePlanPathKey(QStringLiteral("/a/\nb"), &key));
 }
 
 QTEST_MAIN(TestRestoreValidation)

@@ -388,17 +388,20 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief rootPath配下の通常ファイルを安全に新規/上書きオープンする
+     * @brief テスト専用としてrootPath配下の通常ファイルを上書きオープンする
      *
-     * leafは openat(..., O_NOFOLLOW) で開くためsymlinkならELOOPで拒否され、
-     * 開いた後にfstat()でregular fileであることを再確認する
+     * 本番コードからは呼び出さない
+     * O_EXCLを付けずにO_TRUNCで開くため、実際の復元先で使うと、ハードリンクで共有された既存ファイルの中身まで消してしまう
+     * この危険を呼び出し側が見落とさないよう、名前にForTestingを付けている
+     * 末尾の要素はopenat(..., O_NOFOLLOW)で開くため、symlinkであればELOOPで拒否する
+     * 開いた後もfstat()で通常ファイルであることを再確認する
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 対象ファイルの絶対パス (rootPath配下であること)
      * @param mode 作成時モード
      * @return 成功時: file descriptor (呼び出し側でclose)、失敗時: -1 (errno設定)
      */
-    int safeOpenRegularFileWriteBeneathRoot(const QString &rootPath, const QString &destinationPath,
+    int safeOpenRegularFileWriteBeneathRootForTesting(const QString &rootPath, const QString &destinationPath,
                                             mode_t mode)
     {
         QStringList components;

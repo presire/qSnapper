@@ -18,7 +18,7 @@ module qsnapper 1.4.0;
 #                      D-Busサービスへのメッセージ送信とWebブラウザの起動
 #   qsnapper_dbus_t  : スナップショットの作成・削除・比較・復元・ロールバック
 #                      file_type / exec_type属性に属する型への復元用の読み書きとsecurity.selinuxの書き戻し
-#                      ラベル変更の制約で拒否された場合は、SELinuxユーザだけを復元先の現在のコンテキストに合わせて再試行する
+#                      can_change_object_identity属性により、SELinuxユーザの異なるラベルも復元する
 #                      ログ(/var/log/qsnapper)への書き込み
 #                      systemd (timerの操作) とsnapperd (configの作成と削除、一括削除) とのD-Bus通信
 #
@@ -146,6 +146,7 @@ require {
     attribute file_type;                  # 基本ポリシーがファイルの型をまとめる属性
     attribute exec_type;                  # 基本ポリシーが実行ファイルの型をまとめる属性
     attribute domain;                     # 全てのプロセスのドメイン
+    attribute can_change_object_identity; # SELinuxユーザの異なるコンテキストへのラベル変更を許す属性
 
     role unconfined_r; # 非制限ユーザのロール
     role system_r;     # システムサービスのロール
@@ -189,12 +190,15 @@ type qsnapper_tmpfs_t;     # tmpfsに作成する共有メモリのファイル
 typeattribute qsnapper_t domain;
 typeattribute qsnapper_dbus_t domain;
 
-# 復元エンジンは、スナップショット側のSELinuxコンテキストをlive側のファイルへ書き戻す
-# 基本ポリシーの制約 (u1 == u2 or t1 == can_change_object_identity) により、SELinuxユーザが異なるラベル変更は拒否される
-# qsnapper_dbus_tは、security.selinuxの書き込みが拒否された場合に
-# SELinuxユーザだけを復元先の現在のコンテキストの値へ置き換えて再試行する
-# この再試行で制約を満たせるため、ラベル変更の例外を与える属性は付与しない
-# 型・ロール・範囲はスナップショット側の値をそのまま使うため、復元後のラベルの意味は失われない
+# 復元エンジンは、スナップショット側のSELinuxコンテキストをSELinuxユーザも含めてそのままlive側のファイルへ書き戻す
+# 基本ポリシーには次の制約があり、この属性が無いとqsnapper_dbus_t (system_u) はunconfined_u等の別のSELinuxユーザのラベルを付けられない
+#   constrain file { create relabelfrom relabelto } (u1 == u2 or t1 == can_change_object_identity)
+# 属性が無い場合、復元後のSELinuxユーザはsystem_uになり、スナップショットとの差分が消えずに比較結果へ残り続ける
+# rpm_t / setfiles_t / bootloader_tも、ラベルを正確に付け直すために同じ属性を持つ
+# qsnapper_dbus_tは元々全てのfile_typeへの書き込みとラベルの付け替えを許可されているため、追加で変えられるのはSELinuxユーザだけである
+# UBACを有効にしていないポリシーでは、ファイルのSELinuxユーザはアクセスの判定に使われないため、実質的な権限の拡大は小さい
+# この属性を持たない古いモジュールが読み込まれている場合に備え、書き込みが拒否されたときはSELinuxユーザだけを復元先の現在の値に置き換えて再試行する
+typeattribute qsnapper_dbus_t can_change_object_identity;
 typeattribute qsnapper_exec_t exec_type, file_type;
 typeattribute qsnapper_dbus_exec_t exec_type, file_type;
 typeattribute qsnapper_tmp_t file_type;

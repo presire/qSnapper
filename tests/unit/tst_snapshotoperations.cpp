@@ -60,6 +60,10 @@ private slots:
     void beginRestorePlanEvictsOldestStagingPlanOfSameUid();
     /** @brief 実行中の復元があるconfigだけconfig操作が止められることを検証する */
     void runningRestoreBlocksConfigOperations();
+    /** @brief 同じ復元先を指すパスを含むchunkが原子的に拒否されることを検証する */
+    void stageRestoreEntriesRejectsDuplicateCanonicalPaths();
+    /** @brief 期限切れの計画がGetRestorePlanStatusでowner表から掃除され、有効な計画は残ることを検証する */
+    void expiredPlanIsRemovedFromOwnerTableOnStatus();
 
     // --- 差分生成の資源上限 ---
     void diffStillProducesUnifiedOutputForSmallChanges();
@@ -406,6 +410,71 @@ void TestSnapshotOperations::beginRestorePlanEvictsOldestStagingPlanOfSameUid()
                                            {QStringLiteral("modified")}));
     QCOMPARE(m_readOnlyProbeCalls, 0);
     QCOMPARE(m_readWriteRestoreCalls, 0);
+}
+
+/**
+ * @brief 同じ復元先を指すパスを含むchunkが原子的に拒否されることを検証する
+ *
+ * "/a"、"//a"、"/a/"は同じ場所への操作になるため、1回のchunkに含まれても後続のchunkでも受け付けない
+ */
+void TestSnapshotOperations::stageRestoreEntriesRejectsDuplicateCanonicalPaths()
+{
+    SnapshotOperations operations;
+    installRootSubvolumeSpies(operations);
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+
+    const QString plan = operations.BeginRestorePlan(QStringLiteral("root"), 1, 0,
+                                                     QStringLiteral("yast"));
+    QVERIFY(!plan.isEmpty());
+
+    QVERIFY(!operations.StageRestoreEntries(plan, {QStringLiteral("/a"), QStringLiteral("//a")},
+                                            {QStringLiteral("modified"), QStringLiteral("modified")}));
+    QStringList status = operations.GetRestorePlanStatus(plan).split(QLatin1Char(','));
+    QVERIFY(status.size() > 2);
+    QCOMPARE(status.value(2), QStringLiteral("0"));
+
+    QVERIFY(operations.StageRestoreEntries(plan, {QStringLiteral("/a")},
+                                           {QStringLiteral("modified")}));
+    QVERIFY(!operations.StageRestoreEntries(plan, {QStringLiteral("/a/")},
+                                            {QStringLiteral("modified")}));
+    status = operations.GetRestorePlanStatus(plan).split(QLatin1Char(','));
+    QCOMPARE(status.value(2), QStringLiteral("1"));
+}
+
+/**
+ * @brief 期限切れの計画がGetRestorePlanStatusでowner表から掃除され、有効な計画は残ることを検証する
+ *
+ * TTL切れの計画をowner表に残すと、破棄済みのIDがウィンドウのwatchを保持し続ける
+ * 一方、まだ有効な計画を消すと、そのownerが終端状態を取得できなくなる
+ */
+void TestSnapshotOperations::expiredPlanIsRemovedFromOwnerTableOnStatus()
+{
+    using qsnapper::restore::RestoreManifestRegistry;
+
+    SnapshotOperations operations;
+    installRootSubvolumeSpies(operations);
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+
+    qint64 nowMs = 1000;
+    operations.setRestoreRegistryClockForTesting([&nowMs]() { return nowMs; });
+
+    const QString expired = operations.BeginRestorePlan(QStringLiteral("root"), 1, 0,
+                                                        QStringLiteral("yast"));
+    QVERIFY(!expired.isEmpty());
+    QVERIFY(operations.hasRestorePlanOwnerForTesting(expired));
+
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs / 2;
+    const QString live = operations.BeginRestorePlan(QStringLiteral("root"), 2, 0,
+                                                     QStringLiteral("yast"));
+    QVERIFY(!live.isEmpty());
+
+    nowMs += RestoreManifestRegistry::kDefaultTtlMs / 2 + 1;
+
+    QVERIFY(operations.GetRestorePlanStatus(expired).isEmpty());
+    QVERIFY(!operations.hasRestorePlanOwnerForTesting(expired));
+    QVERIFY(operations.hasRestorePlanOwnerForTesting(live));
+    QCOMPARE(operations.GetRestorePlanStatus(live).split(QLatin1Char(',')).value(1),
+             QStringLiteral("staging"));
 }
 
 /**

@@ -120,6 +120,8 @@ private slots:
     void removeByOwnerRemovesOnlyMatchingManifests();
     /** @brief 1 chunk上限を超えるstageEntriesがCapacityExceededで原子的に拒否されることを確認する */
     void oversizedStageChunkIsAtomic();
+    /** @brief 同じ復元先を指すパスがchunk内でもchunk間でも重複として原子的に拒否されることを確認する */
+    void duplicateCanonicalPathsAreRejectedAtomically();
     /** @brief entry数上限を超えるstageが原子的に拒否され既存entryが保たれることを確認する */
     void entryCapacityExcessIsAtomic();
     /** @brief path byte上限を超えるstageが原子的に拒否され既存entryが保たれることを確認する */
@@ -419,7 +421,10 @@ void TestRestoreManifest::completedManifestRejectsReplay()
 }
 
 /**
- * @brief Cancelled/Failed計画への各種replayが拒否され状態が保たれることを検証する
+ * @brief Cancelled/Failed計画へのreplayが拒否され状態が保たれることを検証する
+ *
+ * Cancelledだけは、適用済み件数の記録に限ってadvanceを許可する
+ * markRunningはFrozenからの遷移しか受け付けないため、記録しても再開はできない
  */
 void TestRestoreManifest::cancelledAndFailedManifestsRejectReplay()
 {
@@ -445,7 +450,6 @@ void TestRestoreManifest::cancelledAndFailedManifestsRejectReplay()
         QVERIFY(before.has_value());
         const QVector<std::function<bool()>> replayCalls{
             [&]() { return registry.markRunning(id, QStringLiteral(":1.1"), &error); },
-            [&]() { return registry.advance(id, QStringLiteral(":1.1"), 1, &error); },
             [&]() { return registry.freeze(id, QStringLiteral(":1.1"), &error); },
             [&]() { return registry.stageEntries(id, QStringLiteral(":1.1"),
                                                  {QStringLiteral("/replay")},
@@ -460,6 +464,17 @@ void TestRestoreManifest::cancelledAndFailedManifestsRejectReplay()
         QCOMPARE(after->totalEntries, before->totalEntries);
         QCOMPARE(after->cursor, before->cursor);
     }
+
+    // Cancelledは適用済み件数の記録のためadvanceだけを許可し、状態はCancelledのまま保つ
+    const auto cancelledBefore = registry.status(cancelledId, QStringLiteral(":1.1"), &error);
+    QVERIFY(cancelledBefore.has_value());
+    QVERIFY(registry.advance(cancelledId, QStringLiteral(":1.1"), 1, &error));
+    const auto cancelledAfter = registry.status(cancelledId, QStringLiteral(":1.1"), &error);
+    QVERIFY(cancelledAfter.has_value());
+    QCOMPARE(cancelledAfter->state, ManifestState::Cancelled);
+    QCOMPARE(cancelledAfter->cursor, cancelledBefore->cursor + 1);
+    // Failedは終端到達の有無にかかわらず記録を受け付けない
+    QVERIFY(!registry.advance(failedId, QStringLiteral(":1.1"), 1, &error));
 }
 
 /**
@@ -536,6 +551,57 @@ void TestRestoreManifest::oversizedStageChunkIsAtomic()
     const auto status = registry.status(id, QStringLiteral(":1.1"), &error);
     QVERIFY(status.has_value());
     QCOMPARE(status->totalEntries, 0);
+}
+
+/**
+ * @brief 同じ復元先を指すパスがchunk内でもchunk間でも重複として原子的に拒否されることを確認する
+ *
+ * "/a"、"//a"、"/a/"は同じ場所への操作になるため複数回適用させない
+ * 重複を黙って捨てるとchunk単位の成否が曖昧になるため、chunk全体を拒否する
+ */
+void TestRestoreManifest::duplicateCanonicalPathsAreRejectedAtomically()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    const QString id = createManifest(registry);
+    ManifestError error = ManifestError::None;
+
+    // chunk内の重複は、1件も追加していない状態からchunk全体を拒否する
+    QVERIFY(!registry.stageEntries(id, QStringLiteral(":1.1"),
+                                   {QStringLiteral("/a"), QStringLiteral("//a")},
+                                   {QStringLiteral("modified"), QStringLiteral("modified")},
+                                   &error));
+    QCOMPARE(errorValue(error), errorValue(ManifestError::InvalidArgument));
+    auto status = registry.status(id, QStringLiteral(":1.1"), &error);
+    QVERIFY(status.has_value());
+    QCOMPARE(status->totalEntries, 0);
+
+    // 受付済みのパスは、表記が違っても後続chunkで拒否する
+    QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
+                                  {QStringLiteral("/a")}, {QStringLiteral("modified")}, &error));
+    QVERIFY(!registry.stageEntries(id, QStringLiteral(":1.1"),
+                                   {QStringLiteral("/b"), QStringLiteral("/a/")},
+                                   {QStringLiteral("modified"), QStringLiteral("modified")},
+                                   &error));
+    QCOMPARE(errorValue(error), errorValue(ManifestError::InvalidArgument));
+    status = registry.status(id, QStringLiteral(":1.1"), &error);
+    QVERIFY(status.has_value());
+    QCOMPARE(status->totalEntries, 1);
+    const auto entries = registry.entriesSlice(id, QStringLiteral(":1.1"), 0, 10, &error);
+    QVERIFY(entries.has_value());
+    QCOMPARE(entries->size(), 1);
+    QCOMPARE(entries->first().path, QStringLiteral("/a"));
+
+    // 形式が不正な値はregistryでは保存するだけであり、重複判定は同じ生の値に対してだけ行う
+    QVERIFY(registry.stageEntries(id, QStringLiteral(":1.1"),
+                                  {QStringLiteral("/c/../d")}, {QStringLiteral("modified")},
+                                  &error));
+    QVERIFY(!registry.stageEntries(id, QStringLiteral(":1.1"),
+                                   {QStringLiteral("/c/../d")}, {QStringLiteral("modified")},
+                                   &error));
+    QCOMPARE(errorValue(error), errorValue(ManifestError::InvalidArgument));
+    QCOMPARE(registry.status(id, QStringLiteral(":1.1"), &error)->totalEntries, 2);
 }
 
 /**

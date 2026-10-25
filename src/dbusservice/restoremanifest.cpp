@@ -2,7 +2,8 @@
  * @file restoremanifest.cpp
  * @brief restoremanifest.hとrestoremanifestregistry.h宣言の実装
  *
- * 状態遷移は単調にだけ進み、終端後は変更しない
+ * 状態遷移は単調にだけ進み、終端状態からは遷移しない
+ * ただしCancelledでは、取消要求を受けたchunkで処理済みの件数の記録だけを許可する
  * 上限の判定は変更前に行い、拒否時は計画を一切変化させない
  */
 
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 #include "restoremanifest.h"
+#include "restorevalidation.h"
 
 namespace qsnapper::restore {
 
@@ -87,7 +89,9 @@ bool RestoreManifest::advanceCursor(int count, ManifestError *err)
 
 bool RestoreManifest::advanceCursor(int count, const RestoreChunkTally &tally, ManifestError *err)
 {
-    if (m_state != ManifestState::Running) {
+    // Cancelledは、取消要求を受けたchunkで処理済みの件数を記録するためだけに許可する
+    // markRunningはFrozenからの遷移しか受け付けず、Cancelledは終端でもあるため、この許可で実行が再開されることはない
+    if (m_state != ManifestState::Running && m_state != ManifestState::Cancelled) {
         setError(err, ManifestError::WrongState);
         return false;
     }
@@ -115,7 +119,9 @@ bool RestoreManifest::advanceCursor(int count, const RestoreChunkTally &tally, M
     }
 
     m_cursor += count;
-    if (m_cursor == totalEntries()) {
+    // Cancelledのまま全件へ到達してもCompletedへ変えない
+    // 利用者の取消を成功として報告すると、終端状態の意味が変わってしまう
+    if (m_state == ManifestState::Running && m_cursor == totalEntries()) {
         m_state = ManifestState::Completed;
     }
     m_lastError.clear();
@@ -379,13 +385,33 @@ bool RestoreManifestRegistry::stageEntries(const QString &id,
         setError(err, ManifestError::CapacityExceeded);
         return false;
     }
+
+    ManifestRecord &record = m_manifests.at(id);
+
+    // "/a"、"//a"、"/a/"は同じ復元先を指すため、正規化キーで重複を拒否する
+    // 同じパスを複数回適用すると作業量だけが増え、件数の予算とも食い違う
+    // chunk全体を拒否して呼び出し側のchunk単位の成否判定 ("chunk全体を追加できた場合true") を保つ
+    QSet<QString> chunkPathKeys;
+    for (const QString &path : paths) {
+        QString key;
+        if (!canonicalizeRestorePlanPathKey(path, &key)) {
+            // registryは内容を検証せず安全に保存する層であり、形式の検証はD-Busの入口が担う
+            // そのため正規化できない値は拒否せず、生の文字列で重複だけを判定する
+            key = path;
+        }
+        if (chunkPathKeys.contains(key) || record.stagedPathKeys.contains(key)) {
+            setError(err, ManifestError::InvalidArgument);
+            return false;
+        }
+        chunkPathKeys.insert(key);
+    }
+
     if (qint64(manifest->totalEntries()) + paths.size()
         > m_maxEntriesPerManifest) {
         setError(err, ManifestError::CapacityExceeded);
         return false;
     }
 
-    ManifestRecord &record = m_manifests.at(id);
     const qint64 availablePathBytes = m_maxPathBytesPerManifest
                                    - record.pathBytes;
     qint64 additionalPathBytes = 0;
@@ -431,6 +457,8 @@ bool RestoreManifestRegistry::stageEntries(const QString &id,
         return false;
     }
 
+    // 拒否時にキーだけを残すと、追加されていないパスが以後のchunkで重複扱いになるため、成功後にだけ記録する
+    record.stagedPathKeys.unite(chunkPathKeys);
     record.pathBytes += additionalPathBytes;
     manifest->touch(m_clock());
     return true;

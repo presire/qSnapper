@@ -11,6 +11,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QSet>
 #include <QVector>
 #include <QtGlobal>
 
@@ -153,6 +154,9 @@ public:
 
     /**
      * @brief owner確認後にマニフェストのcursorを進める
+     *
+     * Cancelledへの適用は、終端状態へ適用済み件数を記録する用途だけに限る
+     *
      * @param id マニフェスト識別子
      * @param owner 呼び出し元owner
      * @param count 進める正のエントリ数
@@ -164,6 +168,9 @@ public:
 
     /**
      * @brief owner確認後にcursorを進め、同じchunkで削除・スキップした件数を記録する
+     *
+     * Cancelledへの適用は、終端状態へ適用済み件数を記録する用途だけに限る
+     *
      * @param id マニフェスト識別子
      * @param owner 呼び出し元owner
      * @param count 進める正のエントリ数 (スキップを含む)
@@ -368,6 +375,7 @@ private:
         qint64 pathBytes = 0;                       // 本計画が保持するUTF-8 pathバイト数
         uint ownerUid = 0;                          // 予算集計に使う呼び出し元UID
         quint64 creationSequence = 0;               // 作成順の通し番号 (古い計画から破棄する順序の判定用)
+        QSet<QString> stagedPathKeys;               // 受付済みパスの正規化キー (chunkをまたいだ重複排除用)
     };
 
     using ManifestMap = std::map<QString, ManifestRecord>;

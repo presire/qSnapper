@@ -154,6 +154,8 @@ add_executable(tst_restoremanifest
     tst_restoremanifest.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.h
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.h
 )
 target_include_directories(tst_restoremanifest PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice
@@ -191,6 +193,7 @@ add_executable(tst_restoreplanexecutor
     tst_restoreplanexecutor.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
 )
 target_include_directories(tst_restoreplanexecutor PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice

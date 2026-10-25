@@ -367,6 +367,25 @@ void SnapshotOperations::handleRestoreOwnerUnregisteredForTesting(const QString 
 }
 
 /**
+ * @brief 復元計画registryの時計をテスト用に差し替える
+ * @param clock 現在時刻 (ミリ秒) を返す関数
+ */
+void SnapshotOperations::setRestoreRegistryClockForTesting(std::function<qint64()> clock)
+{
+    m_restoreRegistry.setClock(clock);
+}
+
+/**
+ * @brief 復元計画のowner表にマニフェストIDが残っているかを返す
+ * @param manifestId 対象のマニフェストID
+ * @return 残っている場合true
+ */
+bool SnapshotOperations::hasRestorePlanOwnerForTesting(const QString &manifestId) const
+{
+    return m_restorePlanOwners.contains(manifestId);
+}
+
+/**
  * @brief 認可済みのcommitが作る実行状態を、mountせずに作る
  *
  * mountedは未設定のままにするため、終了処理はunmountを行わず、渡したfdだけを閉じる

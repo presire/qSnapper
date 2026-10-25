@@ -95,10 +95,12 @@ bool SingleInstanceGuard::tryAcquireLock()
 }
 
 /**
- * @brief 接続先のサーバが自分と同じUIDのプロセスかを確認する
+ * @brief 接続相手が自分と同じ実効UIDのプロセスかを確認する
+ *
+ * ソケットファイルへのアクセス権限と照合基準をそろえるため、実UIDではなく実効UIDで比較する
  *
  * @param socket 接続済みのソケット
- * @return 同じUIDの場合: true、異なる・確認できない場合: false
+ * @return 同じ実効UIDの場合: true、異なる・確認できない場合: false
  */
 bool SingleInstanceGuard::isPeerSameUser(const QLocalSocket &socket)
 {
@@ -108,7 +110,7 @@ bool SingleInstanceGuard::isPeerSameUser(const QLocalSocket &socket)
                      &credentials, &length) < 0 || length != sizeof(credentials)) {
         return false;
     }
-    return credentials.uid == ::getuid();
+    return credentials.uid == ::geteuid();
 }
 
 /**
@@ -187,11 +189,23 @@ bool SingleInstanceGuard::tryAcquire()
 /**
  * @brief 既存インスタンスへの新規接続を処理する
  *
- * 現状のプロトコルはraise要求のみを想定しており、接続受理時に raiseRequested() を通知する
+ * 接続受理後にSO_PEERCREDで実効UIDを照合する
+ * ソケットのパーミッションとUserAccessOptionだけに頼らず再検査することで、別UIDのプロセスが
+ * 接続してウィンドウを前面化させるのを防ぐ
+ * 現状のプロトコルはraise要求のみを想定しており、同一UIDの接続であればraiseRequested()を通知する
  */
 void SingleInstanceGuard::onNewConnection()
 {
     while (QLocalSocket *client = m_server->nextPendingConnection()) {
+        if (!isPeerSameUser(*client)) {
+            // 別UIDからの接続は要求を読まずに切る
+            // abort()で送受信を破棄し、deleteLaterで後片付けする
+            qWarning() << "SingleInstanceGuard: rejecting a connection from another user";
+            client->abort();
+            client->deleteLater();
+            continue;
+        }
+
         // 受信データは現状 raise 要求のみなので内容は検証せず破棄
         // 将来コマンドを増やす場合はここでパースする
         connect(client, &QLocalSocket::disconnected, client, &QLocalSocket::deleteLater);

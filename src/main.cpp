@@ -17,6 +17,8 @@
 #include <QDebug>
 #include <QQuickWindow>
 #include <QWindow>
+#include <unistd.h>
+#include <cstdio>
 #include "fssnapshot.h"
 #include "snapperservice.h"
 #include "snapshotlistmodel.h"
@@ -37,6 +39,19 @@
  */
 int main(int argc, char *argv[])
 {
+    // rootで起動すると、ユーザのホームにroot所有の設定ファイルを作ってしまい、以降そのユーザが編集できなくなる
+    // 特権操作はD-Busヘルパとpolkitへ委譲する設計のため、GUI自体をrootで動かす必要はない
+    // QGuiApplicationやQSettingsより前に判定し、設定ファイルやソケットを一切作らないようにする
+    // 翻訳のインストール前なので翻訳せず、英語のメッセージをそのまま出す
+    if (::geteuid() == 0) {
+        std::fputs("qSnapper must be run as a normal user, not as root.\n"
+                   "Privileged operations are delegated to the D-Bus helper and polkit.\n"
+                   "Running as root (for example with sudo -E) would create root-owned\n"
+                   "configuration files in your home directory.\n",
+                   stderr);
+        return 1;
+    }
+
     // Qt GUIアプリケーションの初期化
     QGuiApplication app(argc, argv);
 

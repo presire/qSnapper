@@ -221,6 +221,8 @@ private slots:
     void abandonedPlanDropsQueuedChunks();
     /** @brief 最初のchunk後のcancelが後続entryを止めCancelledを一度通知することを確認する */
     void cancelAtChunkBoundaryStopsLaterEntries();
+    /** @brief chunk実行中のcancelでも適用済み件数と内訳が終端状態へ記録されることを確認する */
+    void cancelDuringChunkRecordsAppliedEntries();
     /** @brief applier失敗が後続entryを止めFailedを一度通知することを確認する */
     void applierFailureFailsOnce();
     /** @brief 失敗位置・削除件数・スキップしたpathが終了状態に残ることを検証する */
@@ -479,6 +481,91 @@ void TestRestorePlanExecutor::cancelAtChunkBoundaryStopsLaterEntries()
     QCOMPARE(record.appliedPaths.size(), firstChunk);
     QCOMPARE(record.progressCurrent.size(), firstChunk);
     QCOMPARE(record.finishedStates.size(), 1);
+}
+
+/**
+ * @brief chunk実行中のcancelでも適用済み件数と内訳が終端状態へ記録されることを検証する
+ *
+ * 適用中にcancelされるとchunk境界の状態はCancelledになる
+ * このときcursorを進めないと、取消前に適用したentryがGetRestorePlanStatusへ反映されない
+ */
+void TestRestorePlanExecutor::cancelDuringChunkRecordsAppliedEntries()
+{
+    qint64 nowMs = kInitialTimeMs;
+    RestoreManifestRegistry registry;
+    registry.setClock([&nowMs]() { return nowMs; });
+    RestorePlanExecutor executor(registry);
+    ManualScheduler scheduler;
+    CallbackRecord record;
+
+    const QStringList paths{
+        QStringLiteral("/one"),
+        QStringLiteral("/two"),
+        QStringLiteral("/three")
+    };
+    // /twoは復元元に存在せず削除されるentry、/threeはスキップされるentryとして内訳の記録も確認する
+    const QStringList changeTypes{
+        QStringLiteral("modified"),
+        QStringLiteral("created"),
+        QStringLiteral("modified")
+    };
+    record.skippedPath = paths.at(2);
+
+    bool cancelRequested = false;
+    executor.setChunkScheduler(
+        [&scheduler](std::function<void()> chunk) {
+            scheduler.enqueue(std::move(chunk));
+        });
+    executor.setEntryApplier(
+        [&record, &executor, &cancelRequested](const QString &id,
+                                               const RestoreEntry &entry) {
+            record.appliedPaths.append(entry.path);
+            // 最初のentry適用中にcancelし、chunk境界でCancelledになる状況を作る
+            if (!cancelRequested) {
+                cancelRequested = true;
+                ManifestError cancelError = ManifestError::None;
+                executor.requestCancel(id, kOwner, &cancelError);
+            }
+            if (entry.path == record.skippedPath) {
+                return RestoreEntryOutcome::Skipped;
+            }
+            return RestoreEntryOutcome::Applied;
+        });
+    executor.setProgressSink(
+        [&record](const QString &id, int current, int total,
+                  const QString &path) {
+            Q_UNUSED(id)
+            record.progressCurrent.append(current);
+            record.progressTotal.append(total);
+            record.progressPaths.append(path);
+        });
+    executor.setFinishedSink(
+        [&record](const QString &id, ManifestState terminal,
+                  const QString &message) {
+            Q_UNUSED(id)
+            record.finishedStates.append(terminal);
+            record.finishedMessages.append(message);
+        });
+
+    const QString id = createFrozenPlan(registry, paths, changeTypes);
+    QVERIFY(!id.isEmpty());
+    ManifestError error = ManifestError::None;
+    QVERIFY(executor.start(id, kOwner, &error));
+    QVERIFY(scheduler.drainOne());
+
+    QCOMPARE(record.appliedPaths, paths);
+    QCOMPARE(record.progressCurrent.size(), paths.size());
+    QCOMPARE(record.finishedStates, QVector<ManifestState>({ManifestState::Cancelled}));
+    QVERIFY(!executor.isActive(id));
+
+    const auto status = registry.status(id, kOwner, &error);
+    QVERIFY(status.has_value());
+    QCOMPARE(status->state, ManifestState::Cancelled);
+    QCOMPARE(status->cursor, paths.size());
+    QCOMPARE(status->processed, paths.size());
+    QCOMPARE(status->deletedCount, 1);
+    QCOMPARE(status->skippedCount, 1);
+    QCOMPARE(status->skippedPaths, QStringList({paths.at(2)}));
 }
 
 /**

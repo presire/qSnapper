@@ -541,7 +541,7 @@ void TestFilesystemHelpers::replaceSymlinkAtRequiringMetadataLeavesLiveUntouched
 /**
  * @brief SELinuxコンテキストのユーザ部分だけが復元先の値に置き換わることを確認する
  *
- * qsnapper_dbus_tはSELinuxユーザを変更できないため、拒否されたコンテキストはユーザだけを合わせて書き直す
+ * SELinuxユーザを変更できない古いポリシーで書き込みが拒否された場合に、ユーザだけを合わせて書き直すための処理である
  * アクセス制御に効くタイプとレベルが変わらないこと、末尾のNULの有無が保たれること、
  * 置き換える意味がない場合と形式が不正な場合に空を返すことを確かめる
  */

@@ -557,6 +557,19 @@ private:
      */
     bool sendManifestError(qsnapper::restore::ManifestError error);
 
+    /** @brief 復元計画の進捗と終了のシグナルを所有者のunique nameだけへ送る
+     *
+     * システムバスへブロードキャストすると、他の利用者が復元の実行を観測できる
+     * 所有者が空の場合はD-Busを介さない単体テスト呼び出しなので、呼び出し側が通常のemitを使う
+     *
+     * @param owner 宛先のD-Bus unique name
+     * @param member シグナル名
+     * @param arguments シグナルの引数
+     * @return true = 宛先付きで送信を試みた (呼び出し側はemitしない)、false = ownerが空のため呼び出し側でemitする
+     */
+    bool sendRestorePlanSignalToOwner(const QString &owner, const QString &member,
+                                      const QVariantList &arguments);
+
     /** @brief マニフェスト状態をD-Bus contractの小文字表現へ変換する
      * @param state 変換対象状態
      * @return staging/frozen/running/completed/failed/cancelledのいずれか
@@ -722,6 +735,18 @@ public:
      * @param owner 切断されたことにするowner
      */
     void handleRestoreOwnerUnregisteredForTesting(const QString &owner);
+
+    /** @brief 復元計画registryの時計をテスト用に差し替える
+     *  TTL切れで消えた計画がowner表から掃除されることを、実際に待たずに検証するために使う
+     * @param clock 現在時刻 (ミリ秒) を返す関数
+     */
+    void setRestoreRegistryClockForTesting(std::function<qint64()> clock);
+
+    /** @brief 復元計画のowner表にマニフェストIDが残っているかを返す
+     * @param manifestId 対象のマニフェストID
+     * @return 残っている場合true
+     */
+    bool hasRestorePlanOwnerForTesting(const QString &manifestId) const;
 
     /** @brief 認可済みのcommitが作る実行状態を、mountせずに作る
      *  エントリの適用と終了処理 (安全ネット、ディレクトリの時刻) を、実際のスナップショットなしで検証するために使う

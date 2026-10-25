@@ -63,6 +63,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core DBus)
 add_executable(qsnapper_restoreplan_test_service
     restoreplan_test_service.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers_internal.cpp

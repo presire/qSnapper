@@ -129,6 +129,19 @@ bool validateFrozenEntriesAgainstTrees(RestoreManifestRegistry &registry,
 bool isSnapshotMetadataRestoreName(const QString &configRelativeName);
 
 /**
+ * @brief 復元対象パスを重複排除用の正規化キーへ変換する
+ *
+ * 空成分を除き、成分を"/"で繋ぎ直した絶対パスを返す
+ * 同じ実体を指す"/a"、"//a"、"/a/"が同じキーになるため、同じ計画内の異なるchunkの間でも重複を検出できる
+ * 実行時の復元先も同じ成分列から組み立てるため、キーが一致するパスは同じ場所への操作になる
+ *
+ * @param path 変換対象の絶対パス
+ * @param keyOut 正規化キー (rootサブボリューム直下なら"/")
+ * @return 先頭が"/"で、"." / ".."成分・制御文字を含まない場合true
+ */
+bool canonicalizeRestorePlanPathKey(const QString &path, QString *keyOut);
+
+/**
  * @brief configのSUBVOLUMEを空成分を除いた絶対パスへ正規化する
  * @param subvolume configのSUBVOLUME
  * @param rootPathOut 正規化結果 (rootサブボリュームなら"/")

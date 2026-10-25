@@ -28,7 +28,8 @@ class QLockFile;
  *    raiseRequested()シグナルをウィンドウの前面化処理へ接続する
  *
  * ソケットとlock fileはユーザ専用のruntimeディレクトリ (XDG_RUNTIME_DIR) 配下に置くため、マルチユーザ環境でもユーザごとに独立して1インスタンスを起動可能
- * 接続先のサーバは、SO_PEERCREDで自分と同じUIDのプロセスであることを確認してからraise要求を送る
+ * 接続先のサーバは、SO_PEERCREDで自分と同じ実効UIDのプロセスであることを確認してからraise要求を送る
+ * サーバ側でも接続を受理した後にSO_PEERCREDで実効UIDを再検査し、異なるUIDの接続は要求を読まずに切る
  *
  * @note runtimeディレクトリを使えない場合 (QStandardPathsが所有者やパーミッションの不正を検出した場合など) は、
  *       共有の /tmp にはフォールバックせず、二重起動防止を無効にして起動を許容する
@@ -58,9 +59,9 @@ private:
     bool tryAcquireLock();
 
     /**
-     * @brief 接続先が同じUIDのプロセスかを確認する
+     * @brief 接続先が同じ実効UIDのプロセスかを確認する
      * @param socket 確認対象の接続
-     * @return 同じUIDのプロセスである場合はtrue
+     * @return 同じ実効UIDのプロセスである場合はtrue
      */
     static bool isPeerSameUser(const QLocalSocket &socket);
 
@@ -104,7 +105,7 @@ private slots:
     /**
      * @brief 新規接続を処理する
      *
-     * 同一UIDの接続であることを確認したうえで、raise要求を発行する
+     * SO_PEERCREDで実効UIDを再検査し、同一UIDの接続である場合だけraise要求を発行する
      */
     void onNewConnection();
 };

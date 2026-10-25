@@ -1,7 +1,7 @@
 # CheckCompilerFlag / CheckLinkerFlagを使うため3.19以降を要求する
 cmake_minimum_required(VERSION 3.19)
 
-project(qsnapper VERSION 1.4.0 LANGUAGES CXX)
+project(qsnapper VERSION 1.4.1 LANGUAGES CXX)
 
 # Linux専用プロジェクト: 他のプラットフォームでは明示的にエラーを出す
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")

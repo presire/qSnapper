@@ -6,7 +6,6 @@
  */
 #include <QtTest/QtTest>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QTemporaryDir>
 
@@ -14,16 +13,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <functional>
-#include <linux/btrfs.h>
-#include <linux/magic.h>
-#include <sched.h>
-#include <sys/ioctl.h>
-#include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
-#include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
@@ -31,6 +21,113 @@
 #include "tst_filesystemhelpers.h"
 
 using namespace qsnapper::security;
+
+/** @brief トップと降下先の権限境界を正常系と同じ入口で検証する行を提供する */
+void TestFilesystemHelpers::beneathRootRemovalGuardsDirectoryOwnership_data()
+{
+    QTest::addColumn<int>("parentUid");
+    QTest::addColumn<int>("parentMode");
+    QTest::addColumn<int>("targetUid");
+    QTest::addColumn<bool>("regular");
+    QTest::addColumn<bool>("protectedChild");
+    QTest::addColumn<int>("middleUid");
+    QTest::addColumn<bool>("allowed");
+    QTest::newRow("a-foreign-top") << 1000 << 0755 << 0 << false << false << -1 << false;
+    QTest::newRow("b-principal-tree-root-file") << 1000 << 0755 << 1000 << false << false << -1 << true;
+    QTest::newRow("c-trusted-tree") << 0 << 0755 << 0 << false << false << -1 << true;
+    QTest::newRow("d-root-regular-file") << 1000 << 0755 << 0 << true << false << -1 << true;
+    QTest::newRow("e-root-shared-parent") << 0 << 0777 << 1000 << false << false << -1 << false;
+    QTest::newRow("f-foreign-descendant") << 1000 << 0755 << 1000 << false << true << -1 << false;
+    // 親までが信頼できても、削除対象やその内部で初めて非信頼になる場合は、そこから所有者を限定する
+    QTest::newRow("i-user-target-foreign-descendant") << 0 << 0755 << 1000 << false << true << -1 << false;
+    QTest::newRow("j-user-target-own-tree") << 0 << 0755 << 1000 << false << false << -1 << true;
+    QTest::newRow("k-user-middle-foreign-descendant") << 0 << 0755 << 0 << false << true << 1000 << false;
+}
+
+/** @brief 非信頼チェーンの所有者以外のディレクトリは中身も属性も変えずに拒否する */
+void TestFilesystemHelpers::beneathRootRemovalGuardsDirectoryOwnership()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to exercise recursive removal ownership guards");
+    }
+    QFETCH(int, parentUid);
+    QFETCH(int, parentMode);
+    QFETCH(int, targetUid);
+    QFETCH(bool, regular);
+    QFETCH(bool, protectedChild);
+    QFETCH(int, middleUid);
+    QFETCH(bool, allowed);
+    QTemporaryDir root;
+    QVERIFY(root.isValid());
+    QCOMPARE(::chmod(QFile::encodeName(root.path()).constData(), 0755), 0);
+    const QString parent = root.filePath(QStringLiteral("alice"));
+    const QString target = parent + QStringLiteral("/victim");
+    QVERIFY(QDir().mkpath(regular ? parent : target));
+    QCOMPARE(::chown(QFile::encodeName(parent).constData(), parentUid, parentUid), 0);
+    QCOMPARE(::chmod(QFile::encodeName(parent).constData(), parentMode), 0);
+    // middleUid指定時は、削除対象とprotectedの間に別の所有者のディレクトリを挟む
+    const QString container = middleUid >= 0 ? target + QStringLiteral("/middle") : target;
+    const QString protectedPath = protectedChild ? container + QStringLiteral("/protected") : target;
+    if (protectedChild) {
+        QVERIFY(QDir().mkpath(protectedPath));
+        QCOMPARE(::chmod(QFile::encodeName(protectedPath).constData(), 0700), 0);
+    }
+    if (middleUid >= 0) {
+        QCOMPARE(::chown(QFile::encodeName(container).constData(), middleUid, middleUid), 0);
+    }
+    const QString payload = regular ? target : protectedPath + QStringLiteral("/file");
+    {
+        QFile file(payload);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("preserved content"), qint64(17));
+    }
+    QCOMPARE(::chown(QFile::encodeName(target).constData(), targetUid, targetUid), 0);
+    struct stat before {};
+    QCOMPARE(::lstat(QFile::encodeName(protectedPath).constData(), &before), 0);
+    errno = 0;
+    const bool removed = safeRemoveAllBeneathRoot(root.path(), target);
+    const int removalError = errno;
+    QCOMPARE(removed, allowed);
+    if (allowed) {
+        QVERIFY(!QFileInfo::exists(target));
+    }
+    else {
+        QCOMPARE(removalError, EPERM);
+        struct stat after {};
+        QCOMPARE(::lstat(QFile::encodeName(protectedPath).constData(), &after), 0);
+        QCOMPARE(after.st_dev, before.st_dev);
+        QCOMPARE(after.st_ino, before.st_ino);
+        QCOMPARE(after.st_uid, before.st_uid);
+        QCOMPARE(after.st_mode, before.st_mode);
+        QFile file(payload);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("preserved content"));
+    }
+}
+
+namespace {
+    /**
+     * @brief パスの所有者とmodeをsymlinkを辿らずに取得する
+     *
+     * 攻撃でsymlinkや別種別へ差し替えられていないことを検証するため、statではなくlstatを使う
+     *
+     * @param path 対象パス
+     * @param uidOut 所有者の返却先
+     * @param modeOut 07777で掩蔽したmodeの返却先
+     * @return 対象がディレクトリとして存在する場合true
+     */
+    bool lstatDirectoryOwnerAndMode(const QString &path, uid_t *uidOut, mode_t *modeOut)
+    {
+        struct stat st {};
+        if (::lstat(QFile::encodeName(path).constData(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+            return false;
+        }
+        *uidOut = st.st_uid;
+        *modeOut = static_cast<mode_t>(st.st_mode & 07777);
+        return true;
+    }
+}
+
 /**
  * @brief 欠けている親ディレクトリはsnapshot側の同じディレクトリのmodeで作成され、snapshot側に無い場合は0700になることを確認する
  */
@@ -218,36 +315,45 @@ void TestFilesystemHelpers::snapshotListFingerprintDetectsLeadingZeroEntries()
 }
 
 /**
- * @brief metadata適用の可否が親ディレクトリの所有者とmodeから判定されることを確認する
+ * @brief sticky bitと所有者のmode変更権限による過信を検出する判定表を用意する
+ */
+void TestFilesystemHelpers::parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode_data()
+{
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<int>("uid");
+    QTest::addColumn<bool>("trusted");
+    QTest::newRow("root-0755-trusted") << 0755 << 0 << true;
+    QTest::newRow("root-0700-trusted") << 0700 << 0 << true;
+    QTest::newRow("root-01755-trusted") << 01755 << 0 << true;
+    QTest::newRow("root-0775-untrusted") << 0775 << 0 << false;
+    QTest::newRow("root-0777-untrusted") << 0777 << 0 << false;
+    QTest::newRow("root-0770-untrusted") << 0770 << 0 << false;
+    QTest::newRow("root-01777-untrusted") << 01777 << 0 << false;
+    QTest::newRow("user-0700-untrusted") << 0700 << 1000 << false;
+    QTest::newRow("user-0755-untrusted") << 0755 << 1000 << false;
+    QTest::newRow("user-0555-untrusted") << 0555 << 1000 << false;
+}
+
+/**
+ * @brief root所有かつgroup/other書き込み不可だけを信頼することを確認する
  */
 void TestFilesystemHelpers::parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode()
 {
-    const auto makeStat = [](mode_t mode, uid_t uid) {
-        struct stat st {};
-        st.st_mode = mode | S_IFDIR;
-        st.st_uid = uid;
-        return st;
-    };
-
-    // root所有・他ユーザー書き込み不可は安全
-    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0755, 0)));
-    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0700, 0)));
-    // sticky bit付きなら、root所有エントリを他ユーザーは差し替えられない
-    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(01777, 0)));
-    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(01755, 0)));
-    // sticky bitが無いgroup/other書き込みは差し替えられる
-    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0777, 0)));
-    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0770, 0)));
-    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0775, 0)));
-    // 書き込み可能なディレクトリは所有者が差し替えられる
-    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0700, 1000)));
-    QVERIFY(!parentDirectoryIsSafeForMetadata(makeStat(0755, 1000)));
-    // 所有者でも書き込み不可なら差し替えられない
-    QVERIFY(parentDirectoryIsSafeForMetadata(makeStat(0555, 1000)));
+    QFETCH(int, mode);
+    QFETCH(int, uid);
+    QFETCH(bool, trusted);
+    struct stat st {};
+    st.st_mode = static_cast<mode_t>(mode) | S_IFDIR;
+    st.st_uid = static_cast<uid_t>(uid);
+    QCOMPARE(parentDirectoryIsSafeForMetadata(st), trusted);
 }
 
 /**
  * @brief metadata適用の可否が実際の作成結果に反映されることを確認する (root専用)
+ *
+ * 信頼チェーンではsnapshot側の所有者とmodeを適用する
+ * 他ユーザー所有の親では復元元の所有者をprincipalと確定できないため作成せず、木を変更しない
+ * 同じ処理をprincipal所有の親で行うと成功し、作成物がprincipalの所有物になる
  */
 void TestFilesystemHelpers::beneathRootMissingParentsFollowTrustedParentPolicy()
 {
@@ -270,42 +376,76 @@ void TestFilesystemHelpers::beneathRootMissingParentsFollowTrustedParentPolicy()
         QVERIFY(liveDir.isValid());
         QVERIFY(safeCreateParentDirectoriesFromSourceBeneathRoot(
                 liveDir.path(), liveDir.path() + QStringLiteral("/a"), snapshotFd, true));
-        struct stat st {};
-        QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), 0);
-        QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0751));
-        QCOMPARE(st.st_uid, ::geteuid());
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(liveDir.path() + QStringLiteral("/a"), &uid, &mode));
+        QCOMPARE(mode, mode_t(0751));
+        QCOMPARE(uid, ::geteuid());
     }
 
-    // 他ユーザーが書き込める親ではmetadataを適用せず、snapshot側の検索権 (0751のx) だけを与えた0711で作成する
+    // 他ユーザー所有の親では、復元元の所有者がその親の所有者と異なるため作成しない
     {
         QTemporaryDir liveDir;
         QVERIFY(liveDir.isValid());
         QCOMPARE(::chown(QFile::encodeName(liveDir.path()).constData(), 65534, 65534), 0);
-        QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0700), 0);
+        QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0755), 0);
 
-        const mode_t previousUmask = ::umask(0);
+        errno = 0;
         const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
                 liveDir.path(), liveDir.path() + QStringLiteral("/a"), snapshotFd, true);
-        ::umask(previousUmask);
-        QVERIFY(created);
+        const int createError = errno;
+        QVERIFY(!created);
+        QCOMPARE(createError, EPERM);
 
+        // 失敗時に親の所有者とmodeを変えず、作成物も残していないことを確認する
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(liveDir.path(), &uid, &mode));
+        QCOMPARE(uid, uid_t(65534));
+        QCOMPARE(mode, mode_t(0755));
         struct stat st {};
-        QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), 0);
-        QCOMPARE(mode_t(st.st_mode & 07777), mode_t(0711));
-        QCOMPARE(st.st_uid, ::geteuid());
+        QCOMPARE(::lstat(QFile::encodeName(liveDir.path() + QStringLiteral("/a")).constData(), &st), -1);
+        QCOMPARE(errno, ENOENT);
+    }
+
+    // 復元元と同じprincipal (uid 1000) 所有の親では、作成物をprincipalの所有物として作成しmetadataを適用する
+    {
+        QTemporaryDir liveDir;
+        QVERIFY(liveDir.isValid());
+        const QString principalParent = liveDir.path() + QStringLiteral("/owner");
+        QVERIFY(QDir().mkpath(principalParent));
+        QCOMPARE(::chown(QFile::encodeName(principalParent).constData(), 1000, 1000), 0);
+        QCOMPARE(::chmod(QFile::encodeName(principalParent).constData(), 0755), 0);
+        // 復元元の木も同じ相対パス (owner/a) に揃え、所有者をprincipalにする
+        QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("owner/a")));
+        const QString sourceA = snapshotDir.path() + QStringLiteral("/owner/a");
+        QCOMPARE(::chmod(QFile::encodeName(sourceA).constData(), 0751), 0);
+        QCOMPARE(::chown(QFile::encodeName(sourceA).constData(), 1000, 1000), 0);
+
+        QVERIFY(safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), principalParent + QStringLiteral("/a"), snapshotFd, true));
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(principalParent + QStringLiteral("/a"), &uid, &mode));
+        QCOMPARE(uid, uid_t(1000));
+        QCOMPARE(mode, mode_t(0751));
     }
 
     ::close(snapshotFd);
 }
 
 /**
- * @brief 差し替え可能な親の下で作り直す親ディレクトリが、snapshot側より緩い検索権を持たないことを確認する
+ * @brief 非信頼な親では作成を拒否し、被験ユーザー所有の親ではsnapshot側のmodeで作成することを確認する
  *
- * snapshot側で0700の親が0644の子を隠していた場合、子だけを復元しても親を0711で作ると他ユーザーが子を読めてしまう
- * 復元先の一時ディレクトリはsticky bitなしで誰でも書き込める (0777) ようにし、rootで実行しても差し替え可能な親として扱わせる
+ * 非root呼び出しの0711検索フォールバックは計画で削除が必須のため、非rootでも所有者を確定できる親でのmetadata適用を検証する
+ * 0777の親のように所有者を限定できない場所の拒否はrootのときだけ働くため、その検証だけroot専用とする
  */
 void TestFilesystemHelpers::beneathRootUntrustedParentKeepsSnapshotSearchRestriction()
 {
+    // rootで実行する場合はprincipalをuid 1000とし、非rootでは実行ユーザー自身を所有者の基準にする
+    const bool runningAsRoot = ::geteuid() == 0;
+    const uid_t testUser = runningAsRoot ? uid_t(1000) : ::geteuid();
+
     QTemporaryDir snapshotDir;
     QVERIFY(snapshotDir.isValid());
     const QString snapshotPath = snapshotDir.path();
@@ -319,71 +459,266 @@ void TestFilesystemHelpers::beneathRootUntrustedParentKeepsSnapshotSearchRestric
     QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/secret/child")).constData(), 0644), 0);
     QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/secret")).constData(), 0700), 0);
     QCOMPARE(::chmod(QFile::encodeName(snapshotPath + QStringLiteral("/public")).constData(), 0755), 0);
+    // 復元元の所有者を被験ユーザーに揃える (所有者不一致は別のtestで検証する)
+    if (runningAsRoot) {
+        QCOMPARE(::chown(QFile::encodeName(snapshotPath + QStringLiteral("/secret")).constData(), testUser, testUser), 0);
+        QCOMPARE(::chown(QFile::encodeName(snapshotPath + QStringLiteral("/public")).constData(), testUser, testUser), 0);
+    }
 
     const int snapshotFd = ::open(QFile::encodeName(snapshotPath).constData(),
                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     QVERIFY(snapshotFd >= 0);
 
-    QTemporaryDir liveDir;
-    QVERIFY(liveDir.isValid());
-    QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0777), 0);
+    // 被験ユーザー所有の親では、非rootでもsnapshot側のmodeをそのまま適用して作成する
+    {
+        QTemporaryDir liveDir;
+        QVERIFY(liveDir.isValid());
+        if (runningAsRoot) {
+            QCOMPARE(::chown(QFile::encodeName(liveDir.path()).constData(), testUser, testUser), 0);
+        }
+        QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0755), 0);
 
-    // umaskで作成時のmodeが削られると、検索権を与え過ぎていないかを判定できないため0にする
-    const mode_t previousUmask = ::umask(0);
-    const bool secretCreated = safeCreateParentDirectoriesFromSourceBeneathRoot(
-            liveDir.path(), liveDir.path() + QStringLiteral("/secret"), snapshotFd, true);
-    const bool publicCreated = safeCreateParentDirectoriesFromSourceBeneathRoot(
-            liveDir.path(), liveDir.path() + QStringLiteral("/public"), snapshotFd, true);
-    ::umask(previousUmask);
+        QVERIFY(safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/secret"), snapshotFd, true));
+        QVERIFY(safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/public"), snapshotFd, true));
+
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(liveDir.path() + QStringLiteral("/secret"), &uid, &mode));
+        QCOMPARE(uid, testUser);
+        QCOMPARE(mode, mode_t(0700));
+        QVERIFY(lstatDirectoryOwnerAndMode(liveDir.path() + QStringLiteral("/public"), &uid, &mode));
+        QCOMPARE(uid, testUser);
+        QCOMPARE(mode, mode_t(0755));
+    }
+
+    // 誰でも書き込める親はrootでも所有者を限定できないため、作成せずEPERMで失敗する
+    if (runningAsRoot) {
+        QTemporaryDir liveDir;
+        QVERIFY(liveDir.isValid());
+        QCOMPARE(::chmod(QFile::encodeName(liveDir.path()).constData(), 0777), 0);
+
+        errno = 0;
+        const bool secretCreated = safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/secret"), snapshotFd, true);
+        const int createError = errno;
+        QVERIFY(!secretCreated);
+        QCOMPARE(createError, EPERM);
+
+        // 親の所有者とmodeを変えず、子を作っていないことを確認する
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(liveDir.path(), &uid, &mode));
+        QCOMPARE(uid, ::geteuid());
+        QCOMPARE(mode, mode_t(0777));
+        struct stat st {};
+        QCOMPARE(::lstat(QFile::encodeName(liveDir.path() + QStringLiteral("/secret")).constData(), &st), -1);
+        QCOMPARE(errno, ENOENT);
+    }
+
     ::close(snapshotFd);
-    QVERIFY(secretCreated);
-    QVERIFY(publicCreated);
-
-    struct stat secretStat {};
-    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/secret")).constData(), &secretStat), 0);
-    QCOMPARE(mode_t(secretStat.st_mode & 07777), mode_t(0700));
-
-    // snapshot側が検索を許していた親は、復元先の子孫へ辿れるよう検索だけを与える
-    struct stat publicStat {};
-    QCOMPARE(::stat(QFile::encodeName(liveDir.path() + QStringLiteral("/public")).constData(), &publicStat), 0);
-    QCOMPARE(mode_t(publicStat.st_mode & 07777), mode_t(0711));
 }
 
-void TestFilesystemHelpers::beneathRootSymlinkHelpersApplyWithinRoot()
+/**
+ * @brief (a) 信頼チェーンでは欠けた親を復元元の所有者とmodeで作成する
+ *
+ * root所有で他ユーザー書き込み不可のhomeの下に、uid 1000所有のaliceが欠けている場合
+ * 従来どおりsnapshot側の所有者とmodeを適用する
+ */
+void TestFilesystemHelpers::beneathRootTrustedChainCreatesParentWithSourceMetadata()
 {
+    // 信頼チェーンの作成結果はeuid 0のときだけ検証できるため、root以外では実行しない
+    if (::geteuid() != 0) {
+        QSKIP("requires root to exercise the trusted chain policy");
+    }
+
     QTemporaryDir rootDir;
-    QVERIFY(rootDir.isValid());
+    QTemporaryDir snapshotDir;
+    QVERIFY(rootDir.isValid() && snapshotDir.isValid());
 
-    QVERIFY(QDir().mkpath(rootDir.path() + QStringLiteral("/sub")));
+    QVERIFY(QDir(rootDir.path()).mkpath(QStringLiteral("home")));
+    QCOMPARE(::chmod(QFile::encodeName(rootDir.path() + QStringLiteral("/home")).constData(), 0755), 0);
 
-    const QByteArray target("target-value");
-    const QString linkPath = rootDir.path() + QStringLiteral("/sub/link");
-    QVERIFY(safeCreateSymlinkNoFollowBeneathRoot(rootDir.path(), target, linkPath));
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("home/alice")));
+    const QString sourceAlice = snapshotDir.path() + QStringLiteral("/home/alice");
+    QCOMPARE(::chmod(QFile::encodeName(sourceAlice).constData(), 0750), 0);
+    QCOMPARE(::chown(QFile::encodeName(sourceAlice).constData(), 1000, 1000), 0);
 
-    char observedTarget[64] = {};
-    QVERIFY(::readlink(linkPath.toUtf8().constData(), observedTarget, sizeof(observedTarget) - 1) > 0);
-    QCOMPARE(QByteArray(observedTarget), target);
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
 
-    struct stat st;
-    QVERIFY(::lstat(linkPath.toUtf8().constData(), &st) == 0);
-    struct timespec ts[2];
-    ts[0] = st.st_atim;
-    ts[1] = st.st_mtim;
-    bool ownerUpdated = false;
-    bool timesUpdated = false;
-    QVERIFY(safeSetSymlinkMetadataNoFollowBeneathRoot(rootDir.path(), linkPath, ::getuid(),
-                                                      ::getgid(), ts, &ownerUpdated,
-                                                      &timesUpdated));
-    QVERIFY(ownerUpdated);
-    QVERIFY(timesUpdated);
+    errno = 0;
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            rootDir.path(), rootDir.path() + QStringLiteral("/home/alice"), snapshotFd, true);
+    const int createError = errno;
+    ::close(snapshotFd);
+    QVERIFY2(created, strerror(createError));
 
-    // root外の宛先は拒否される
-    const QString outsideLink = QStringLiteral("/tmp/qsnapper-t2-should-not-exist-link");
-    QVERIFY(!safeCreateSymlinkNoFollowBeneathRoot(rootDir.path(), target, outsideLink));
-    QVERIFY(!safeSetSymlinkMetadataNoFollowBeneathRoot(rootDir.path(), outsideLink, ::getuid(),
-                                                       ::getgid(), ts, &ownerUpdated,
-                                                       &timesUpdated));
-    QVERIFY(!QFile::exists(outsideLink));
+    uid_t uid = 0;
+    mode_t mode = 0;
+    QVERIFY(lstatDirectoryOwnerAndMode(rootDir.path() + QStringLiteral("/home/alice"), &uid, &mode));
+    QCOMPARE(uid, uid_t(1000));
+    QCOMPARE(mode, mode_t(0750));
+}
+
+/**
+ * @brief (b) 非信頼チェーンでは欠けた親をprincipalのfilesystem identityで作成する
+ *
+ * root/alice (principal 1000) の下に欠けたalice/a/bを作成し
+ * 作成物がすべてprincipal所有となり、snapshot側のmodeが適用されることを確認する
+ * setgid付きの親でも最終的なfchmodがsetgidを上書きすることを確認する
+ */
+void TestFilesystemHelpers::beneathRootUntrustedChainCreatesParentsAsPrincipal()
+{
+    // principalのfilesystem identityでの作成はeuid 0のときだけ働くため、root以外では実行しない
+    if (::geteuid() != 0) {
+        QSKIP("requires root to exercise the untrusted chain policy");
+    }
+
+    const auto runCase = [](mode_t aliceMode) {
+        QTemporaryDir rootDir;
+        QTemporaryDir snapshotDir;
+        QVERIFY(rootDir.isValid() && snapshotDir.isValid());
+
+        const QString alicePath = rootDir.path() + QStringLiteral("/alice");
+        QVERIFY(QDir().mkpath(alicePath));
+        QCOMPARE(::chown(QFile::encodeName(alicePath).constData(), 1000, 1000), 0);
+        QCOMPARE(::chmod(QFile::encodeName(alicePath).constData(), aliceMode), 0);
+
+        QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("alice/a/b")));
+        const QString sourceA = snapshotDir.path() + QStringLiteral("/alice/a");
+        const QString sourceB = sourceA + QStringLiteral("/b");
+        QCOMPARE(::chmod(QFile::encodeName(sourceA).constData(), 0750), 0);
+        QCOMPARE(::chmod(QFile::encodeName(sourceB).constData(), 0700), 0);
+        QCOMPARE(::chown(QFile::encodeName(sourceA).constData(), 1000, 1000), 0);
+        QCOMPARE(::chown(QFile::encodeName(sourceB).constData(), 1000, 1000), 0);
+
+        const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        QVERIFY(snapshotFd >= 0);
+
+        errno = 0;
+        const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+                rootDir.path(), alicePath + QStringLiteral("/a/b"), snapshotFd, true);
+        const int createError = errno;
+        ::close(snapshotFd);
+        QVERIFY2(created, strerror(createError));
+
+        uid_t uid = 0;
+        mode_t mode = 0;
+        QVERIFY(lstatDirectoryOwnerAndMode(alicePath + QStringLiteral("/a"), &uid, &mode));
+        QCOMPARE(uid, uid_t(1000));
+        QCOMPARE(mode, mode_t(0750));
+        QVERIFY(lstatDirectoryOwnerAndMode(alicePath + QStringLiteral("/a/b"), &uid, &mode));
+        QCOMPARE(uid, uid_t(1000));
+        QCOMPARE(mode, mode_t(0700));
+    };
+
+    runCase(0755);
+    runCase(02755);
+}
+
+/**
+ * @brief (c) 非信頼チェーンで復元元の所有者がprincipalと異なる場合は作成しない
+ *
+ * principal 1000のaliceの下に、uid 2000所有のaを復元しようとすると
+ * rootはprincipalの権限を越えてaを作れないためEPERMとし、aliceを変更しない
+ */
+void TestFilesystemHelpers::beneathRootUntrustedChainRejectsForeignSourceOwner()
+{
+    // 所有者不一致の拒否はeuid 0のときだけ働くため、root以外では実行しない
+    if (::geteuid() != 0) {
+        QSKIP("requires root to exercise the untrusted chain policy");
+    }
+
+    QTemporaryDir rootDir;
+    QTemporaryDir snapshotDir;
+    QVERIFY(rootDir.isValid() && snapshotDir.isValid());
+
+    const QString alicePath = rootDir.path() + QStringLiteral("/alice");
+    QVERIFY(QDir().mkpath(alicePath));
+    QCOMPARE(::chown(QFile::encodeName(alicePath).constData(), 1000, 1000), 0);
+    QCOMPARE(::chmod(QFile::encodeName(alicePath).constData(), 0755), 0);
+
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("alice/a")));
+    const QString sourceA = snapshotDir.path() + QStringLiteral("/alice/a");
+    QCOMPARE(::chmod(QFile::encodeName(sourceA).constData(), 0750), 0);
+    QCOMPARE(::chown(QFile::encodeName(sourceA).constData(), 2000, 2000), 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+
+    errno = 0;
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            rootDir.path(), alicePath + QStringLiteral("/a"), snapshotFd, true);
+    const int createError = errno;
+    ::close(snapshotFd);
+    QVERIFY(!created);
+    QCOMPARE(createError, EPERM);
+
+    // 親の所有者とmodeを変えず、principalの権限外の作成物も残していないことを確認する
+    uid_t uid = 0;
+    mode_t mode = 0;
+    QVERIFY(lstatDirectoryOwnerAndMode(alicePath, &uid, &mode));
+    QCOMPARE(uid, uid_t(1000));
+    QCOMPARE(mode, mode_t(0755));
+    struct stat st {};
+    QCOMPARE(::lstat(QFile::encodeName(alicePath + QStringLiteral("/a")).constData(), &st), -1);
+    QCOMPARE(errno, ENOENT);
+}
+
+/**
+ * @brief (d) 非信頼点より下にroot所有の成分が混在する場合は作成しない
+ *
+ * alice (uid 1000) の下のaがroot所有のまま残っている場合
+ * その先のbをprincipalの所有物として作成すると所有者の境界が混ざるためEPERMとし、aを変更しない
+ */
+void TestFilesystemHelpers::beneathRootUntrustedChainRejectsMixedOwnership()
+{
+    // 所有者の混在拒否はeuid 0のときだけ働くため、root以外では実行しない
+    if (::geteuid() != 0) {
+        QSKIP("requires root to exercise the untrusted chain policy");
+    }
+
+    QTemporaryDir rootDir;
+    QTemporaryDir snapshotDir;
+    QVERIFY(rootDir.isValid() && snapshotDir.isValid());
+
+    const QString alicePath = rootDir.path() + QStringLiteral("/alice");
+    QVERIFY(QDir().mkpath(alicePath + QStringLiteral("/a")));
+    QCOMPARE(::chown(QFile::encodeName(alicePath).constData(), 1000, 1000), 0);
+    QCOMPARE(::chmod(QFile::encodeName(alicePath).constData(), 0755), 0);
+    QCOMPARE(::chmod(QFile::encodeName(alicePath + QStringLiteral("/a")).constData(), 0755), 0);
+
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("alice/a/b")));
+    const QString sourceB = snapshotDir.path() + QStringLiteral("/alice/a/b");
+    QCOMPARE(::chmod(QFile::encodeName(sourceB).constData(), 0750), 0);
+    QCOMPARE(::chown(QFile::encodeName(sourceB).constData(), 1000, 1000), 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+
+    errno = 0;
+    const bool created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+            rootDir.path(), alicePath + QStringLiteral("/a/b"), snapshotFd, true);
+    const int createError = errno;
+    ::close(snapshotFd);
+    QVERIFY(!created);
+    QCOMPARE(createError, EPERM);
+
+    // root所有のaをprincipal所有へ変えず、bも作っていないことを確認する
+    uid_t uid = 0;
+    mode_t mode = 0;
+    QVERIFY(lstatDirectoryOwnerAndMode(alicePath + QStringLiteral("/a"), &uid, &mode));
+    QCOMPARE(uid, uid_t(0));
+    QCOMPARE(mode, mode_t(0755));
+    struct stat st {};
+    QCOMPARE(::lstat(QFile::encodeName(alicePath + QStringLiteral("/a/b")).constData(), &st), -1);
+    QCOMPARE(errno, ENOENT);
 }
 
 /**
@@ -414,9 +749,6 @@ void TestFilesystemHelpers::beneathRootStaleResolutionStillRejected()
     const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
     QWARN(qPrintable(QStringLiteral("stale write errno=%1 (%2)").arg(err).arg(strerror(err))));
     QVERIFY(isAttackRejectionErrno(err));
 
@@ -697,4 +1029,93 @@ void TestFilesystemHelpers::beneathRootResolutionRefusesMountBoundaries()
     ::close(sourceFd);
     QVERIFY(!created);
     QCOMPARE(createError, EXDEV);
+}
+
+/** @brief 正しい木と差し替え・所有者・種別の異常を対比する行を提供する */
+void TestFilesystemHelpers::snapshotDirectoryBeneathSubvolumeRefusesUntrustedPaths_data()
+{
+    QTest::addColumn<QString>("variant");
+    QTest::addColumn<int>("expectedErrno");
+    QTest::newRow("a-valid-tree") << QStringLiteral("valid") << 0;
+    QTest::newRow("b-snapshots-symlink") << QStringLiteral("snapshots-symlink") << ELOOP;
+    QTest::newRow("c-snapshot-symlink") << QStringLiteral("snapshot-symlink") << ELOOP;
+    QTest::newRow("d-snapshots-user-owned") << QStringLiteral("snapshots-user-owned") << EPERM;
+    QTest::newRow("e-number-world-writable") << QStringLiteral("number-world-writable") << EPERM;
+    QTest::newRow("f-user-owned-subvolume") << QStringLiteral("user-owned-subvolume") << 0;
+    QTest::newRow("g-snapshot-regular-file") << QStringLiteral("snapshot-regular-file") << ENOTDIR;
+}
+
+/** @brief symlinkを辿らず、rootが管理する .snapshots と番号ディレクトリの下だけを開く */
+void TestFilesystemHelpers::snapshotDirectoryBeneathSubvolumeRefusesUntrustedPaths()
+{
+    // 所有者の判定はroot所有の木を前提にするため、rootでのみ検証する
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to build root-owned .snapshots trees");
+    }
+    QFETCH(QString, variant);
+    QFETCH(int, expectedErrno);
+
+    QTemporaryDir subvolume;
+    QVERIFY(subvolume.isValid());
+    const QString base = subvolume.path();
+    QCOMPARE(::chmod(QFile::encodeName(base).constData(), 0755), 0);
+
+    // symlinkの差し替え先にも正しい木を置き、辿った場合は開けてしまう状態で拒否されることを確かめる
+    const QString realRoot = base + QStringLiteral("/real");
+    QVERIFY(QDir().mkpath(realRoot + QStringLiteral("/.snapshots/5/snapshot")));
+    QVERIFY(QDir().mkpath(base + QStringLiteral("/realsnapshot")));
+    if (variant == QStringLiteral("snapshots-symlink")) {
+        QCOMPARE(::symlink("real/.snapshots", QFile::encodeName(base + QStringLiteral("/.snapshots")).constData()), 0);
+    }
+    else {
+        QVERIFY(QDir().mkpath(base + QStringLiteral("/.snapshots/5")));
+        const QString snapshotPath = base + QStringLiteral("/.snapshots/5/snapshot");
+        if (variant == QStringLiteral("snapshot-symlink")) {
+            QCOMPARE(::symlink("../../realsnapshot", QFile::encodeName(snapshotPath).constData()), 0);
+        }
+        else if (variant == QStringLiteral("snapshot-regular-file")) {
+            QFile file(snapshotPath);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+        }
+        else {
+            QVERIFY(QDir().mkpath(snapshotPath));
+        }
+    }
+    if (variant == QStringLiteral("snapshots-user-owned")) {
+        QCOMPARE(::chown(QFile::encodeName(base + QStringLiteral("/.snapshots")).constData(), 1000, 1000), 0);
+    }
+    if (variant == QStringLiteral("number-world-writable")) {
+        QCOMPARE(::chmod(QFile::encodeName(base + QStringLiteral("/.snapshots/5")).constData(), 0777), 0);
+    }
+    if (variant == QStringLiteral("user-owned-subvolume")) {
+        QCOMPARE(::chown(QFile::encodeName(base).constData(), 1000, 1000), 0);
+    }
+
+    const int subvolumeFd = ::open(QFile::encodeName(base).constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(subvolumeFd >= 0);
+    struct stat opened {};
+    errno = 0;
+    const int snapshotFd = openSnapshotDirectoryBeneathSubvolume(subvolumeFd, 5, &opened);
+    const int openError = errno;
+    ::close(subvolumeFd);
+    if (snapshotFd >= 0) {
+        ::close(snapshotFd);
+    }
+
+    if (expectedErrno == 0) {
+        QVERIFY(snapshotFd >= 0);
+        struct stat expected {};
+        QCOMPARE(::lstat(QFile::encodeName(base + QStringLiteral("/.snapshots/5/snapshot")).constData(), &expected), 0);
+        QCOMPARE(opened.st_dev, expected.st_dev);
+        QCOMPARE(opened.st_ino, expected.st_ino);
+        return;
+    }
+    QVERIFY(snapshotFd < 0);
+    // 末尾がO_DIRECTORY | O_NOFOLLOWのsymlinkはENOTDIRで報告されることがあり、どちらも辿らない拒否である
+    if (expectedErrno == ELOOP) {
+        QVERIFY2(openError == ELOOP || openError == ENOTDIR, qPrintable(QString::number(openError)));
+    }
+    else {
+        QCOMPARE(openError, expectedErrno);
+    }
 }

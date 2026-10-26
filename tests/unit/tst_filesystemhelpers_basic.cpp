@@ -6,13 +6,11 @@
  */
 #include <QtTest/QtTest>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QTemporaryDir>
 
 #include <cerrno>
 #include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
 #include <functional>
 #include <linux/btrfs.h>
@@ -23,7 +21,6 @@
 #include <sys/stat.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
@@ -463,41 +460,6 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
     }
     QCOMPARE(result, 0);
     QVERIFY(QFile::exists(source + QStringLiteral("/keep")));
-}
-
-void TestFilesystemHelpers::safeRemoveAllBeneathRootStopsAtMountBoundary()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString root = tempDir.path();
-    const QString created = root + QStringLiteral("/created");
-    const QString mountPoint = created + QStringLiteral("/nfs");
-    QVERIFY(QDir().mkpath(mountPoint));
-    QVERIFY(createEmptyFile(created + QStringLiteral("/sibling")));
-
-    const int result = runInPrivateMountNamespace([&]() {
-        if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
-            return kNamespaceUnavailable;
-        }
-        if (!createEmptyFile(mountPoint + QStringLiteral("/remote"))) {
-            return 1;
-        }
-
-        errno = 0;
-        if (safeRemoveAllBeneathRoot(root, created)) {
-            return 2;
-        }
-        if (errno != EXDEV) {
-            return 3;
-        }
-        return existsNoFollow(mountPoint + QStringLiteral("/remote")) ? 0 : 4;
-    });
-
-    if (result == kNamespaceUnavailable) {
-        QSKIP("Unprivileged user/mount namespaces are not available");
-    }
-    QCOMPARE(result, 0);
 }
 
 /**

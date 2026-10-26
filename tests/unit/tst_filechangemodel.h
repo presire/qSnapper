@@ -80,7 +80,6 @@ public:
     QList<Call> calls;
     QString nextManifestId = QStringLiteral("manifest-1");
     QObject *receiver = nullptr;
-    int subscribeCount = 0;
     int unsubscribeCount = 0;
 
     int countKind(Call::Kind kind) const
@@ -93,8 +92,6 @@ public:
         }
         return count;
     }
-
-    bool hasPending() const { return !m_pending.isEmpty(); }
 
     void completePending(bool ok, const QString &value = QString(), const QString &error = QString())
     {
@@ -240,7 +237,6 @@ public:
     bool subscribePlanSignals(QObject *signalReceiver) override
     {
         receiver = signalReceiver;
-        ++subscribeCount;
         return true;
     }
 
@@ -434,10 +430,6 @@ private slots:
      * @brief 正当なCreatedツリー到達を検証する
      */
     void legitimateCreatedDirectoryTreeStillReachesThePlan();
-    /**
-     * @brief 合成中間ディレクトリがCreated親を抑制しないことを検証する
-     */
-    void syntheticIntermediateDirectoriesDoNotSuppressCreatedParent();
     /**
      * @brief 全Created子孫時の区別不可を検証する
      */

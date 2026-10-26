@@ -91,7 +91,6 @@ STAGE_POST_COMMIT_CONTROL = (                                   # コミット�
     "GetRestorePlanStatus",                                     # 状態を取得する
     "CancelRestorePlan",                                        # 実行をキャンセルする
 )
-STAGED_CONTROL_METHODS = STAGE_PRE_FREEZE + STAGE_POST_COMMIT_CONTROL  # 段階的経路の制御メソッド全体
 
 # 現在正当に認可するSnapshotOperationsメソッドの基準集合
 # この集合に無い新しい名前が現れた場合は未レビューの認可境界変更とみなし、静かに通過させず検査を失敗させる
@@ -280,65 +279,6 @@ def find_function_body_span(text: str, name_match_end: int) -> tuple[int, int]:
                     return brace_open, i
         i += 1
     raise ValueError(f"unterminated function body starting at offset {brace_open}")
-
-
-def depth_at_offset(text: str, body_start: int, target_offset: int) -> int:
-    """
-    @brief target_offset時点の波括弧の深さを返す
-
-    Args:
-        text: 走査対象のC++ソース全体
-        body_start: 関数の開始'{'の位置
-        target_offset: 深さを測る位置
-
-    Returns:
-        body_startを基準とした波括弧の深さ
-        find_function_body_spanと同じく文字列、文字リテラル、コメントを読み飛ばす
-        depth == 1は「関数の外側ブロックの直下であり、if/for/while/tryのいずれにもネストしていない」ことを意味する
-    """
-    depth = 0
-    i = body_start
-    in_line_comment = False
-    in_block_comment = False
-    in_string = False
-    in_char = False
-    while i < target_offset:
-        c = text[i]
-        c2 = text[i + 1] if i + 1 < len(text) else ""
-        if in_line_comment:
-            if c == "\n":
-                in_line_comment = False
-        elif in_block_comment:
-            if c == "*" and c2 == "/":
-                in_block_comment = False
-                i += 1
-        elif in_string:
-            if c == "\\":
-                i += 1
-            elif c == '"':
-                in_string = False
-        elif in_char:
-            if c == "\\":
-                i += 1
-            elif c == "'":
-                in_char = False
-        else:
-            if c == "/" and c2 == "/":
-                in_line_comment = True
-                i += 1
-            elif c == "/" and c2 == "*":
-                in_block_comment = True
-                i += 1
-            elif c == '"':
-                in_string = True
-            elif c == "'":
-                in_char = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-        i += 1
-    return depth
 
 
 def collect_functions(text: str) -> dict[str, tuple[int, int, int]]:
@@ -803,8 +743,9 @@ def main() -> int:
             )
 
     # --- 7: ファイル全体の実認可呼び出し位置を列挙し、その所属関数を出力する
-    # 段階的復元の制御メソッドが現れた場合、または所属関数の集合が
-    # レビュー済み基準からずれた場合は失敗させる ---
+    # 所属関数の集合がレビュー済み基準からずれた場合、または所属関数を特定できない
+    # 呼び出しがある場合は失敗させる
+    # 段階的復元の制御メソッドの認可0回は、[3]と[5]が同じ呼び出し位置に対して既に検査している
     print()
     print(f"{AUTH_CALL_LABEL} call site enumeration (whole file):")
     sites: list[tuple[int, str]] = []
@@ -823,14 +764,6 @@ def main() -> int:
     found_names = {name for _, name in sites}
     print(f"Total {AUTH_CALL_LABEL} call sites: {len(sites)}")
     print(f"Distinct enclosing methods: {sorted(found_names)}")
-
-    staged_violations = found_names & set(STAGED_CONTROL_METHODS)
-    if staged_violations:
-        failures.append(
-            f"staged-restore control method(s) now call {AUTH_CALL_LABEL}: "
-            f"{sorted(staged_violations)} -- this breaks the single-"
-            "authorization guarantee"
-        )
 
     unresolved = [f"line {line}" for line, name in sites if name == "<UNRESOLVED>"]
     if unresolved:

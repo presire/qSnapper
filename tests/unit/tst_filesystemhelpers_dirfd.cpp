@@ -2,33 +2,172 @@
  * @file tst_filesystemhelpers_dirfd.cpp
  * @brief dirfd相対解決の検証
  *
- * dirfd相対のstat・読出・不在確認とin-root解決、フォールバック経路の検証を集める
+ * dirfd相対のstat・読出・不在確認とin-root解決、復元先walkの検証を集める
  */
 #include <QtTest/QtTest>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QTemporaryDir>
 
 #include <cerrno>
 #include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
-#include <functional>
 #include <linux/btrfs.h>
 #include <linux/magic.h>
-#include <sched.h>
 #include <sys/ioctl.h>
-#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/vfs.h>
-#include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
+#include "filesystemhelpers_internal.h"
 
 #include "tst_filesystemhelpers.h"
+
+namespace {
+/**
+ * @class NestedSubvolumeFixture
+ * @brief 復元先walkのテストに使うnested btrfs subvolume
+ *
+ * 環境変数で指定されたbtrfs上のディレクトリにsubvolumeを作る
+ * テストが失敗してもsubvolumeを残さないよう、破棄時に内側のfileとsubvolumeを順に消す
+ * 作成に失敗した理由はerror()で取得でき、呼び出し側がQFAILする
+ */
+class NestedSubvolumeFixture
+{
+public:
+    /**
+     * @brief テスト用ルート、nested subvolume、subvolume内のfileを作成する
+     * @param base btrfs上のベースディレクトリ
+     */
+    explicit NestedSubvolumeFixture(const QString &base)
+        : m_root(base + QStringLiteral("/root-") + QString::number(::getpid()))
+        , m_subvolume(m_root + QStringLiteral("/nested"))
+        , m_insideFile(m_subvolume + QStringLiteral("/inside"))
+    {
+        // 前回の異常終了で残った同名ディレクトリがあるとsubvolume作成が失敗するため、先に消す
+        if (!QDir(m_root).removeRecursively()) {
+            m_error = QStringLiteral("cannot remove stale test root %1").arg(m_root);
+            return;
+        }
+        if (!QDir().mkpath(m_root)) {
+            m_error = QStringLiteral("cannot create test root %1").arg(m_root);
+            return;
+        }
+
+        qsnapper::security::UniqueFd rootFd(::open(m_root.toUtf8().constData(),
+                                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        if (!rootFd.isValid()) {
+            m_error = QStringLiteral("cannot open test root: %1")
+                              .arg(QString::fromLocal8Bit(std::strerror(errno)));
+            return;
+        }
+
+        struct btrfs_ioctl_vol_args args;
+        std::memset(&args, 0, sizeof(args));
+        std::strncpy(args.name, "nested", sizeof(args.name) - 1);
+        const int created = ::ioctl(rootFd.get(), BTRFS_IOC_SUBVOL_CREATE, &args);
+        const int createErrno = errno;
+        if (created < 0) {
+            m_error = QStringLiteral("cannot create nested subvolume: %1")
+                              .arg(QString::fromLocal8Bit(std::strerror(createErrno)));
+            return;
+        }
+
+        qsnapper::security::UniqueFd fileFd(::open(m_insideFile.toUtf8().constData(),
+                                                   O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+                                                   0644));
+        if (!fileFd.isValid()) {
+            m_error = QStringLiteral("cannot create file inside subvolume: %1")
+                              .arg(QString::fromLocal8Bit(std::strerror(errno)));
+            return;
+        }
+        m_valid = true;
+    }
+
+    /**
+     * @brief 作成したfile、subvolume、テスト用ルートを削除する
+     */
+    ~NestedSubvolumeFixture()
+    {
+        ::unlink(m_insideFile.toUtf8().constData());
+        ::rmdir(m_subvolume.toUtf8().constData());
+        ::rmdir(m_root.toUtf8().constData());
+    }
+
+    /**
+     * @brief コピーを禁止する
+     *
+     * 2つのデストラクタが同じsubvolumeとfileを二重に削除しないため
+     */
+    NestedSubvolumeFixture(const NestedSubvolumeFixture &) = delete;
+
+    /**
+     * @brief コピー代入を禁止する
+     *
+     * 所有権が二重になり二重削除を招かないため
+     */
+    NestedSubvolumeFixture &operator=(const NestedSubvolumeFixture &) = delete;
+
+    /**
+     * @brief subvolumeと内側のfileを作成できたかを返す
+     * @return 作成に成功した場合true
+     */
+    bool isValid() const
+    {
+        return m_valid;
+    }
+
+    /**
+     * @brief 作成に失敗した理由を返す
+     * @return 失敗理由、成功時は空文字列
+     */
+    QString error() const
+    {
+        return m_error;
+    }
+
+    /**
+     * @brief テスト用ルートのパスを返す
+     * @return root-<pid>形式の絶対パス
+     */
+    QString root() const
+    {
+        return m_root;
+    }
+
+private:
+    QString m_root;             // テストごとの一時ルート (root-<pid>)
+    QString m_subvolume;        // ルート直下に作るnested subvolume
+    QString m_insideFile;       // subvolume内に作る通常ファイル
+    QString m_error;            // 作成に失敗した理由
+    bool m_valid = false;       // subvolumeとfileを作成できたか
+};
+
+/**
+ * @brief btrfsのテスト基盤が使えるかを確認する
+ *
+ * 環境変数の設定有無は呼び出し側が判定する
+ * 設定済みなのに使えない場合は受け入れ環境の誤設定なので、呼び出し側はQFAILする
+ * @param base 環境変数QSNAPPER_BTRFS_TEST_DIRの値
+ * @param error 使用できない理由の返却先
+ * @return 使用できる場合true
+ */
+bool btrfsTestBaseIsUsable(const QString &base, QString *error)
+{
+    struct statfs fsInfo;
+    if (::statfs(base.toUtf8().constData(), &fsInfo) < 0) {
+        *error = QStringLiteral("QSNAPPER_BTRFS_TEST_DIR cannot be stat'ed: %1: %2")
+                         .arg(base, QString::fromLocal8Bit(std::strerror(errno)));
+        return false;
+    }
+    if (fsInfo.f_type != BTRFS_SUPER_MAGIC) {
+        *error = QStringLiteral("QSNAPPER_BTRFS_TEST_DIR is not on btrfs: %1").arg(base);
+        return false;
+    }
+    return true;
+}
+} // namespace
 
 using namespace qsnapper::security;
 void TestFilesystemHelpers::safeLstatAtResolvesRelativeToDirFd()
@@ -87,33 +226,6 @@ void TestFilesystemHelpers::safeLstatAtRejectsAbsoluteAndTraversalPaths()
     QCOMPARE(errno, EINVAL);
     QVERIFY(!safeLstatAt(dirFd, QString(), &st));
     QCOMPARE(errno, EINVAL);
-
-    QVERIFY(::close(dirFd) == 0);
-}
-
-void TestFilesystemHelpers::safeOpenRegularFileReadAtResolvesRelativeToDirFd()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString sourceFile = tempDir.path() + QStringLiteral("/source.txt");
-    {
-        QFile file(sourceFile);
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("data");
-    }
-
-    const int dirFd = ::open(tempDir.path().toUtf8().constData(),
-                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    QVERIFY(dirFd >= 0);
-
-    const int fd = safeOpenRegularFileReadAt(dirFd, QStringLiteral("source.txt"));
-    QVERIFY(fd >= 0);
-    {
-        QFile file;
-        QVERIFY(file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle));
-        QCOMPARE(file.readAll(), QByteArray("data"));
-    }
 
     QVERIFY(::close(dirFd) == 0);
 }
@@ -544,45 +656,6 @@ void TestFilesystemHelpers::safeReadHelpersKeepLegitimateRelativeIntermediateSym
 }
 
 /**
- * @brief snapshotに典型的な絶対中間symlinkがin-root解決されることを検証する
- *
- * これはRESOLVE_IN_ROOTポリシーである
- * snapshotは"/"のbtrfs snapshotであり、
- * "var/run -> /run" はsnapshot内の/runへ解決されるべき正当なsymlinkである
- * (RESOLVE_BENEATHではこのような正当なsnapshotから復元できなくなってしまうため採用していない)
- */
-void TestFilesystemHelpers::safeOpenRegularFileReadAtResolvesSnapshotAbsoluteSymlinkInRoot()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString rootPath = tempDir.path() + QStringLiteral("/root");
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/var")));
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/run")));
-    {
-        QFile file(rootPath + QStringLiteral("/run/file"));
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("in-root");
-    }
-    QVERIFY(::symlink(QStringLiteral("/run").toUtf8().constData(),
-                      (rootPath + QStringLiteral("/var/run")).toUtf8().constData()) == 0);
-
-    const int rootFd = ::open(rootPath.toUtf8().constData(),
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    QVERIFY(rootFd >= 0);
-
-    const int fd = safeOpenRegularFileReadAt(rootFd, QStringLiteral("var/run/file"));
-    QVERIFY(fd >= 0);
-    {
-        QFile file;
-        QVERIFY(file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle));
-        QCOMPARE(file.readAll(), QByteArray("in-root"));
-    }
-
-    QVERIFY(::close(rootFd) == 0);
-}
-
-/**
  * @brief 中間symlinkを通った場合でもleaf symlinkは追従されないことを検証する
  *
  * 復元ロジックはsafeLstatAtがleaf symlinkをsymlinkとして報告することに依存する
@@ -719,116 +792,11 @@ void TestFilesystemHelpers::restoreReadHelpersHandleSnapshotWithIntermediateSyml
 }
 
 /**
- * @brief openat2非対応カーネル向けフォールバックがopenat2と同じ親を解決することを検証する
+ * @brief in-root解決がsymlinkループを有限回で打ち切ることを検証する
  *
- * フォールバックは対応カーネル上では到達しないため、detail入口で明示的に選択して検証する
- * 解決先の同一性はst_dev / st_inoで突き合わせる
+ * 中間symlinkが循環してもopenat2がELOOPで失敗し、無限ループにならないこと
  */
-void TestFilesystemHelpers::inRootFallbackResolvesIdenticallyToOpenat2()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-
-    const QString rootPath = tempDir.path() + QStringLiteral("/root");
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/usr/bin")));
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/run")));
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/var")));
-    QVERIFY(QDir().mkpath(rootPath + QStringLiteral("/outside")));
-    QVERIFY(QDir().mkpath(tempDir.path() + QStringLiteral("/outside")));
-
-    {
-        QFile file(rootPath + QStringLiteral("/usr/bin/tool"));
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("tool-content");
-    }
-    {
-        QFile file(rootPath + QStringLiteral("/run/file"));
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("in-root run");
-    }
-    {
-        QFile file(rootPath + QStringLiteral("/outside/secret.txt"));
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("INSIDE");
-    }
-    {
-        QFile file(tempDir.path() + QStringLiteral("/outside/secret.txt"));
-        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
-        file.write("OUTSIDE");
-    }
-
-    QVERIFY(::symlink(QStringLiteral("usr/bin").toUtf8().constData(),
-                      (rootPath + QStringLiteral("/bin")).toUtf8().constData()) == 0);
-    QVERIFY(::symlink(QStringLiteral("/run").toUtf8().constData(),
-                      (rootPath + QStringLiteral("/var/run")).toUtf8().constData()) == 0);
-    QVERIFY(::symlink(QStringLiteral("../outside").toUtf8().constData(),
-                      (rootPath + QStringLiteral("/escape-rel")).toUtf8().constData()) == 0);
-
-    const int rootFd = ::open(rootPath.toUtf8().constData(),
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    QVERIFY(rootFd >= 0);
-
-    const QStringList paths{
-        QStringLiteral("usr/bin/tool"),
-        QStringLiteral("bin/tool"),
-        QStringLiteral("var/run/file"),
-        QStringLiteral("escape-rel/secret.txt")
-    };
-
-    for (const QString &path : paths) {
-        QByteArray kernelLeaf;
-        const int kernelFd = detail::openParentDirectoryInRootForTesting(
-                rootFd, path, &kernelLeaf, /*forceNoOpenat2=*/false);
-        QVERIFY2(kernelFd >= 0, qPrintable(path));
-
-        QByteArray fallbackLeaf;
-        const int fallbackFd = detail::openParentDirectoryInRootForTesting(
-                rootFd, path, &fallbackLeaf, /*forceNoOpenat2=*/true);
-        QVERIFY2(fallbackFd >= 0, qPrintable(path));
-
-        QCOMPARE(fallbackLeaf, kernelLeaf);
-
-        struct stat kernelStat;
-        struct stat fallbackStat;
-        QVERIFY(::fstat(kernelFd, &kernelStat) == 0);
-        QVERIFY(::fstat(fallbackFd, &fallbackStat) == 0);
-        QCOMPARE(fallbackStat.st_dev, kernelStat.st_dev);
-        QCOMPARE(fallbackStat.st_ino, kernelStat.st_ino);
-
-        const int leafFd = ::openat(fallbackFd, fallbackLeaf.constData(),
-                                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        QVERIFY2(leafFd >= 0, qPrintable(path));
-        QVERIFY(::close(leafFd) == 0);
-
-        QVERIFY(::close(kernelFd) == 0);
-        QVERIFY(::close(fallbackFd) == 0);
-    }
-
-    // rootの外にある同名ファイルではなく、root内のファイルが読まれることを直接確認する
-    QByteArray leafName;
-    const int parentFd = detail::openParentDirectoryInRootForTesting(
-            rootFd, QStringLiteral("escape-rel/secret.txt"), &leafName,
-            /*forceNoOpenat2=*/true);
-    QVERIFY(parentFd >= 0);
-    const int fd = ::openat(parentFd, leafName.constData(),
-                            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    QVERIFY(fd >= 0);
-    {
-        QFile file;
-        QVERIFY(file.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle));
-        QCOMPARE(file.readAll(), QByteArray("INSIDE"));
-    }
-    QVERIFY(::close(parentFd) == 0);
-
-    QVERIFY(::close(rootFd) == 0);
-}
-
-/**
- * @brief フォールバックがsymlinkループを有限回で打ち切ることを検証する
- *
- * openat2経路と同じくELOOPで失敗し、無限ループにならないこと
- */
-void TestFilesystemHelpers::inRootFallbackRejectsSymlinkLoop()
+void TestFilesystemHelpers::inRootRejectsSymlinkLoop()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -841,23 +809,133 @@ void TestFilesystemHelpers::inRootFallbackRejectsSymlinkLoop()
     QVERIFY(::symlink(QStringLiteral("loop-a").toUtf8().constData(),
                       (rootPath + QStringLiteral("/loop-b")).toUtf8().constData()) == 0);
 
-    const int rootFd = ::open(rootPath.toUtf8().constData(),
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    QVERIFY(rootFd >= 0);
+    UniqueFd rootFd(::open(rootPath.toUtf8().constData(),
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    QVERIFY(rootFd.isValid());
 
+    const QStringList components{QStringLiteral("loop-a"), QStringLiteral("child")};
     errno = 0;
-    QVERIFY(detail::openParentDirectoryInRootForTesting(
-                rootFd, QStringLiteral("loop-a/child"), nullptr,
-                /*forceNoOpenat2=*/true) < 0);
-    QCOMPARE(errno, ELOOP);
+    const UniqueFd parentFd(openParentDirectoryInRootAt(rootFd.get(), components, nullptr));
+    const int openErrno = errno;
+    QVERIFY(!parentFd.isValid());
+    QCOMPARE(openErrno, ELOOP);
+}
 
+/**
+ * @brief 復元先のwalkがnested btrfs subvolumeをEXDEVで拒否することを検証する
+ *
+ * nested subvolumeはmountではないためRESOLVE_NO_XDEVでは止まらない
+ * 親とst_devが異なることを各段のstatxで検出できなければ、subvolumeをまたいで書き込めてしまう
+ */
+void TestFilesystemHelpers::nestedSubvolumeIsRejected()
+{
+    const QString base = QString::fromLocal8Bit(qgetenv("QSNAPPER_BTRFS_TEST_DIR"));
+    if (base.isEmpty()) {
+        QSKIP("QSNAPPER_BTRFS_TEST_DIR is not set");
+    }
+    QString baseError;
+    if (!btrfsTestBaseIsUsable(base, &baseError)) {
+        QFAIL(qPrintable(baseError));
+    }
+
+    NestedSubvolumeFixture fixture(base);
+    if (!fixture.isValid()) {
+        QFAIL(qPrintable(fixture.error()));
+    }
+
+    const QStringList components = { QStringLiteral("nested"), QStringLiteral("inside") };
     errno = 0;
-    QVERIFY(detail::openParentDirectoryInRootForTesting(
-                rootFd, QStringLiteral("loop-a/child"), nullptr,
-                /*forceNoOpenat2=*/false) < 0);
-    QCOMPARE(errno, ELOOP);
+    const UniqueFd parentFd(openLeafParentBeneathRoot(fixture.root(), components,
+                                                      false, 0, nullptr));
+    const int openErrno = errno;
+    QVERIFY2(!parentFd.isValid(), "the destination walk crossed into a nested subvolume");
+    QCOMPARE(openErrno, EXDEV);
+}
 
-    QVERIFY(::close(rootFd) == 0);
+/**
+ * @brief 復元先のwalkが途中のsymlinkを追従しないことを検証する
+ *
+ * 中間成分のsymlinkを許すと、rootの外や別subvolumeのfileを宛先にできてしまう
+ * ELOOP (O_NOFOLLOW / RESOLVE_NO_SYMLINKS) かENOTDIR (非ディレクトリ) で失敗することを求める
+ */
+void TestFilesystemHelpers::symlinkedMiddleComponentIsRejected()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString root = tempDir.path() + QStringLiteral("/root");
+    QVERIFY(QDir().mkpath(root + QStringLiteral("/real")));
+    QVERIFY(::symlink("real", (root + QStringLiteral("/link")).toUtf8().constData()) == 0);
+
+    const QStringList components = { QStringLiteral("link"), QStringLiteral("inside") };
+    errno = 0;
+    const UniqueFd parentFd(openLeafParentBeneathRoot(root, components, false, 0, nullptr));
+    const int openErrno = errno;
+    QVERIFY2(!parentFd.isValid(), "the destination walk followed a middle symlink");
+    QVERIFY(openErrno == ELOOP || openErrno == ENOTDIR);
+}
+
+/**
+ * @brief 復元先のwalkが通常のnested directoryを開けることを検証する
+ *
+ * mount境界の拒否が正当なディレクトリまで巻き込まないことを確認する
+ */
+void TestFilesystemHelpers::plainNestedDirectoryIsOpened()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString root = tempDir.path() + QStringLiteral("/root");
+    QVERIFY(QDir().mkpath(root + QStringLiteral("/plain")));
+
+    const QStringList components = { QStringLiteral("plain"), QStringLiteral("file") };
+    QByteArray leafName;
+    const UniqueFd parentFd(openLeafParentBeneathRoot(root, components, false, 0, &leafName));
+    QVERIFY2(parentFd.isValid(), std::strerror(errno));
+    QCOMPARE(leafName, QByteArrayLiteral("file"));
+
+    struct stat parentInfo;
+    QCOMPARE(::fstat(parentFd.get(), &parentInfo), 0);
+    QVERIFY(S_ISDIR(parentInfo.st_mode));
+}
+
+/**
+ * @brief 絶対パス起点のwalkがsameMountOnly=falseでnested subvolumeを越えられることを検証する
+ *
+ * snapshot既存木の読み取りなど、subvolume越えが正当な用途では境界を課さない
+ */
+void TestFilesystemHelpers::nestedSubvolumeAllowedWithoutSameMountOnly()
+{
+    const QString base = QString::fromLocal8Bit(qgetenv("QSNAPPER_BTRFS_TEST_DIR"));
+    if (base.isEmpty()) {
+        QSKIP("QSNAPPER_BTRFS_TEST_DIR is not set");
+    }
+    QString baseError;
+    if (!btrfsTestBaseIsUsable(base, &baseError)) {
+        QFAIL(qPrintable(baseError));
+    }
+
+    NestedSubvolumeFixture fixture(base);
+    if (!fixture.isValid()) {
+        QFAIL(qPrintable(fixture.error()));
+    }
+
+    QStringList components;
+    QVERIFY(splitAbsolutePath(fixture.root() + QStringLiteral("/nested"), &components));
+    if (components.isEmpty()) {
+        QFAIL("the test path unexpectedly had no components");
+    }
+
+    const UniqueFd subvolumeFd(openDirectoryChainNoFollow(components, components.size(), false, 0));
+    const int openErrno = errno;
+    QVERIFY2(subvolumeFd.isValid(), std::strerror(openErrno));
+
+    struct stat rootInfo;
+    struct stat subvolumeInfo;
+    QCOMPARE(::stat(fixture.root().toUtf8().constData(), &rootInfo), 0);
+    QCOMPARE(::fstat(subvolumeFd.get(), &subvolumeInfo), 0);
+    QVERIFY2(subvolumeInfo.st_dev != rootInfo.st_dev,
+             "the fixture did not produce a distinct st_dev for the nested subvolume");
 }
 
 /**

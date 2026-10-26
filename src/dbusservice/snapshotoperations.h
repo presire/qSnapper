@@ -393,11 +393,11 @@ private:
      * @param owner 認可前にキャプチャした呼び出し元unique name
      * @param counterpart 比較相手スナップショットのiterator (counterpartIsCurrentがtrueなら使用しない)
      * @param counterpartIsCurrent 比較相手が現在のシステム (live側のSUBVOLUME) か
-     * @param snapshotDir pin済みdirfdが指すスナップショット directoryのpath
+     * @param fstype configのFSTYPE (スナップショットディレクトリを開き直す規則を決める)
      * @param pinnedStat pin済みdirfdに対するfstatの結果
      * @return 全entryが実際の差分に裏付けられ、同一性確認も通った場合true
      */
-     bool validateFrozenRestorePlan(const QString &manifestId, const QString &owner, const snapper::Snapshots::const_iterator &counterpart, bool counterpartIsCurrent, const QString &snapshotDir, const struct stat &pinnedStat);
+     bool validateFrozenRestorePlan(const QString &manifestId, const QString &owner, const snapper::Snapshots::const_iterator &counterpart, bool counterpartIsCurrent, const std::string &fstype, const struct stat &pinnedStat);
     /** @brief commit時preflight失敗を計画のfail-closed終端へ落とし込む
      * @param manifestId 検証に失敗したマニフェストID
      * @param owner 認可前にキャプチャした呼び出し元unique name

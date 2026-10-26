@@ -102,14 +102,16 @@ namespace qsnapper {
         bool isRecordSafeText(const QString &value);
 
         /**
-         * @brief レコード区切りを破壊する文字を置換文字 (U+FFFD) に置き換える
+         * @brief レコード区切りを破壊する文字と、双方向制御文字を置換文字 (U+FFFD) に置き換える
          *
          * isRecordSafeText()が拒否する制御文字を1文字ずつU+FFFDに置き換えるため、戻り値は常にisRecordSafeText()を満たす
          * スナップショット一覧のdescription / cleanup / userdataのような表示用の値に使い、1件の不正な値で一覧全体を失敗させないためのもの
+         * 双方向制御文字 (U+202A..U+202E、U+2066..U+2069) は、表示の並びを入れ替えて別の値に見せかけられるため置き換える
+         * ただし、レコード区切りは壊さず、正当なファイル名にも含まれ得るため、isRecordSafeText()とパスの検証では拒否しない
          * 置き換えた値を識別子として使ってはならない (パスやconfig名には使わないこと)
          *
          * @param value 対象の文字列
-         * @return 制御文字をU+FFFDに置き換えた文字列
+         * @return 制御文字と双方向制御文字をU+FFFDに置き換えた文字列
          */
         QString sanitizeRecordText(const QString &value);
 

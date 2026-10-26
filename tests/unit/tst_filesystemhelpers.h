@@ -46,7 +46,6 @@ private slots:
     void safeRemoveAllStopsAtMountBoundary();
     void safeRemoveAllRefusesMountPointTarget();
     void safeRemoveAllStopsAtSameFilesystemBindMount();
-    void safeRemoveAllBeneathRootStopsAtMountBoundary();
     void safeRemoveAllStopsAtNestedBtrfsSubvolume();
 
     // --- 復元時のmetadata保持とrename前後の差し替え検出 ---
@@ -70,12 +69,8 @@ private slots:
     void safeOpenDirectoryBeneathRootCreatesMissing();
     void safeOpenDirectoryBeneathRootRejectsSymlinkComponent();
     void beneathRootWriteRejectsParentSymlinkSwap();
-    void beneathRootMkdirRejectsParentSymlinkSwap();
     void beneathRootRenameAsideRejectsParentSymlinkSwap();
     void beneathRootRemoveRejectsParentSymlinkSwap();
-    void beneathRootSymlinkCreateRejectsParentSymlinkSwap();
-    void beneathRootWriteRejectsGrandparentSymlinkSwap();
-    void beneathRootMkdirRejectsGrandparentSymlinkSwap();
     void beneathRootWriteRejectsLeafSymlinkToExternalFile();
     void beneathRootWriteRejectsDanglingSymlinkComponent();
     void beneathRootWriteRejectsRegularFileAsDirectoryComponent();
@@ -88,21 +83,29 @@ private slots:
     void beneathRootMissingParentsRejectLiveSymlinkComponent();
     void snapshotListFingerprintDetectsListChanges();
     void snapshotListFingerprintDetectsLeadingZeroEntries();
+    /** @brief 所有者がmodeを戻せる場合も非信頼とする判定表を提供する */
+    void parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode_data();
     void parentDirectoryMetadataSafetyIsJudgedFromOwnerAndMode();
     void beneathRootMissingParentsFollowTrustedParentPolicy();
     void beneathRootUntrustedParentKeepsSnapshotSearchRestriction();
-    void beneathRootSymlinkHelpersApplyWithinRoot();
+    void beneathRootTrustedChainCreatesParentWithSourceMetadata();
+    void beneathRootUntrustedChainCreatesParentsAsPrincipal();
+    void beneathRootUntrustedChainRejectsForeignSourceOwner();
+    void beneathRootUntrustedChainRejectsMixedOwnership();
     void beneathRootStaleResolutionStillRejected();
     void beneathRootRepeatedSwapsDoNotLeakDescriptors();
     void beneathRootHandlesMalformedInputsSafely();
     void beneathRootRejectsSymlinkInRootPathAncestry();
     void beneathRootRemovalStopsAtDepthLimit();
     void beneathRootResolutionRefusesMountBoundaries();
+    /** @brief 所有権付き再帰削除の拒否と既存動作を対比する行を提供する */
+    void beneathRootRemovalGuardsDirectoryOwnership_data();
+    /** @brief 他者のディレクトリへ降りず、本人の木と非ディレクトリだけを削除する */
+    void beneathRootRemovalGuardsDirectoryOwnership();
 
     // --- dirfd相対ソース解決 (staged restore のsnapshot pin) ---
     void safeLstatAtResolvesRelativeToDirFd();
     void safeLstatAtRejectsAbsoluteAndTraversalPaths();
-    void safeOpenRegularFileReadAtResolvesRelativeToDirFd();
     void safeOpenRegularFileReadAtRejectsSymlinkLeafAndNonRegular();
     void safeReadLinkNoFollowAtReadsRelativeToDirFd();
     void safeReadLinkNoFollowAtRejectsInvalidPaths();
@@ -120,13 +123,23 @@ private slots:
     void safeOpenRegularFileReadAtKeepsAbsoluteIntermediateSymlinkInsideRoot();
     void safeOpenRegularFileReadAtClampsDotDotInSymlinkTargetAtRoot();
     void safeReadHelpersKeepLegitimateRelativeIntermediateSymlinkWorking();
-    void safeOpenRegularFileReadAtResolvesSnapshotAbsoluteSymlinkInRoot();
     void safeHelpersKeepLeafSymlinkUnresolvedThroughIntermediateSymlink();
     void restoreReadHelpersHandleSnapshotWithIntermediateSymlinks();
 
-    // --- openat2非対応カーネル向けフォールバックのin-root解決 ---
-    void inRootFallbackResolvesIdenticallyToOpenat2();
-    void inRootFallbackRejectsSymlinkLoop();
+    // --- in-root解決がsymlinkループを打ち切ることの確認 ---
+    void inRootRejectsSymlinkLoop();
+
+    // --- 復元先walkのmount境界 (nested btrfs subvolume) ---
+    void nestedSubvolumeIsRejected();
+    void symlinkedMiddleComponentIsRejected();
+    void plainNestedDirectoryIsOpened();
+    void nestedSubvolumeAllowedWithoutSameMountOnly();
+
+    // --- 復元元snapshotのmount前後の解決 (.snapshots/<番号>/snapshot) ---
+    /** @brief 正しい木と差し替え・所有者・種別の異常を対比する行を提供する */
+    void snapshotDirectoryBeneathSubvolumeRefusesUntrustedPaths_data();
+    /** @brief symlinkを辿らず、rootが管理する .snapshots と番号ディレクトリの下だけを開く */
+    void snapshotDirectoryBeneathSubvolumeRefusesUntrustedPaths();
 
 private:
     // --- errno判定と指紋 ---

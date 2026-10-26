@@ -18,15 +18,16 @@ SUSE Security Review 2026-04で指摘された脆弱性の PoC 再現/回帰ス�
 ```
 security_poc/
 ├── README.md                             (この文書)
-├── common.sh                             (共通ヘルパ: VM検証、ベースライン比較、snapshot ID取得)
+├── common.sh                             (共通ヘルパ: VM検証、サービス確認、結果判定、snapshot ID取得)
 ├── poc_polkit_race.py                    (C-1: issue 1, UnixProcessSubject race)
 ├── poc_restore_traversal.sh              (C-5: issue 5a, 復元経路の任意ファイル上書き。StageRestoreEntriesで検証)
 ├── poc_quit_dos.sh                       (C-6: issue 5b, Quit()無認証DoS)
+├── poc_log_leak.sh                       (C-7: issue 5c, /var/log/qsnapperの権限による情報漏洩)
 ├── poc_change_record_injection.sh        (C-8: 改行注入によるパス偽装 --> 任意ファイル削除)
 ├── poc_change_record_injection.cpp       (同PoCの実行体。実ソースをリンクする)
 ├── poc_restore_plan_tamper.sh            (C-9: staged restoreのcommit時changeType改ざん)
 ├── poc_restore_plan_tamper.cpp           (同PoCの実行体。実ソースをリンクする)
-└── results/                              (各実行の結果ログ保存先)
+└── results/                              (各実行の結果ログ保存先。実行時に生成し.gitkeepのみを保持する)
 ```
 
 ## C-8: 改行注入によるパス偽装 (poc_change_record_injection)
@@ -133,6 +134,7 @@ cd tests/security_poc
 sudo BASELINE=1 python3 poc_polkit_race.py --iterations 1000
 sudo BASELINE=1 ./poc_restore_traversal.sh
 sudo BASELINE=1 ./poc_quit_dos.sh
+sudo BASELINE=1 ./poc_log_leak.sh
 ```
 
 **全PoCが「成功 (=脆弱性再現)」となることを確認**  
@@ -146,6 +148,7 @@ sudo zypper in qSnapper-1.3.3-*.rpm       # 修正版
 sudo python3 poc_polkit_race.py --iterations 1000
 sudo ./poc_restore_traversal.sh
 sudo ./poc_quit_dos.sh
+sudo ./poc_log_leak.sh
 ```
 
 **全PoCが「失敗 (=修正により閉じられた)」となることを確認**  
@@ -168,14 +171,15 @@ sudo -u bob python3 /tmp/qsnapper_poc/poc_polkit_race.py --iterations 1000
 | C-1 | #1   | P0-1 (SystemBusNameSubject置換) |
 | C-5 | #5a  | P0-4 (RestoreFiles統合 + openat) |
 | C-6 | #5b  | P1-6 (Quit削除) + P2 (.conf per-member ACL) |
+| C-7 | #5c  | P1-7 (ログディレクトリ0700 + ログファイル0600) |
 | C-8 | —    | シリアライズのfail-closed (isRecordSafeText) + created削除前の復元元存在確認 (isConfirmedAbsentAt) |
 | C-9 | —    | commit時の権威ある比較再構築と全entry照合 (restorevalidation) + counterpartSnapshotNumber導入 |
 
 > **削除済PoC** (テスト計画書 [テスト計画]SUSE_Security_Fix_テスト項目.md と同期):  
 > - **C-2** (poc_config_traversal.sh): B-2 + `tests/integration/test_configname_dbus.py` で完全カバー  
 > - **C-3** (poc_cross_user.sh): B-1-4 (suse@KDE + bob@SSH) と重複、自動化不能 (Polkit subject 制約)  
-> - **C-4** (poc_action_mixup.sh): 攻撃起点 `Authenticate()` が削除済のため実行不能  
-> - **C-7** (poc_log_leak.sh): B-5 (ログファイル権限テスト) と完全重複  
+> - **C-4** (poc_action_mixup.sh): 攻撃起点 `Authenticate()` が削除済のため実行不能 (再登場は `tests/integration/check_dbus_contract_sync.py` が検出する)  
+> - **poc_quit_dos_source_verification.sh**: どこからも参照されず、git log依存のため非git環境では常にFAIL。実行時の拒否は `poc_quit_dos.sh` が確認し、Quit()とAuthenticate()がXMLとconfへ再登場しないことは `tests/integration/check_dbus_contract_sync.py` が検査する  
 > - **run_all.sh**: 削除済 PoC を含むため一括実行廃止、PoC 単位で個別実行する  
 
 ## 各スクリプトのExitコード規約

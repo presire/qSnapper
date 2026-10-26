@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/fsuid.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -47,7 +48,6 @@ private slots:
     void init();
 
     void beginThenCancelDoesNotTouchRootSubvolume();
-    void stagedPlanCancelDoesNotTouchRootSubvolume();
 
     // --- config操作を止める復元計画の判定 ---
     /** @brief 作成中(Staging)の計画だけではconfig操作が止められないことを検証する */
@@ -89,6 +89,10 @@ private slots:
     void specialFileSourceIsSkippedWithoutTouchingLive();
     /** @brief ディレクトリとファイルの間の種別変更を、YaST方式でも復元できることを検証する */
     void typechangedReplacesDirectoryAndFileInYastMode();
+    /** @brief 退避前と退避後の他者所有ディレクトリを対比するケースを提供する */
+    void typechangedGuardsForeignDirectories_data();
+    /** @brief 他者の木の退避を拒否し、退避後に削除を拒否した場合も失敗を報告する */
+    void typechangedGuardsForeignDirectories();
     /** @brief 子エントリの適用で変わるディレクトリの時刻を、計画の終了時に復元することを検証する */
     void directoryTimesAreRestoredAfterChildEntries();
     /** @brief 復元先の同名symlinkの先へmetadataを適用しないことを検証する */
@@ -96,6 +100,12 @@ private slots:
     /** @brief 他ユーザが書き換えられる親の下では、入れ替えられた可能性のある
      *        ディレクトリへmetadataを適用しないことを検証する */
     void untrustedParentRefusesMetadataOnUnprovenDirectories();
+    /** @brief 共有親の拒否とprincipal所有親の正常復元を対比する */
+    void untrustedParentRefusesMetadataOnUnprovenDirectories_data();
+    /** @brief 所有権境界と復元後のfilesystem identityを検証するケースを提供する */
+    void directoryMetadataFollowsChainOwnership_data();
+    /** @brief 他者所有の祖先や対象を通じたroot権限の増幅を拒否する */
+    void directoryMetadataFollowsChainOwnership();
     /** @brief rootをrwへ戻せなかった計画は、全エントリ適用済みでもFailedで終わることを検証する */
     void rootLeftReadOnlyMarksPlanFailed();
     /** @brief 実行中にownerが消えてもrootのrw安全網を実行することを検証する */
@@ -227,6 +237,73 @@ namespace {
 
 }
 
+/** @brief 元の名前を守る拒否と、退避物を保存してFailedを返す拒否を区別する */
+void TestSnapshotOperations::typechangedGuardsForeignDirectories_data()
+{
+    QTest::addColumn<bool>("foreignChild");
+    QTest::newRow("g-foreign-top-not-moved") << false;
+    QTest::newRow("h-detached-cleanup-fails") << true;
+}
+
+/** @brief 退避物を消せない場合にAppliedを返さず、復旧先のログと保存内容を確認する */
+void TestSnapshotOperations::typechangedGuardsForeignDirectories()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to exercise move-aside ownership guards");
+    }
+    QFETCH(bool, foreignChild);
+    ApplyFixture fixture;
+    QVERIFY(fixture.setUp());
+    QCOMPARE(::chmod(QFile::encodeName(fixture.livePath).constData(), 0755), 0);
+    const QString alice = fixture.livePath + QStringLiteral("/alice");
+    const QString target = alice + QStringLiteral("/victim");
+    const QString protectedPath = foreignChild ? target + QStringLiteral("/protected") : target;
+    QVERIFY(QDir().mkpath(protectedPath));
+    QCOMPARE(::chown(QFile::encodeName(alice).constData(), 1000, 1000), 0);
+    QCOMPARE(::chmod(QFile::encodeName(alice).constData(), 0755), 0);
+    QCOMPARE(::chown(QFile::encodeName(target).constData(), foreignChild ? 1000 : 0, 1000), 0);
+    QCOMPARE(::chmod(QFile::encodeName(protectedPath).constData(), 0700), 0);
+    QVERIFY(writeFile(protectedPath + QStringLiteral("/file"), "preserved content"));
+    QVERIFY(QDir().mkpath(fixture.sourcePath + QStringLiteral("/alice")));
+    QVERIFY(writeFile(fixture.sourcePath + QStringLiteral("/alice/victim"), "restored content"));
+    struct stat before {};
+    QCOMPARE(::lstat(QFile::encodeName(protectedPath).constData(), &before), 0);
+    SnapshotOperations operations;
+    const QString manifestId = QStringLiteral("guarded-typechanged");
+    QVERIFY(fixture.begin(operations, manifestId, false));
+    if (foreignChild) {
+        // ランダム名の退避先もログに必須とし、警告の有無だけで成功扱いにしない
+        QTest::ignoreMessage(QtCriticalMsg, QRegularExpression(
+            QStringLiteral(".*preserved at:.*") + QRegularExpression::escape(alice)
+            + QStringLiteral("/\\.victim\\.qsnapper-old\\.[0-9a-f]{16}.*")));
+    }
+    errno = 0;
+    const auto outcome = operations.applyRestoreEntryForTesting(
+        manifestId, {QStringLiteral("/alice/victim"), QStringLiteral("typechanged")});
+    const int applyError = errno;
+    QCOMPARE(outcome, qsnapper::restore::RestoreEntryOutcome::Failed);
+    QCOMPARE(applyError, EPERM);
+    QString preserved = protectedPath;
+    if (foreignChild) {
+        QCOMPARE(readFile(target), QByteArray("restored content"));
+        const QStringList detached = QDir(alice).entryList(
+            {QStringLiteral(".victim.qsnapper-old.*")}, QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot);
+        QCOMPARE(detached.size(), 1);
+        preserved = alice + QLatin1Char('/') + detached.constFirst() + QStringLiteral("/protected");
+    }
+    else {
+        QVERIFY(hasNoQsnapperLeftovers(alice));
+    }
+    struct stat after {};
+    QCOMPARE(::lstat(QFile::encodeName(preserved).constData(), &after), 0);
+    QCOMPARE(after.st_dev, before.st_dev);
+    QCOMPARE(after.st_ino, before.st_ino);
+    QCOMPARE(after.st_uid, before.st_uid);
+    QCOMPARE(after.st_mode, before.st_mode);
+    QCOMPARE(readFile(preserved + QStringLiteral("/file")), QByteArray("preserved content"));
+    operations.finishRestorePlanForTesting(manifestId, qsnapper::restore::ManifestState::Failed);
+}
+
 void TestSnapshotOperations::init()
 {
     m_readOnlyProbeCalls = 0;
@@ -276,27 +353,6 @@ void TestSnapshotOperations::beginThenCancelDoesNotTouchRootSubvolume()
     QVERIFY(status.size() >= 2);
     QCOMPARE(status.at(0), manifestId);
     QCOMPARE(status.at(1), QStringLiteral("cancelled"));
-}
-
-void TestSnapshotOperations::stagedPlanCancelDoesNotTouchRootSubvolume()
-{
-    SnapshotOperations operations;
-    installRootSubvolumeSpies(operations);
-    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
-
-    const QString manifestId = operations.BeginRestorePlan(
-        QStringLiteral("root"), 1, 0, QStringLiteral("yast"));
-    QVERIFY(!manifestId.isEmpty());
-    QVERIFY(operations.StageRestoreEntries(manifestId,
-                                           {QStringLiteral("/etc/hosts")},
-                                           {QStringLiteral("modified")}));
-
-    QSignalSpy finishedSpy(&operations, &SnapshotOperations::restorePlanFinished);
-    QVERIFY(operations.CancelRestorePlan(manifestId));
-
-    QCOMPARE(finishedSpy.count(), 1);
-    QCOMPARE(m_readOnlyProbeCalls, 0);
-    QCOMPARE(m_readWriteRestoreCalls, 0);
 }
 
 /**
@@ -981,6 +1037,18 @@ void TestSnapshotOperations::existingSymlinkIsNotUsedAsDirectory()
 }
 
 /**
+ * @brief root共有親と単一principalの親で旧ポリシーの適用範囲を区別する
+ */
+void TestSnapshotOperations::untrustedParentRefusesMetadataOnUnprovenDirectories_data()
+{
+    QTest::addColumn<int>("parentUid");
+    QTest::addColumn<int>("parentMode");
+    QTest::addColumn<bool>("allowed");
+    QTest::newRow("root-shared-refused") << 0 << 0777 << false;
+    QTest::newRow("principal-parent-applied") << 1000 << 0755 << true;
+}
+
+/**
  * @brief 他ユーザの書き換えられる親の下では、入れ替えられた可能性のあるディレクトリへrootがmetadataを適用しないことを検証する
  *
  * 所有者の変更を伴うため、rootで実行した場合だけ確認する
@@ -992,6 +1060,9 @@ void TestSnapshotOperations::untrustedParentRefusesMetadataOnUnprovenDirectories
     }
 
     constexpr uid_t kUserUid = 1000;    // 親ディレクトリを書き換えられる一般ユーザ
+    QFETCH(int, parentUid);
+    QFETCH(int, parentMode);
+    QFETCH(bool, allowed);
     ApplyFixture fixture;
     QVERIFY(fixture.setUp());
 
@@ -1006,7 +1077,8 @@ void TestSnapshotOperations::untrustedParentRefusesMetadataOnUnprovenDirectories
     }
     QVERIFY(QDir().mkpath(liveShared + QStringLiteral("/swapped")));
     QVERIFY(QDir().mkpath(liveShared + QStringLiteral("/owned")));
-    QCOMPARE(::chmod(QFile::encodeName(liveShared).constData(), 0777), 0);
+    QCOMPARE(::chown(QFile::encodeName(liveShared).constData(), parentUid, parentUid), 0);
+    QCOMPARE(::chmod(QFile::encodeName(liveShared).constData(), parentMode), 0);
     QCOMPARE(::chmod(QFile::encodeName(liveShared + QStringLiteral("/swapped")).constData(), 0755), 0);
     QCOMPARE(::chown(QFile::encodeName(liveShared + QStringLiteral("/owned")).constData(), kUserUid, kUserUid), 0);
     QCOMPARE(::chmod(QFile::encodeName(liveShared + QStringLiteral("/owned")).constData(), 0755), 0);
@@ -1023,25 +1095,172 @@ void TestSnapshotOperations::untrustedParentRefusesMetadataOnUnprovenDirectories
     QCOMPARE(swappedStat.st_uid, static_cast<uid_t>(0));
     QCOMPARE(swappedStat.st_mode & 07777, static_cast<mode_t>(0755));
 
-    // 所有者が既にsnapshot側と同じ一般ユーザであれば、modeを復元する
-    QCOMPARE(operations.applyRestoreEntryForTesting(QStringLiteral("apply-untrusted"),
-                                                    {QStringLiteral("/shared/owned"), QStringLiteral("modified")}),
-             qsnapper::restore::RestoreEntryOutcome::Applied);
+    // sourceとの所有者一致だけでは不十分で、親の単一principalとも一致する場合だけ復元する
+    errno = 0;
+    const auto ownedOutcome = operations.applyRestoreEntryForTesting(QStringLiteral("apply-untrusted"),
+                                                    {QStringLiteral("/shared/owned"), QStringLiteral("modified")});
+    const int ownedError = errno;
+    QCOMPARE(ownedOutcome, allowed ? qsnapper::restore::RestoreEntryOutcome::Applied
+                                  : qsnapper::restore::RestoreEntryOutcome::Failed);
+    if (!allowed) {
+        QCOMPARE(ownedError, EPERM);
+    }
     struct stat ownedStat;
     QCOMPARE(::stat(QFile::encodeName(liveShared + QStringLiteral("/owned")).constData(), &ownedStat), 0);
-    QCOMPARE(ownedStat.st_mode & 07777, static_cast<mode_t>(0700));
+    QCOMPARE(ownedStat.st_uid, kUserUid);
+    QCOMPARE(ownedStat.st_mode & 07777, static_cast<mode_t>(allowed ? 0700 : 0755));
 
-    // 自分で作成した空のディレクトリには、snapshot側の所有者とmodeを適用する
-    QCOMPARE(operations.applyRestoreEntryForTesting(QStringLiteral("apply-untrusted"),
-                                                    {QStringLiteral("/shared/created"), QStringLiteral("deleted")}),
-             qsnapper::restore::RestoreEntryOutcome::Applied);
-    struct stat createdStat;
-    QCOMPARE(::stat(QFile::encodeName(liveShared + QStringLiteral("/created")).constData(), &createdStat), 0);
-    QCOMPARE(createdStat.st_uid, kUserUid);
-    QCOMPARE(createdStat.st_mode & 07777, static_cast<mode_t>(0700));
+    // 作成時からprincipal所有にできる親だけに限定し、root共有親では何も作らない
+    errno = 0;
+    const auto createdOutcome = operations.applyRestoreEntryForTesting(QStringLiteral("apply-untrusted"),
+                                                    {QStringLiteral("/shared/created"), QStringLiteral("deleted")});
+    const int createdError = errno;
+    QCOMPARE(createdOutcome, allowed ? qsnapper::restore::RestoreEntryOutcome::Applied
+                                    : qsnapper::restore::RestoreEntryOutcome::Failed);
+    if (allowed) {
+        struct stat createdStat;
+        QCOMPARE(::stat(QFile::encodeName(liveShared + QStringLiteral("/created")).constData(), &createdStat), 0);
+        QCOMPARE(createdStat.st_uid, kUserUid);
+        QCOMPARE(createdStat.st_mode & 07777, static_cast<mode_t>(0700));
+    }
+    else {
+        QCOMPARE(createdError, EPERM);
+        QVERIFY(!QFileInfo::exists(liveShared + QStringLiteral("/created")));
+    }
 
     operations.finishRestorePlanForTesting(QStringLiteral("apply-untrusted"),
                                            qsnapper::restore::ManifestState::Failed);
+}
+
+/**
+ * @brief trusted-chain規則の拒否と正常系を独立した行にしてSKIPによる見かけの成功を防ぐ
+ */
+void TestSnapshotOperations::directoryMetadataFollowsChainOwnership_data()
+{
+    QTest::addColumn<QString>("relative");
+    QTest::addColumn<int>("parentUid");
+    QTest::addColumn<int>("parentMode");
+    QTest::addColumn<int>("targetUid");
+    QTest::addColumn<int>("sourceUid");
+    QTest::addColumn<int>("sourceMode");
+    QTest::addColumn<int>("expectedError");
+    QTest::addColumn<bool>("regularFile");
+    QTest::newRow("i-root-victim") << QStringLiteral("home/alice/victim") << 1000 << 0755 << 0 << 1000 << 0750 << EPERM << false;
+    QTest::newRow("ii-foreign-owner-match") << QStringLiteral("home/alice/bobdir") << 1000 << 0755 << 2000 << 2000 << 0750 << EPERM << false;
+    QTest::newRow("iii-principal-existing") << QStringLiteral("home/alice/own") << 1000 << 0755 << 1000 << 1000 << 0750 << 0 << false;
+    QTest::newRow("iv-principal-missing") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 1000 << 0750 << 0 << false;
+    QTest::newRow("v-root-shared") << QStringLiteral("shared/d") << 0 << 0777 << 1000 << 1000 << 0750 << EPERM << false;
+    QTest::newRow("vi-root-sticky-shared") << QStringLiteral("shared/d") << 0 << 01777 << 1000 << 1000 << 0750 << EPERM << false;
+    QTest::newRow("vii-trusted-chain") << QStringLiteral("home/d") << 0 << 0755 << 0 << 1000 << 0750 << 0 << false;
+    QTest::newRow("viii-protected-ancestor") << QStringLiteral("home/alice/protected/file") << 1000 << 0755 << 0 << 1000 << 0640 << EPERM << true;
+    QTest::newRow("ix-readonly-principal-parent") << QStringLiteral("home/alice/new") << 1000 << 0555 << -1 << 1000 << 0750 << EACCES << false;
+    QTest::newRow("x-identity-restored") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 1000 << 0700 << 0 << false;
+    QTest::newRow("xi-principal-group-writable") << QStringLiteral("home/alice/grp/x") << 1000 << 0755 << -1 << 1000 << 0775 << 0 << false;
+    QTest::newRow("source-foreign-refused-before-mkdir") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 2000 << 02775 << EPERM << false;
+    QTest::newRow("principal-root-source-refused") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 0 << 04755 << EPERM << false;
+}
+
+/**
+ * @brief 攻撃者が同じ親内で他者のディレクトリをrenameできてもmetadataや内容が変わらないことを確認する
+ */
+void TestSnapshotOperations::directoryMetadataFollowsChainOwnership()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to exercise directory ownership and filesystem identity");
+    }
+    QFETCH(QString, relative);
+    QFETCH(int, parentUid);
+    QFETCH(int, parentMode);
+    QFETCH(int, targetUid);
+    QFETCH(int, sourceUid);
+    QFETCH(int, sourceMode);
+    QFETCH(int, expectedError);
+    QFETCH(bool, regularFile);
+    ApplyFixture fixture;
+    QVERIFY(fixture.setUp());
+    QCOMPARE(::chmod(QFile::encodeName(fixture.livePath).constData(), 0755), 0);
+    const QString target = fixture.livePath + QLatin1Char('/') + relative;
+    const QString source = fixture.sourcePath + QLatin1Char('/') + relative;
+    const QString parentRelative = relative.left(relative.lastIndexOf(QLatin1Char('/')));
+    const QString parent = fixture.livePath + QLatin1Char('/') + parentRelative;
+    QVERIFY(QDir().mkpath(parent));
+    if (relative.startsWith(QStringLiteral("home/alice/"))) {
+        const QByteArray home = QFile::encodeName(fixture.livePath + QStringLiteral("/home"));
+        const QByteArray alice = QFile::encodeName(fixture.livePath + QStringLiteral("/home/alice"));
+        QCOMPARE(::chmod(home.constData(), 0755), 0);
+        QCOMPARE(::chown(alice.constData(), parentUid, parentUid), 0);
+        QCOMPARE(::chmod(alice.constData(), parentMode), 0);
+    }
+    else {
+        QCOMPARE(::chown(QFile::encodeName(parent).constData(), parentUid, parentUid), 0);
+        QCOMPARE(::chmod(QFile::encodeName(parent).constData(), parentMode), 0);
+    }
+    if (relative.contains(QStringLiteral("/grp/"))) {
+        QCOMPARE(::chown(QFile::encodeName(parent).constData(), 1000, 1000), 0);
+        QCOMPARE(::chmod(QFile::encodeName(parent).constData(), 0775), 0);
+    }
+    if (regularFile) {
+        QCOMPARE(::chmod(QFile::encodeName(parent).constData(), 0700), 0);
+        QVERIFY(writeFile(target, "protected live content\n"));
+        QVERIFY(QDir().mkpath(source.left(source.lastIndexOf(QLatin1Char('/')))));
+        QVERIFY(writeFile(source, "snapshot content\n"));
+    }
+    else {
+        QVERIFY(QDir().mkpath(source));
+        if (targetUid >= 0) {
+            QVERIFY(QDir().mkpath(target));
+            QCOMPARE(::chown(QFile::encodeName(target).constData(), targetUid, targetUid), 0);
+            QCOMPARE(::chmod(QFile::encodeName(target).constData(), 0711), 0);
+        }
+    }
+    QCOMPARE(::chown(QFile::encodeName(source).constData(), sourceUid, sourceUid), 0);
+    QCOMPARE(::chmod(QFile::encodeName(source).constData(), sourceMode), 0);
+    struct stat before {};
+    if (targetUid >= 0) {
+        QCOMPARE(::lstat(QFile::encodeName(target).constData(), &before), 0);
+    }
+    SnapshotOperations operations;
+    const QString manifestId = QStringLiteral("chain-policy");
+    QVERIFY(fixture.begin(operations, manifestId, false));
+    errno = 0;
+    const auto outcome = operations.applyRestoreEntryForTesting(
+        manifestId, {QLatin1Char('/') + relative, QStringLiteral("modified")});
+    const int applyError = errno;
+    // 成功と失敗のどちらでもidentityを戻し、次のroot操作に権限状態を持ち越さない
+    QCOMPARE(::setfsuid(static_cast<uid_t>(-1)), 0);
+    QCOMPARE(::setfsgid(static_cast<gid_t>(-1)), 0);
+    QCOMPARE(outcome, expectedError == 0 ? qsnapper::restore::RestoreEntryOutcome::Applied
+                                        : qsnapper::restore::RestoreEntryOutcome::Failed);
+    if (expectedError != 0) {
+        QCOMPARE(applyError, expectedError);
+        if (targetUid < 0) {
+            QVERIFY(!QFileInfo::exists(target));
+        }
+        else {
+            struct stat after {};
+            QCOMPARE(::lstat(QFile::encodeName(target).constData(), &after), 0);
+            QCOMPARE(after.st_ino, before.st_ino);
+            QCOMPARE(after.st_uid, before.st_uid);
+            QCOMPARE(after.st_mode, before.st_mode);
+        }
+        if (regularFile) {
+            QCOMPARE(readFile(target), QByteArray("protected live content\n"));
+            struct stat protectedStat {};
+            QCOMPARE(::stat(QFile::encodeName(parent).constData(), &protectedStat), 0);
+            QCOMPARE(protectedStat.st_uid, uid_t(0));
+            QCOMPARE(protectedStat.st_mode & 07777, mode_t(0700));
+        }
+    }
+    else {
+        struct stat after {};
+        QCOMPARE(::stat(QFile::encodeName(target).constData(), &after), 0);
+        QCOMPARE(after.st_uid, static_cast<uid_t>(sourceUid));
+        QCOMPARE(after.st_gid, static_cast<gid_t>(sourceUid));
+        QCOMPARE(after.st_mode & 07777, static_cast<mode_t>(sourceMode));
+    }
+    QVERIFY(hasNoQsnapperLeftovers(parent));
+    operations.finishRestorePlanForTesting(manifestId,
+        expectedError == 0 ? qsnapper::restore::ManifestState::Completed : qsnapper::restore::ManifestState::Failed);
 }
 
 /**

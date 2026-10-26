@@ -364,6 +364,60 @@ void SnapshotOperations::failRestorePlanAuthorization(const QString &manifestId,
         &failureError);
 }
 
+namespace {
+
+/**
+ * @brief SUBVOLUMEの下のスナップショットディレクトリを、symlinkを辿らずに開く
+ *
+ * libsnapperはスナップショットディレクトリのパスへmountし、復元はそこを読むため、一般ユーザが差し替えられる名前を辿ると
+ * 認可した番号とは別の木を復元元や比較相手として使わせられる
+ * btrfs以外ではlibsnapperがSUBVOLUMEからのパスでmountするため、「/」からSUBVOLUMEまでも信頼できることを要求する
+ * btrfsではmountを行わず (Btrfs::mountSnapshotは何もしない)、利用者ごとの設定ではSUBVOLUMEの根が一般ユーザの所有になるため要求しない
+ * mount後のbtrfs以外では、mountされなかった下の木を使わないよう、開いたディレクトリがmountの根であることも要求する
+ *
+ * @param subvolume 正規化済みのSUBVOLUME
+ * @param snapshotNumber スナップショット番号
+ * @param fstype configのFSTYPE
+ * @param mounted mount後の解決か
+ * @param statOut 開いたディレクトリのstatの返却先 (nullptr可)
+ * @return 成功時dirfd、失敗時-1 (errno設定)
+ */
+int openSnapshotTree(const QString &subvolume, unsigned int snapshotNumber,
+                     const std::string &fstype, bool mounted, struct stat *statOut)
+{
+    const bool btrfs = fstype == "btrfs";
+    const int subvolumeFd = qsnapper::security::safeOpenDirectory(subvolume, !btrfs);
+    if (subvolumeFd < 0) {
+        return -1;
+    }
+    const int snapshotFd = qsnapper::security::openSnapshotDirectoryBeneathSubvolume(
+        subvolumeFd, snapshotNumber, statOut);
+    const int savedErrno = errno;
+    ::close(subvolumeFd);
+    errno = savedErrno;
+    if (snapshotFd < 0 || btrfs || !mounted) {
+        return snapshotFd;
+    }
+
+    struct statx info = {};
+    if (::statx(snapshotFd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, STATX_TYPE, &info) != 0) {
+        const int statxErrno = errno;
+        ::close(snapshotFd);
+        errno = statxErrno;
+        return -1;
+    }
+    const bool isMountRoot = (info.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT) != 0
+                             && (info.stx_attributes & STATX_ATTR_MOUNT_ROOT) != 0;
+    if (!isMountRoot) {
+        ::close(snapshotFd);
+        errno = EXDEV;
+        return -1;
+    }
+    return snapshotFd;
+}
+
+} // namespace
+
 /**
  * @brief 認可済みのCommitRestorePlan本体
  *
@@ -497,6 +551,24 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
             execution.rootReadWriteState.preRestoreReadOnly = readOnly;
         }
 
+        // mountはパスで行われるため、mount先がsymlinkや一般ユーザの差し替えた名前でないことをmountの前に確かめる
+        // FSTYPEが無いconfigではlibsnapperがbtrfsとして扱うため、同じ既定値で解決規則と読み取り専用の判定を選ぶ
+        std::string fstype = "btrfs";
+        snapper->getConfigInfo().get_value("FSTYPE", fstype);
+        const int unmountedSnapshotFd =
+            openSnapshotTree(normalizedSubvolume, source->getNum(), fstype, false, nullptr);
+        if (unmountedSnapshotFd < 0) {
+            qWarning() << "Staged restore: Snapshot directory is not trusted:" << strerror(errno);
+            m_restoreRegistry.markFailed(
+                manifestId, owner,
+                QStringLiteral("Snapshot directory is not trusted"),
+                &error);
+            replyError(QDBusError::Failed,
+                       QStringLiteral("Snapshot directory is not trusted"));
+            return false;
+        }
+        ::close(unmountedSnapshotFd);
+
         source->mountFilesystemSnapshot(true);
         execution.mounted = true;
         const QString snapshotDir =
@@ -507,8 +579,10 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         // ソースsnapshotをdirfdでpinする
         // 以降のソース読み取りは本fd相対で行うため、chunk境界でevent loopが回る間にpath上のsnapshotが削除 / 同番号で再作成 / 差し替えられても、
         // 認可時に参照したsnapshotそのものから復元し続ける
-        const int snapshotDirFd = ::open(snapshotDir.toUtf8().constData(),
-                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        // mountの前の確認とmountの間に名前を差し替えられ得るため、mountの後にも同じ規則で開き直す
+        struct stat pinnedStat = {};
+        const int snapshotDirFd =
+            openSnapshotTree(normalizedSubvolume, source->getNum(), fstype, true, &pinnedStat);
         if (snapshotDirFd < 0) {
             qWarning() << "Staged restore: Failed to pin snapshot dir:"
                        << strerror(errno);
@@ -517,20 +591,9 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         }
         m_restoreExecutions[manifestId].snapshotDirFd = snapshotDirFd;
 
-        // pin済みfdの同一性判定に使うstatを確定させる
-        struct stat pinnedStat = {};
-        if (::fstat(snapshotDirFd, &pinnedStat) != 0) {
-            qWarning() << "Staged restore: Failed to stat pinned snapshot dir:"
-                       << strerror(errno);
-            failRestorePlanPreflight(manifestId, owner, &error);
-            return false;
-        }
-
         // dirfdのpinで固定されるのはinodeだけで、内容は固定されない
         // 書き込み可能な復元元 (rollbackが作るwritable copyなど) では、認可の後に内容を差し替えられるため拒否する
         // libsnapperのメタデータと、pin済みfdに対するファイルシステムの状態の両方が読み取り専用であることを要求する
-        std::string fstype;
-        snapper->getConfigInfo().get_value("FSTYPE", fstype);
         if (!source->isReadOnly()
                 || !qsnapper::restore::isPinnedRestoreSourceReadOnly(snapshotDirFd, fstype)) {
             qWarning() << "Staged restore: Restore source snapshot is not read-only";
@@ -550,7 +613,7 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         try {
             if (!validateFrozenRestorePlan(manifestId, owner, counterpart,
                                            status->counterpartSnapshotNumber == 0,
-                                           snapshotDir, pinnedStat)) {
+                                           fstype, pinnedStat)) {
                 failRestorePlanPreflight(manifestId, owner, &error);
                 return false;
             }
@@ -647,11 +710,14 @@ public:
      * @param snapshot 比較相手のスナップショット (counterpartIsCurrentがtrueなら使わない)
      * @param counterpartIsCurrent 比較相手が現在のシステムか
      * @param liveRootPath 正規化済みのSUBVOLUME (現在のシステムの木の根)
+     * @param fstype configのFSTYPE
      * @note libsnapperのマウントは例外を送出し得るため、呼び出し側で捕捉すること
+     * @note 復元元と同じく、mountの前と後の両方でスナップショットディレクトリをsymlinkを辿らずに解決する
      */
     CounterpartTreeGuard(const snapper::Snapshots::const_iterator &snapshot,
                          bool counterpartIsCurrent,
-                         const QString &liveRootPath)
+                         const QString &liveRootPath,
+                         const std::string &fstype)
         : m_snapshot(snapshot)
     {
         if (counterpartIsCurrent) {
@@ -659,9 +725,16 @@ public:
             return;
         }
 
+        const int unmountedFd =
+            openSnapshotTree(liveRootPath, m_snapshot->getNum(), fstype, false, nullptr);
+        if (unmountedFd < 0) {
+            return;
+        }
+        ::close(unmountedFd);
+
         m_snapshot->mountFilesystemSnapshot(false);
         m_mounted = true;
-        m_fd = ::open(m_snapshot->snapshotDir().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        m_fd = openSnapshotTree(liveRootPath, m_snapshot->getNum(), fstype, true, nullptr);
     }
 
     /**
@@ -736,7 +809,7 @@ qsnapper::restore::RestorePathObserver makeTreeObserver(int rootFd)
  * @param owner 認可前にcaptureした呼び出し元unique name
  * @param counterpart 比較相手snapshotのiterator (counterpartIsCurrentがtrueなら使わない)
  * @param counterpartIsCurrent 比較相手が現在のシステムか
- * @param snapshotDir pin済みdirfdが指すsnapshot directoryのpath
+ * @param fstype configのFSTYPE (スナップショットディレクトリの解決規則を決める)
  * @param pinnedStat pin済みdirfdに対するfstatの結果
  * @return 全entryが実際の差分に裏付けられ、同一性確認も通った場合true
  *
@@ -752,7 +825,7 @@ bool SnapshotOperations::validateFrozenRestorePlan(
     const QString &owner,
     const snapper::Snapshots::const_iterator &counterpart,
     bool counterpartIsCurrent,
-    const QString &snapshotDir,
+    const std::string &fstype,
     const struct stat &pinnedStat)
 {
     // 検証は認可時に固定した復元元だけを根にするため、pinが無い計画は実行しない
@@ -772,7 +845,7 @@ bool SnapshotOperations::validateFrozenRestorePlan(
 
     {
         const CounterpartTreeGuard counterpartTree(counterpart, counterpartIsCurrent,
-                                                   liveRootPath);
+                                                   liveRootPath, fstype);
         // 比較相手を開けないと差分を直接観測できないため、裏付けなしとして実行を拒否する
         if (counterpartTree.fd() < 0) {
             qWarning() << "Staged restore: Failed to open the comparison counterpart:"
@@ -795,9 +868,16 @@ bool SnapshotOperations::validateFrozenRestorePlan(
 
     // pin済みfdと、pathを改めて開いた結果が同一inodeであることを確認する
     // (st_devとst_inoの両方) 異なっていれば、検証対象と実行対象のスナップショットが入れ替わっているため実行を拒否する
+    // 開き直しもpinと同じ規則でsymlinkを辿らずに行い、差し替えた名前の先と比べないようにする
     // 実行は以降もpin済みfdのみを通る
     struct stat currentStat = {};
-    if (::stat(snapshotDir.toUtf8().constData(), &currentStat) != 0
+    const int currentFd = openSnapshotTree(liveRootPath,
+                                           static_cast<unsigned int>(execution->snapshotNumber),
+                                           fstype, true, &currentStat);
+    if (currentFd >= 0) {
+        ::close(currentFd);
+    }
+    if (currentFd < 0
             || currentStat.st_dev != pinnedStat.st_dev
             || currentStat.st_ino != pinnedStat.st_ino) {
         qWarning() << "Staged restore: Snapshot directory identity changed"

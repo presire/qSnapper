@@ -175,7 +175,6 @@ add_executable(tst_restorevalidation
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.h
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
-    ${INPUTVALIDATOR_SOURCES}
 )
 target_include_directories(tst_restorevalidation PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice
@@ -207,11 +206,9 @@ add_test(NAME tst_restoreplanexecutor COMMAND tst_restoreplanexecutor)
 
 # --- tst_csvrecord ---
 # CSVのquoteと解析 (qsnapper::csv、include/csvrecord.h) を確認する
-# ヘッダーオンリーのため、実装ソースはinputvalidator.cppだけをリンクする
-# inputvalidatorをリンクするのは、制御文字が引き続きfail-closedで拒否されることを同じターゲット内で確認するため
+# ヘッダーオンリーのため、実装ソースはリンクしない
 add_executable(tst_csvrecord
     tst_csvrecord.cpp
-    ${INPUTVALIDATOR_SOURCES}
 )
 target_include_directories(tst_csvrecord PRIVATE
     ${CMAKE_SOURCE_DIR}/src/dbusservice
@@ -243,11 +240,8 @@ add_executable(tst_snapshotoperations
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_diff.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_restore.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_restore_apply.cpp
-    ${CMAKE_SOURCE_DIR}/src/dbusservice/inputvalidator.cpp
-    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers.cpp
-    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers_internal.cpp
-    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers_beneathroot.cpp
-    ${CMAKE_SOURCE_DIR}/src/dbusservice/filesystemhelpers_replace.cpp
+    ${INPUTVALIDATOR_SOURCES}
+    ${FILESYSTEM_HELPER_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoremanifest.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restorevalidation.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/restoreplanexecutor.cpp
@@ -329,7 +323,6 @@ add_test(NAME tst_snapshotdelete COMMAND tst_snapshotdelete)
 
 # --- tst_externalurlopener ---
 # 外部ブラウザで開くURLの検証と、ポータル失敗時の直接起動への切り替え判定 (include/externalurlopener.h) を確認する
-find_package(Qt6 REQUIRED COMPONENTS Gui DBus)
 add_executable(tst_externalurlopener
     tst_externalurlopener.cpp
     ${CMAKE_SOURCE_DIR}/include/externalurlopener.h
@@ -386,18 +379,6 @@ target_link_libraries(tst_configpathvalidation PRIVATE
 set_target_properties(tst_configpathvalidation PROPERTIES AUTOMOC ON)
 add_test(NAME tst_configpathvalidation COMMAND tst_configpathvalidation)
 
-# ASan / UBSanを全テストに適用する
-# Debugビルドで"-DQSNAPPER_TEST_SANITIZE=ON"を指定した場合だけ有効になる
-# テストを追加した場合は、下記のターゲット一覧にも追加すること
-if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation)
-        target_compile_options(${tgt} PRIVATE
-            -fsanitize=address,undefined -fno-omit-frame-pointer)
-        target_link_options(${tgt} PRIVATE
-            -fsanitize=address,undefined)
-    endforeach()
-endif()
-
 # --- GUI側の追加機能テスト ---
 # 状態CSVとユーザデータの解析はヘッダーオンリー、FileChangeModelのGUI側機能はtst_filechangemodel.hのモックを共有するため、独立した実行ファイルにする
 # tst_restoreplanstatus: GetRestorePlanStatusのCSV応答 (旧9フィールドと拡張14フィールド) の解析を確認する
@@ -430,6 +411,25 @@ target_link_libraries(tst_userdataparser PRIVATE
 set_target_properties(tst_userdataparser PROPERTIES AUTOMOC ON)
 add_test(NAME tst_userdataparser COMMAND tst_userdataparser)
 
+# --- tst_displaytext ---
+# 表示用の文字列から双方向制御文字を置き換えること (include/displaytext.h) を確認する
+# QMLから呼び出した場合の値の変換を確認するため、Qt6::Qml (QJSEngine) もリンクする
+find_package(Qt6 REQUIRED COMPONENTS Qml)
+add_executable(tst_displaytext
+    tst_displaytext.cpp
+    ${CMAKE_SOURCE_DIR}/include/displaytext.h
+)
+target_include_directories(tst_displaytext PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(tst_displaytext PRIVATE
+    Qt6::Core
+    Qt6::Qml
+    Qt6::Test
+)
+set_target_properties(tst_displaytext PROPERTIES AUTOMOC ON)
+add_test(NAME tst_displaytext COMMAND tst_displaytext)
+
 # tst_filechangemodelと同じ実装ソースをリンクし、tst_filechangemodel.hのモック (転送層の差し替えなど) を共有する
 add_executable(tst_filechangemodel_gui
     tst_filechangemodel_gui.cpp
@@ -453,9 +453,11 @@ target_link_libraries(tst_filechangemodel_gui PRIVATE
 set_target_properties(tst_filechangemodel_gui PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filechangemodel_gui COMMAND tst_filechangemodel_gui)
 
-# ASan / UBSanを新規テストにも適用する (上の一覧は監査前からの差分を小さく保つため並べ替えず、ここで別に指定する)
+# ASan / UBSanを全テストに適用する
+# Debugビルドで"-DQSNAPPER_TEST_SANITIZE=ON"を指定した場合だけ有効になる
+# テストを追加した場合は、下記のターゲット一覧にも追加すること
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_restoreplanstatus tst_userdataparser tst_filechangemodel_gui)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation tst_restoreplanstatus tst_userdataparser tst_displaytext tst_filechangemodel_gui)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

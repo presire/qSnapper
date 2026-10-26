@@ -6,8 +6,6 @@
  */
 
 #include "tst_filechangemodel.h"
-#include <QtTest>
-#include <QSignalSpy>
 #include <QFileInfo>
 
 
@@ -183,12 +181,7 @@ void TestFileChangeModel::stagedRestoreProgressIsMonotonicOverOriginalTotal()
     QCOMPARE(progressSpy.at(2).at(0).toInt(), 10);
 
     // サーバのsignalはpathを運ばないため、ファイル名はstageした順序から求める
-    QStringList stagedPaths;
-    for (const FakeRestorePlanTransport::Call &call : fake.calls) {
-        if (call.kind == FakeRestorePlanTransport::Call::Stage) {
-            stagedPaths += call.paths;
-        }
-    }
+    const QStringList stagedPaths = stagedPathsOf(fake);
     QCOMPARE(stagedPaths.size(), 10);
     QCOMPARE(progressSpy.at(0).at(2).toString(), QFileInfo(stagedPaths.at(4)).fileName());
     QCOMPARE(progressSpy.at(1).at(2).toString(), QFileInfo(stagedPaths.at(4)).fileName());

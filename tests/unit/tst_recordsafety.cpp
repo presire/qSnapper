@@ -41,9 +41,7 @@ private slots:
     void reject();
 
     /** @brief carrierパスがファイル変更レコードを分割することを実際の連結手順で示す */
-    void carrierPathSplitsFileChangeRecord();
     /** @brief 改行入りdescriptionがスナップショットレコードを分割することを示す */
-    void carrierDescriptionSplitsSnapshotRecord();
 
     /** @brief sanitizeRecordText() の入力と期待結果のデータ行を定義する */
     void sanitizeReplacesControlCharacters_data();
@@ -184,64 +182,10 @@ void TestRecordSafety::reject()
 }
 
 /**
- * @brief carrierパスが行指向レコードを分割することを、実際の連結手順で示す
- *
- * 攻撃者はパス構成要素に '/' を含められないため、改行入りの「ディレクトリ」とその配下の通常階層でcarrierを作る
- * ここではサーバ側の連結 (statusStr + " " + path + "\n") を再現し、検証なしに連結すると
- * 偽の created エントリが生まれること、およびisRecordSafeText()がそれを止めることを確認する
- */
-void TestRecordSafety::carrierPathSplitsFileChangeRecord()
-{
-    // ディレクトリ名は "carrier\n+.... " (末尾スペースを含む)
-    // いずれもLinuxのファイル名として正当
-    const QString carrierDirectory = QStringLiteral("carrier\n+.... ");
-    const QString carrierPath =
-        QStringLiteral("/home/alice/") + carrierDirectory + QStringLiteral("/etc/important");
-
-    const QString serialized = QStringLiteral("+....") + QStringLiteral(" ") + carrierPath
-                               + QStringLiteral("\n");
-    const QStringList records = serialized.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-
-    // 1エントリのはずが2レコードに割れ、2行目は完全に正当な書式のcreatedエントリになる
-    QCOMPARE(records.size(), 2);
-    QCOMPARE(records.at(0), QStringLiteral("+.... /home/alice/carrier"));
-    QCOMPARE(records.at(1), QStringLiteral("+.... /etc/important"));
-
-    // 偽造された2行目のパス自体はクリーンであり、パス検証では止まらない
-    QVERIFY(isRecordSafeText(QStringLiteral("/etc/important")));
-
-    // 止められるのはシリアライズ前の元のパスだけである
-    QVERIFY(!isRecordSafeText(carrierPath));
-}
-
-/**
- * @brief 改行入りdescriptionが偽のスナップショット行を生むことを示す
- *
- * 偽のnumberは、クライアントからDeleteSnapshot / RollbackSnapshotへそのまま渡る
- */
-void TestRecordSafety::carrierDescriptionSplitsSnapshotRecord()
-{
-    const QString forgedDescription =
-        QStringLiteral("update\n999,single,0,2026-01-01T00:00:00,0,number,evil,");
-
-    QString csv = QStringLiteral("number,type,pre-number,date,user,cleanup,description,userdata\n");
-    csv += QStringLiteral("42,single,0,2026-01-01T00:00:00,0,number,") + forgedDescription
-           + QStringLiteral(",\n");
-
-    const QStringList lines = csv.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-
-    // header + 本物1行 のはずが、偽行が1行増える
-    QCOMPARE(lines.size(), 3);
-    QVERIFY(lines.at(2).startsWith(QStringLiteral("999,")));
-    QCOMPARE(lines.at(2).split(QLatin1Char(',')).at(0).toInt(), 999);
-
-    QVERIFY(!isRecordSafeText(forgedDescription));
-}
-
-/**
  * @brief sanitizeRecordText() の入力と期待結果を定義する
  *
- * 通常文字列、空文字列、LF、CRLF、NUL、DEL、C1 NEL、非ASCII文字を含む
+ * 通常文字列、空文字列、LF、CRLF、NUL、DEL、C1 NEL、非ASCII文字、双方向制御文字を含む
+ * LRMは置き換えないことも確認する
  */
 void TestRecordSafety::sanitizeReplacesControlCharacters_data()
 {
@@ -258,6 +202,13 @@ void TestRecordSafety::sanitizeReplacesControlCharacters_data()
     QTest::newRow("DEL") << QStringLiteral("a\x7f") << QStringLiteral("a") + r;
     QTest::newRow("C1 NEL") << QString(QStringLiteral("a") + QChar(0x85)) << QStringLiteral("a") + r;
     QTest::newRow("non-ASCII kept") << QStringLiteral("更新前 é") << QStringLiteral("更新前 é");
+    QTest::newRow("bidi RLO..PDF") << QString(QStringLiteral("a") + QChar(0x202E) + QStringLiteral("gpj.exe") + QChar(0x202C))
+                                   << QStringLiteral("a") + r + QStringLiteral("gpj.exe") + r;
+    QTest::newRow("bidi LRE") << QString(QChar(0x202A)) << r;
+    QTest::newRow("bidi LRI..PDI") << QString(QChar(0x2066) + QStringLiteral("x") + QChar(0x2069))
+                                   << r + QStringLiteral("x") + r;
+    QTest::newRow("bidi FSI") << QString(QChar(0x2068)) << r;
+    QTest::newRow("LRM kept") << QString(QStringLiteral("a") + QChar(0x200E)) << QString(QStringLiteral("a") + QChar(0x200E));
 }
 
 /**

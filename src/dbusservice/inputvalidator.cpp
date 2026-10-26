@@ -162,7 +162,7 @@ namespace qsnapper {
         }
 
         /**
-         * @brief レコード区切りを破壊する文字をU+FFFDに置き換える
+         * @brief レコード区切りを破壊する文字と、双方向制御文字をU+FFFDに置き換える
          *
          * 詳細な契約は、inputvalidator.h側の説明を参照すること
          */
@@ -171,7 +171,10 @@ namespace qsnapper {
             QString result = value;
             for (QChar &c : result) {
                 const ushort u = c.unicode();
-                if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F)) {
+                // 双方向制御文字は表示の並びを入れ替え、別の値に見せかけられるため置き換える
+                // LRM / RLM / ALMは並びを入れ替えず、RTLの文章で正当に使われるため残す
+                const bool isBidiControl = (u >= 0x202A && u <= 0x202E) || (u >= 0x2066 && u <= 0x2069);
+                if (u < 0x20 || u == 0x7F || (u >= 0x80 && u <= 0x9F) || isBidiControl) {
                     c = QChar::ReplacementCharacter;
                 }
             }

@@ -38,7 +38,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_restore_gate import fail, proof  # noqa: E402
 
 import dbus  # noqa: E402
-from dbus.exceptions import DBusException  # noqa: E402
 
 BUS_NAME = "org.opensuse.Snapper"                                  # 偽のsnapperdが所有するバス名
 SNAPPER_PATH = "/org/opensuse/Snapper"                             # 偽のsnapperdのオブジェクトパス

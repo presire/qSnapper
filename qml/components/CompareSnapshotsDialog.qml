@@ -11,7 +11,7 @@
  *        errorTextColor (エラー文言の色、親がThemeManagerの色を渡す)
  * 出力 : なし
  * 依存 : BorderedDialog (基底)、FileChangeModel (loadChangesBetween / loaded / loading / hasChanges / errorOccurred)、
- *        ThemeManager (パレット)
+ *        ThemeManager (パレット)、DisplayText (双方向制御文字の置き換え)
  */
 import QtQuick
 import QtQuick.Controls
@@ -110,7 +110,7 @@ BorderedDialog {
                     // 変更されたファイルのパスを表示する
                     Label {
                         textFormat: Text.PlainText  // ファイル名にタグ状の文字列が含まれていても、リッチテキストとして解釈させない
-                        text: model.filePath || ""
+                        text: DisplayText.sanitize(model.filePath || "")
                         Layout.fillWidth: true
                         elide: Text.ElideMiddle
                     }

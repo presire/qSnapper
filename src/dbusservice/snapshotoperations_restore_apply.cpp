@@ -31,6 +31,9 @@
  *
  * 退避先の名前は乱数の接尾辞で予測できないため、名前の衝突は通常起きない
  * 衝突した場合 (EEXIST) だけ別の名前で再試行し、上限に達したら何も移動せずに失敗する
+ * 1つの親fdで退避し、root実行時の非信頼チェーンでは他者所有のディレクトリをEPERMで拒否する
+ * rename前後のdev/ino照合は差し替えを検出して失敗させるが、inodeへの原子的な束縛ではない
+ * 不一致時の戻しも名前によるRENAME_NOREPLACEであり、戻せなければ両方の名前を記録する
  *
  * @param rootPath 名前解決の基準とする絶対path (configのSUBVOLUME)
  * @param path 退避対象の絶対path
@@ -46,10 +49,48 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &rootPath,
         movedPath->clear();
     }
 
+    using namespace qsnapper::security;
+    QStringList components;
+    if (!splitDestinationComponents(rootPath, path, &components)) {
+        return false;
+    }
+    QByteArray leaf;
+    DirectoryChainOwnership ownership;
+    const UniqueFd parentFd(openLeafParentBeneathRoot(
+        rootPath, components, false, 0, &leaf, &ownership));
+    if (!parentFd.isValid()) {
+        return errno == ENOENT;
+    }
+    struct stat before;
+    if (::fstatat(parentFd.get(), leaf.constData(), &before, AT_SYMLINK_NOFOLLOW) < 0) {
+        return errno == ENOENT;
+    }
+    const bool guarded = ::geteuid() == 0 && !ownership.trusted;
+    if (S_ISDIR(before.st_mode) && guarded
+            && (!ownership.principalKnown() || before.st_uid != ownership.principal)) {
+        errno = EPERM;
+        return false;
+    }
+
     for (int attempt = 0; attempt < 16; ++attempt) {
         const QString candidate = qsnapper::internal::siblingTemporaryPath(
             path, QStringLiteral("qsnapper-old"));
-        if (qsnapper::security::safeRenamePathNoFollowBeneathRoot(rootPath, path, candidate)) {
+        const QByteArray detached = candidate.mid(candidate.lastIndexOf(QLatin1Char('/')) + 1).toUtf8();
+        if (::renameat2(parentFd.get(), leaf.constData(), parentFd.get(), detached.constData(),
+                        RENAME_NOREPLACE) == 0) {
+            struct stat after;
+            const bool inspected = ::fstatat(parentFd.get(), detached.constData(), &after,
+                                             AT_SYMLINK_NOFOLLOW) == 0;
+            if (!inspected || before.st_dev != after.st_dev || before.st_ino != after.st_ino) {
+                const int error = inspected ? ESTALE : errno;
+                if (::renameat2(parentFd.get(), detached.constData(), parentFd.get(), leaf.constData(),
+                                RENAME_NOREPLACE) < 0) {
+                    qCritical() << "Staged restore: Failed to return mismatched moved path:"
+                                << candidate << "to:" << path;
+                }
+                errno = error;
+                return false;
+            }
             if (movedPath) {
                 *movedPath = candidate;
             }
@@ -77,6 +118,8 @@ bool SnapshotOperations::movePathAsideBeneathRoot(const QString &rootPath,
  *
  * 復元元がFIFO・ソケット・デバイスファイルのentryは、live側に触れずにスキップする
  * これらは中身を持たず、作り直すとデバイス番号の付いたノードをrootが作成することになるため、復元の対象にしない
+ * 退避物の削除失敗もFailedとし、保存場所を記録する
+ * 復元失敗後のrename-backは名前による操作でinodeへの束縛ではなく、戻せなければ退避先を記録する
  *
  * @param manifestId 実行contextを選択するマニフェストID
  * @param entry 適用対象entry
@@ -140,8 +183,10 @@ qsnapper::restore::RestoreEntryOutcome SnapshotOperations::applyRestoreEntry(
 
         const bool removed = qsnapper::security::safeRemoveAllBeneathRoot(rootPath, destinationPath);
         if (!removed) {
+            const int error = errno;
             qWarning() << "Staged restore: Failed to remove live path:"
-                       << strerror(errno);
+                       << strerror(error);
+            errno = error;
         }
         return removed ? RestoreEntryOutcome::Applied : RestoreEntryOutcome::Failed;
     }
@@ -182,8 +227,11 @@ qsnapper::restore::RestoreEntryOutcome SnapshotOperations::applyRestoreEntry(
     if (parentPath != rootPath
             && !qsnapper::security::safeCreateParentDirectoriesFromSourceBeneathRoot(
                 rootPath, parentPath, context.snapshotDirFd, ::geteuid() == 0)) {
+        // qWarningのstream操作がerrnoを上書きするため、失敗原因を呼び出し元へ返す前に退避・復元する
+        const int createError = errno;
         qWarning() << "Staged restore: Failed to create live parent directory:"
-                   << strerror(errno);
+                   << strerror(createError);
+        errno = createError;
         return RestoreEntryOutcome::Failed;
     }
 
@@ -193,8 +241,10 @@ qsnapper::restore::RestoreEntryOutcome SnapshotOperations::applyRestoreEntry(
     QString detachedPath;
     if (entry.changeType == QStringLiteral("typechanged")) {
         if (!movePathAsideBeneathRoot(rootPath, destinationPath, &detachedPath)) {
+            const int error = errno;
             qWarning() << "Staged restore: Failed to move live path aside:"
-                       << strerror(errno);
+                       << strerror(error);
+            errno = error;
             return RestoreEntryOutcome::Failed;
         }
     }
@@ -221,58 +271,22 @@ qsnapper::restore::RestoreEntryOutcome SnapshotOperations::applyRestoreEntry(
     if (!detachedPath.isEmpty()) {
         if (applied) {
             if (!qsnapper::security::safeRemoveAllBeneathRoot(rootPath, detachedPath)) {
-                qWarning() << "Staged restore: Failed to remove detached live path:"
-                           << strerror(errno);
+                const int error = errno;
+                qCritical() << "Staged restore: Failed to remove detached live path."
+                            << "Previous content is preserved at:" << detachedPath << strerror(error);
+                errno = error;
+                return RestoreEntryOutcome::Failed;
             }
         }
         else if (!qsnapper::security::safeRenamePathNoFollowBeneathRoot(rootPath, detachedPath, destinationPath)) {
+            const int error = errno;
             qCritical() << "Staged restore: Failed to reattach live path after a failed"
                         << "restore. Previous content is preserved at:" << detachedPath;
+            errno = error;
         }
     }
 
     return applied ? RestoreEntryOutcome::Applied : RestoreEntryOutcome::Failed;
-}
-
-namespace {
-
-/**
- * @brief 開いたディレクトリが空 ([.]と[..]だけ) であるかを確かめる
- *
- * 引数のfdは閉じず、複製したfdで読み出す
- * @param directoryFd 確認するディレクトリのfd
- * @return 空である場合true、空でないか読み出せない場合false
- */
-bool isEmptyDirectoryFd(int directoryFd)
-{
-    const int readFd = ::fcntl(directoryFd, F_DUPFD_CLOEXEC, 0);
-    if (readFd < 0) {
-        return false;
-    }
-
-    DIR *dir = ::fdopendir(readFd);
-    if (!dir) {
-        ::close(readFd);
-        return false;
-    }
-
-    bool empty = true;
-    errno = 0;
-    while (const struct dirent *entry = ::readdir(dir)) {
-        if (::strcmp(entry->d_name, ".") != 0 && ::strcmp(entry->d_name, "..") != 0) {
-            empty = false;
-            break;
-        }
-    }
-
-    // readdirの失敗は終端と区別できないため、errnoで判定して空と誤認しない
-    if (empty && errno != 0) {
-        empty = false;
-    }
-    ::closedir(dir);
-    return empty;
-}
-
 }
 
 /**
@@ -286,11 +300,10 @@ bool isEmptyDirectoryFd(int directoryFd)
  * 一致しなければerrno=ESTALEで失敗する
  * マウントポイント (バインドマウントを含む) やネストしたサブボリュームの根は、別のファイルシステムの根であるため、metadataを適用しない
  *
- * rootで実行し、親ディレクトリを他のユーザが書き換えられる場合 (parentDirectoryIsSafeForMetadataがfalse) は、
- * 最初に観測するまでの間に、親の中にある別のディレクトリ (rootが所有する機密のディレクトリなど) と入れ替えられ得る
- * 入れ替えはinodeの照合では検出できないため、metadataを適用する対象を次の場合に限り、それ以外はerrno=EPERMで失敗する
- * - 自分で作成したディレクトリが空のままである (入れ替えられても、空のディレクトリにしか影響しない)
- * - 既存のディレクトリの所有者がroot以外で、snapshot側の所有者と同じである (所有者が自分で変更できる範囲にとどまる)
+ * root実行時は、基点から親までの全祖先が信頼できるか、非信頼点以降を単一principalが所有する必要がある
+ * 非信頼チェーンでは作成時だけfilesystem identityをprincipalに落とし、作成直後からその所有物にする
+ * inodeの一致や空であることは最初の観測前の差し替えを検出できないため、開いた対象とsourceの所有者もprincipalに限る
+ * root共有親や他者のディレクトリを経由する変更はEPERMで失敗させる
  *
  * @param sourceDirFd pin済みのsnapshot dirfd
  * @param sourceRelativePath snapshotDirからの相対source path
@@ -308,17 +321,22 @@ bool SnapshotOperations::applyDirectoryBeneathRoot(int sourceDirFd,
 {
     const int srcFd = qsnapper::security::safeOpenDirectoryReadAt(sourceDirFd, sourceRelativePath);
     if (srcFd < 0) {
+        const int error = errno;
         qWarning() << "applyDirectoryBeneathRoot: Failed to open source directory:"
-                   << strerror(errno);
+                   << strerror(error);
+        errno = error;
         return false;
     }
 
     QByteArray leafName;
-    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    qsnapper::security::DirectoryChainOwnership ownership;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName, &ownership);
     if (parentFd < 0) {
+        const int error = errno;
         qWarning() << "applyDirectoryBeneathRoot: Failed to open destination parent:"
-                   << strerror(errno);
+                   << strerror(error);
         ::close(srcFd);
+        errno = error;
         return false;
     }
 
@@ -341,22 +359,44 @@ bool SnapshotOperations::applyDirectoryBeneathRoot(int sourceDirFd,
         return failWith("Failed to inspect source directory:", errno);
     }
 
-    // rootが他のユーザに書き換え可能な親の下で作業する場合だけ、入れ替えへの追加の制限を掛ける
-    const bool parentUntrusted =
-        ::geteuid() == 0 && !qsnapper::security::parentDirectoryIsSafeForMetadata(parentStat);
-    bool createdByUs = false;
+    // 親単独ではなく最初の非信頼点以降の全祖先を検証し、他者へのroot権限の増幅を防ぐ
+    const bool parentUntrusted = ::geteuid() == 0 && !ownership.trusted;
+    if (parentUntrusted && (!ownership.principalKnown() || sourceStat.st_uid != ownership.principal)) {
+        return failWith("Source owner differs from directory chain principal:", EPERM);
+    }
 
-    // 作成時は権限を絞り (0700)、所有者とmodeは後からfd経由で設定する
-    // 自分が作成したディレクトリは、作成直後にディレクトリでありeuid所有であることを確かめてから記録する
+    int mkdirResult;
+    if (parentUntrusted) {
+        bool identityOk = false;
+        int mkdirError = EPERM;
+        // fdの解放とログ出力は権限の復旧後に行い、復旧処理からmkdirのerrnoを保護する
+        {
+            qsnapper::security::ScopedFsIdentity identity(ownership.principal, sourceStat.st_gid);
+            identityOk = identity.ok();
+            if (identityOk) {
+                mkdirResult = ::mkdirat(parentFd, leafName.constData(), 0700);
+                mkdirError = errno;
+            }
+        }
+        errno = mkdirError;
+        if (!identityOk) {
+            return failWith("Failed to assume directory chain principal:", mkdirError);
+        }
+    }
+    else {
+        mkdirResult = ::mkdirat(parentFd, leafName.constData(), 0700);
+    }
+
+    // 初回観測前の差し替えもあり得るため、作成成功時でも所有者と後続のdev/inoを照合する
     struct stat expected;
-    if (::mkdirat(parentFd, leafName.constData(), 0700) == 0) {
+    if (mkdirResult == 0) {
         if (::fstatat(parentFd, leafName.constData(), &expected, AT_SYMLINK_NOFOLLOW) < 0) {
             return failWith("Failed to inspect created live directory:", errno);
         }
-        if (!S_ISDIR(expected.st_mode) || expected.st_uid != ::geteuid()) {
+        const uid_t expectedUid = parentUntrusted ? ownership.principal : ::geteuid();
+        if (!S_ISDIR(expected.st_mode) || expected.st_uid != expectedUid) {
             return failWith("Live directory was replaced after creation:", ESTALE);
         }
-        createdByUs = true;
     }
     else if (errno == EEXIST) {
         if (::fstatat(parentFd, leafName.constData(), &expected, AT_SYMLINK_NOFOLLOW) < 0) {
@@ -415,14 +455,12 @@ bool SnapshotOperations::applyDirectoryBeneathRoot(int sourceDirFd,
     }
 
     if (parentUntrusted) {
-        const bool safeToApply = createdByUs
-            ? isEmptyDirectoryFd(directoryFd)
-            : (opened.st_uid != 0 && opened.st_uid == sourceStat.st_uid);
-        if (!safeToApply) {
+        // 復元元の所有者は作成前に照合済みのため、ここでは新しく開いたinodeの所有者だけを確認する
+        if (opened.st_uid != ownership.principal) {
             // 入れ替えられた別のディレクトリへrootが所有者やmodeを適用しないよう、復元を失敗させて管理者に知らせる
             ::close(directoryFd);
             ::close(srcFd);
-            qWarning() << "applyDirectoryBeneathRoot: Refused to apply metadata in a directory writable by other users";
+            qWarning() << "applyDirectoryBeneathRoot: Refused metadata outside directory chain principal";
             errno = EPERM;
             return false;
         }
@@ -488,11 +526,14 @@ bool SnapshotOperations::copyRegularFileBeneathRoot(int sourceDirFd,
     }
 
     QByteArray leafName;
-    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    qsnapper::security::DirectoryChainOwnership ownership;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName, &ownership);
     if (parentFd < 0) {
+        const int error = errno;
         qWarning() << "copyRegularFileBeneathRoot: Failed to open destination parent:"
-                   << strerror(errno);
+                   << strerror(error);
         ::close(srcFd);
+        errno = error;
         return false;
     }
 
@@ -550,10 +591,13 @@ bool SnapshotOperations::copySymlinkBeneathRoot(int sourceDirFd,
     }
 
     QByteArray leafName;
-    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName);
+    qsnapper::security::DirectoryChainOwnership ownership;
+    const int parentFd = qsnapper::security::openDestinationParentBeneathRoot(rootPath, dst, &leafName, &ownership);
     if (parentFd < 0) {
+        const int error = errno;
         qWarning() << "copySymlinkBeneathRoot: Failed to open destination parent:"
-                   << strerror(errno);
+                   << strerror(error);
+        errno = error;
         return false;
     }
 

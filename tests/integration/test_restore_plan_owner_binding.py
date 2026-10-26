@@ -26,9 +26,13 @@ import subprocess
 import sys
 import time
 
+# 同じディレクトリの共通部品 (失敗の報告、PROOF出力、起動待ち) を再利用する
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from test_restore_gate import fail, proof, wait_for_ready  # noqa: E402
+
 try:
     import dbus
-    import dbus.mainloop.glib
     from dbus.exceptions import DBusException
 except ImportError:
     print("ERROR: python3-dbus required", file=sys.stderr)
@@ -36,8 +40,7 @@ except ImportError:
 
 # 終端状態に達した瞬間にサービスがマニフェストを回収 (削除) してしまう可能性があるため、
 # ポーリングではなくrestorePlanFinishedシグナルを確実に観測するにはGLibメインループ連携が必要である
-# またdbus.SystemBus()を構築する前に設定しなければならない
-dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+# 既定のメインループはdbus.SystemBus()より前に設定されている必要があり、上のtest_restore_gateの読み込み時に設定済みのため、ここで再設定しない
 from gi.repository import GLib  # noqa: E402
 
 IFACE = "com.presire.qsnapper.Operations"                 # 検査対象のD-Busインタフェース名
@@ -47,33 +50,6 @@ ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"  # 拒否時に期待�
 STAGE_CHUNK_SIZE = 5000                                   # 1チャンク当たりの正常エントリ数
 STAGE_CHUNK_COUNT = 3                                     # 用意する正常チャンク数
 FAKE_ROOT = "/tmp/qsnapper-fake-restore"                  # テストで使う擬似復元先ルート
-
-_failures = 0                                             # 失敗件数のカウンタ
-
-
-def proof(label: str, value: object) -> None:
-    """
-    @brief 観測値をそのままPROOF_*行として出力する
-
-    Args:
-        label: PROOF_の後ろに付けるラベル
-        value: 出力する観測値
-    """
-    print(f"PROOF_{label}: {value}")
-
-
-def fail(what: str) -> None:
-    """
-    @brief FAIL行を出力して直ちに非ゼロで終了する
-
-    Args:
-        what: 失敗内容
-
-    Raises:
-        SystemExit: 常に終了コード1で終了する
-    """
-    print(f"FAIL: {what}", file=sys.stderr)
-    sys.exit(1)
 
 
 def make_paths(chunk_index: int, count: int) -> list[str]:
@@ -210,33 +186,6 @@ class FinishedSignalWaiter:
                 GLib.source_remove(timeout_id)
         self._match.remove()
         return self._captured.get("terminal_state"), self._captured.get("message")
-
-
-def wait_for_ready(service: subprocess.Popen, ready_file: str, timeout_s: float = 20.0) -> None:
-    """
-    @brief サービスがready_fileへREADYを書き込むまで待機する
-
-    Args:
-        service: 起動したサービスのプロセス
-        ready_file: サービスの準備完了を示すファイルのパス
-        timeout_s: 待機時間の上限 (秒)
-
-    Raises:
-        SystemExit: サービスが途中終了したか、タイムアウトした場合
-    """
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if service.poll() is not None:
-            fail(f"service exited early during startup, rc={service.returncode}")
-        if os.path.exists(ready_file):
-            try:
-                with open(ready_file, "r", encoding="utf-8") as handle:
-                    if handle.read().strip() == "READY":
-                        return
-            except OSError:
-                pass
-        time.sleep(0.05)
-    fail(f"timed out waiting for {ready_file} (service never became ready)")
 
 
 def main() -> int:
@@ -383,10 +332,10 @@ def main() -> int:
         if state_field not in ("running", "completed"):
             fail(f"expected running/completed state right after commit, got {state_field!r}")
 
-        continue_name, continue_msg = expect_access_denied(
+        expect_access_denied(
             obj_b, IFACE, "ContinueRestorePlan", [manifest_id], "CONTINUE_CROSS_OWNER"
         )
-        cancel_name, cancel_msg = expect_access_denied(
+        expect_access_denied(
             obj_b, IFACE, "CancelRestorePlan", [manifest_id], "CANCEL_CROSS_OWNER"
         )
         status_name, status_msg = expect_access_denied(

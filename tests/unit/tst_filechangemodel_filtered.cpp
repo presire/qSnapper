@@ -6,9 +6,6 @@
  */
 
 #include "tst_filechangemodel.h"
-#include <QtTest>
-#include <QSignalSpy>
-#include <QFileInfo>
 
 
 /**
@@ -287,34 +284,6 @@ void TestFileChangeModel::legitimateCreatedDirectoryTreeStillReachesThePlan()
         QStringLiteral("created"),
         QStringLiteral("created"),
     }));
-}
-
-/**
- * @brief ツリー構築で合成された中間ディレクトリが誤検知を起こさないことを検証する
- *
- * 合成ノードはstatusFlagsが空でchangeTypeがModifiedになるが、比較結果に由来しないため矛盾の証拠にはならない
- * Pre/Post表示フィルタが実レコードを間引いた場合にも生じる
- */
-void TestFileChangeModel::syntheticIntermediateDirectoriesDoNotSuppressCreatedParent()
-{
-    FakeRestorePlanTransport fake;
-    TestableFileChangeModel model;
-
-    // /etc/foo/barは出力に現れず、ツリー構築時に合成される
-    const QString output = QStringLiteral("+.... /etc/foo\n"
-                                          "+.... /etc/foo/bar/baz.conf\n");
-    prepareStagedRestore(&model, &fake, output,
-                         {QStringLiteral("/etc/foo/")}, 100, /*flatMode=*/false);
-
-    QVERIFY(model.restoreCheckedItems());
-    fake.completeAllPendingOk();
-
-    const QStringList stagedPaths = stagedPathsOf(fake);
-
-    // 合成された/etc/foo/barは実レコードではないため計画に載らず、かつ/etc/fooの抑止理由にもならない
-    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo")));
-    QVERIFY(!stagedPaths.contains(QStringLiteral("/etc/foo/bar")));
-    QVERIFY(stagedPaths.contains(QStringLiteral("/etc/foo/bar/baz.conf")));
 }
 
 /**

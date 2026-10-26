@@ -22,7 +22,6 @@
 #include <QDBusError>
 #include <QDBusMessage>
 #include <QFile>
-#include <QFileInfo>
 #include <QIODevice>
 #include <QMap>
 #include <QSocketNotifier>

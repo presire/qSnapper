@@ -342,8 +342,16 @@ namespace qsnapper::security {
                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     }
 
+    /**
+     * @brief 親を再解決せずに変更主体も同じwalkから得て、矛盾したチェーンを拒否する
+     * @param rootPath 基点ルート
+     * @param destinationPath 復元先の絶対パス
+     * @param leafNameOut 最終成分名の返却先
+     * @param ownershipOut 変更主体を判定するための所有権状態
+     * @return 成功時は呼び出し元がcloseする親fd、失敗時は-1
+     */
     int openDestinationParentBeneathRoot(const QString &rootPath, const QString &destinationPath,
-                                         QByteArray *leafNameOut)
+                                         QByteArray *leafNameOut, DirectoryChainOwnership *ownershipOut)
     {
         if (!leafNameOut) {
             errno = EINVAL;
@@ -355,7 +363,7 @@ namespace qsnapper::security {
             return -1;
         }
 
-        return openLeafParentBeneathRoot(rootPath, components, false, 0, leafNameOut);
+        return openLeafParentBeneathRoot(rootPath, components, false, 0, leafNameOut, ownershipOut);
     }
 
     QByteArray selinuxContextWithDestinationUser(const QByteArray &snapshotContext,
@@ -647,8 +655,8 @@ namespace qsnapper::security {
 
     QByteArray snapshotListFingerprint(const QString &snapshotsDirPath)
     {
-        const int dirFd = ::open(snapshotsDirPath.toUtf8().constData(),
-                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        // .snapshotsやその祖先がsymlinkへ差し替えられた場合に別の木の指紋を作らないよう、成分ごとにsymlinkを辿らずに開く
+        const int dirFd = safeOpenDirectory(snapshotsDirPath);
         if (dirFd < 0) {
             return {};
         }

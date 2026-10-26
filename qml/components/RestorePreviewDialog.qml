@@ -12,7 +12,7 @@
  * 入力 : configName、snapshotNumber、preSnapshotNumber、postSnapshotNumber (親からバインド)
  * 出力 : restoreConfirmed()
  * 依存 : ThemeManager (配色)、FileChangeModel (差分ツリーと復元、削除対象の一覧、復元結果)、
- *        BorderedDialog (枠付きダイアログ)、ThemedGroupBox (枠付きグループ)
+ *        BorderedDialog (枠付きダイアログ)、ThemedGroupBox (枠付きグループ)、DisplayText (双方向制御文字の置き換え)
  */
 import QtQuick
 import QtQuick.Controls
@@ -205,7 +205,7 @@ BorderedDialog {
             // スキップしたパスは復元対象に由来するため、PlainTextの読み取り専用テキストで表示する
             TextArea {
                 readOnly: true
-                text: summary.skippedListed > 0 ? summary.result.skippedPaths.join("\n") : ""
+                text: summary.skippedListed > 0 ? DisplayText.sanitize(summary.result.skippedPaths.join("\n")) : ""
                 textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                 wrapMode: TextEdit.NoWrap
                 font.family: "monospace"
@@ -236,7 +236,7 @@ BorderedDialog {
         // 失敗したエントリのパス (サーバがパスを返した場合だけ表示する)
         Label {
             visible: summary.valid && summary.result.failedIndex >= 0 && summary.result.failedPath !== ""
-            text: summary.result.failedPath
+            text: DisplayText.sanitize(summary.result.failedPath)
             textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
             wrapMode: Text.WrapAnywhere
             Layout.fillWidth: true
@@ -245,9 +245,11 @@ BorderedDialog {
         }
 
         // 最後に記録されたエラーの文言 (サーバが返した場合だけ表示する)
+        // 結果の取得前はlastErrorがundefinedになるため、sanitizeで空文字列にして代入の警告を防ぐ
+        // 文言にはパスが含まれ得るため、双方向制御文字も置き換える
         Label {
             visible: summary.valid && summary.result.lastError !== ""
-            text: summary.result.lastError
+            text: DisplayText.sanitize(summary.result.lastError)
             textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
@@ -597,7 +599,7 @@ BorderedDialog {
                                         // 名前 (名前の無いルートは(root)と表示する)
                                         Label {
                                             textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
-                                            text: fileName || "(root)"
+                                            text: DisplayText.sanitize(fileName || "(root)")
                                             color: palette.text
                                             font.italic: fileName === ""
                                             Layout.fillWidth: true
@@ -754,7 +756,7 @@ BorderedDialog {
                     Label {
                         visible: rightPane.fileSelected
                         textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
-                        text: rightPane.selectedFilePath
+                        text: DisplayText.sanitize(rightPane.selectedFilePath)
                         font.bold: true
                         font.pixelSize: 12
                         elide: Text.ElideMiddle
@@ -1057,7 +1059,7 @@ BorderedDialog {
 
                 TextArea {
                     readOnly: true
-                    text: confirmRestoreDialog.deletePaths.join("\n")
+                    text: DisplayText.sanitize(confirmRestoreDialog.deletePaths.join("\n"))
                     textFormat: TextEdit.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
                     wrapMode: TextEdit.NoWrap
                     font.family: "monospace"
@@ -1245,7 +1247,7 @@ BorderedDialog {
                 return
             }
             // textを丸ごと置き換えると全体を作り直して重いため、追記だけにする
-            restoreLogArea.append(pendingLines.join("\n"))
+            restoreLogArea.append(DisplayText.sanitize(pendingLines.join("\n")))
             pendingLines = []
             // text.lengthは全体を文字列にして重いため、lengthを使う
             restoreLogArea.cursorPosition = restoreLogArea.length
@@ -1338,7 +1340,7 @@ BorderedDialog {
                 Layout.fillWidth: true
                 Layout.maximumWidth: 500
                 textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
-                text: progressDialog.currentFile
+                text: DisplayText.sanitize(progressDialog.currentFile)
                 wrapMode: Text.WrapAnywhere
                 font.pixelSize: 10
                 color: palette.placeholderText
@@ -1384,7 +1386,7 @@ BorderedDialog {
 
             Label {
                 textFormat: Text.PlainText  // 表示する文字列にタグが含まれていても、リッチテキストとして解釈させない
-                text: rightPane.selectedFilePath
+                text: DisplayText.sanitize(rightPane.selectedFilePath)
                 wrapMode: Text.WrapAnywhere
                 Layout.preferredWidth: 450
                 color: palette.text

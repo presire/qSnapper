@@ -5,6 +5,14 @@
   <vendor>SUSE</vendor>
   <vendor_url>https://www.presire.com</vendor_url>
 
+  <!--
+    閲覧系のアクション (list-snapshots、view-config、view-timers、view-filesystem) は、
+    アクティブなローカルセッションのユーザに認証なしで許可する
+    GUIは開くたびに一覧や設定を読み込むため、毎回パスワードを求めると実用にならない
+    返すのはメタデータ (番号・日時・説明・userdata・設定値・使用量) だけで、
+    ファイルの内容や差分はview-diff (auth_admin_keep) で保護している
+    リモートや非アクティブのセッションは、本人が端末の前にいる保証がないためauth_adminのままとする
+  -->
   <action id="com.presire.qsnapper.list-snapshots">
     <description>List system snapshots</description>
     <description xml:lang="ja">システムスナップショットを一覧表示</description>
@@ -103,6 +111,7 @@
     </defaults>
   </action>
 
+  <!-- 認証なしで許可する理由は、list-snapshotsの直前のコメントを参照 -->
   <action id="com.presire.qsnapper.view-config">
     <description>View Snapper configuration</description>
     <description xml:lang="ja">Snapper設定を表示</description>
@@ -117,6 +126,7 @@
     </defaults>
   </action>
 
+  <!-- 認証なしで許可する理由は、list-snapshotsの直前のコメントを参照 -->
   <action id="com.presire.qsnapper.view-timers">
     <description>View the state of the Snapper timers</description>
     <description xml:lang="ja">Snapperタイマーの状態を表示</description>
@@ -201,6 +211,7 @@
     </defaults>
   </action>
 
+  <!-- 認証なしで許可する理由は、list-snapshotsの直前のコメントを参照 -->
   <action id="com.presire.qsnapper.view-filesystem">
     <description>View the Btrfs space usage</description>
     <description xml:lang="ja">Btrfsの使用量を表示</description>

@@ -1,12 +1,12 @@
 #!/bin/bash
 #
 # @file common.sh
-# @brief 各PoCスクリプトがsourceで読み込む共通ヘルパ関数群
+# @brief poc_quit_dos.sh、poc_restore_traversal.sh、poc_log_leak.shがsourceで読み込む共通ヘルパ関数群
 #
 # VM検出、qSnapper D-Busサービスの存在確認、結果判定、スナップショット確保を提供する
 # BASELINEを設定するとbaselineモード(修正前の再現確認)、未設定ならfixedモード(修正後の阻止確認)になる
 #
-# 使い方 : 各PoCスクリプトから source "$SCRIPT_DIR/common.sh" で読み込む
+# 使い方 : 上記3スクリプトから source "$SCRIPT_DIR/common.sh" で読み込む
 # 終了コード : 各関数のreport_resultがPASS/FAILに応じて0/1でexitする
 #
 
@@ -16,7 +16,14 @@ readonly DBUS_SERVICE="com.presire.qsnapper.Operations"         # qSnapperのD-B
 readonly DBUS_PATH="/com/presire/qsnapper/Operations"           # D-Busオブジェクトパス
 readonly DBUS_IFACE="com.presire.qsnapper.Operations"           # D-Busインターフェース名
 readonly RESULT_DIR="$(dirname "${BASH_SOURCE[0]}")/results"    # 結果ログの出力先
-readonly MODE="${BASELINE:+baseline}${BASELINE:-fixed}"         # BASELINE=1ならbaseline、そうでなければfixed
+
+# BASELINEの値をモード名へ連結するとbaseline1のような名前になり、report_resultのどの判定にも一致せず常にFAILになる
+# そのため値の有無だけで判定し、poc_polkit_race.pyやpoc_change_record_injection.shと同じ規則にそろえる
+if [[ -n "${BASELINE:-}" ]]; then
+    readonly MODE="baseline"    # 修正前の再現を確認するモード
+else
+    readonly MODE="fixed"       # 修正後の阻止を確認するモード
+fi
 
 # 結果ログの出力先を用意する
 mkdir -p "$RESULT_DIR"
@@ -73,15 +80,6 @@ assert_qsnapper_service() {
         exit 2
     fi
     log "qSnapper D-Bus service is up"
-}
-
-#
-# @brief インストール済みqSnapperのバージョンを取得する
-# @stdout バージョン文字列(取得できない場合はunknown)
-# @return 0
-#
-get_qsnapper_version() {
-    rpm -q qSnapper --qf "%{VERSION}-%{RELEASE}\n" 2>/dev/null || echo "unknown"
 }
 
 #

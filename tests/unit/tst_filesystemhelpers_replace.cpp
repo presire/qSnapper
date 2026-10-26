@@ -6,23 +6,13 @@
  */
 #include <QtTest/QtTest>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QTemporaryDir>
 
 #include <cerrno>
-#include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
 #include <functional>
-#include <linux/btrfs.h>
-#include <linux/magic.h>
-#include <sched.h>
-#include <sys/ioctl.h>
-#include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
-#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 

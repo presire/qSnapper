@@ -7,8 +7,6 @@
  * root権限を必要とする検証は行わず、判定に使える既存パスが無い場合はQSKIPで明示する
  */
 
-#include <QDir>
-#include <QFile>
 #include <QTemporaryDir>
 #include <QtTest>
 

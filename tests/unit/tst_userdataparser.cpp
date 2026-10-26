@@ -11,7 +11,6 @@
 
 #include <QtTest/QtTest>
 #include <QString>
-#include <QVariantMap>
 #include "userdataparser.h"
 
 using qsnapper::userdata::ParseError;

@@ -189,21 +189,23 @@ namespace qsnapper::security {
          * @brief 欠けている親ディレクトリを1階層だけ作成し、snapshot側の同じディレクトリのmetadataを適用する
          *
          * snapshot側の状態を先に確定させ、判定できない場合は何も作成しない
-         * 作成直後は0700・作成者所有とし、開き直したinodeの所有者とpermissionを確認してからmetadataを適用する
-         * 親ディレクトリが他ユーザーに差し替えられ得る場合はmetadataを適用せず、作成者所有のまま作成する
-         * このときgroupとotherには、snapshot側で許されていた検索 (x) だけを与え、最大でも0711に留める
-         * snapshot側が0700で隠していた子孫を、復元によって他ユーザーへ見せないため
+         * 信頼チェーンでは作成直後は0700・作成者所有とし、開き直したinodeの所有者とpermissionを確認してからmetadataを適用する
+         * 非信頼チェーンでは、最初の非信頼点の所有者 (principal) と復元元の所有者が一致する場合だけ作成する
+         * 作成はprincipalのfilesystem identityで0700から行い、作成直後からprincipalの所有物にする
+         * root所有のinodeを経由して作成すると、他ユーザーが差し替えてmetadataを奪えるため
          *
          * @param dirFd 作成先の親ディレクトリfd
          * @param name 作成する成分名
          * @param sourceDirFd pin済みのsnapshot dirfd
          * @param sourceRelativePath snapshot dirfdからの相対パス (作成する成分まで)
-         * @param mustPreserveMetadata 必須metadataを適用できない場合に失敗させる場合true (差し替え可能な親では適用せず、最大0711で作成する)
+         * @param mustPreserveMetadata 必須metadataを適用できない場合に失敗させる場合true
+         * @param ownership 同じwalkで集積した祖先の所有者状態
          * @return 成功時: 作成したディレクトリのfd (呼び出し側でclose)、失敗時: -1 (errno設定)
          */
         int createMissingParentFromSourceAt(int dirFd, const QByteArray &name, int sourceDirFd,
                                             const QString &sourceRelativePath,
-                                            bool mustPreserveMetadata)
+                                            bool mustPreserveMetadata,
+                                            const DirectoryChainOwnership &ownership)
         {
             // snapshot側に同じディレクトリが無い場合 (存在しない・ディレクトリ以外) だけを「無し」と判定する
             // それ以外のエラーはsnapshot側の状態を判定できないため、作成せずに失敗する
@@ -212,32 +214,53 @@ namespace qsnapper::security {
                 return -1;
             }
 
-            // 他ユーザーがエントリを差し替え得る親ディレクトリでは、作成したinodeへのmetadata適用を控える
-            // (差し替えられた別inodeへ所有者やmodeを適用してしまうため)
-            struct stat parentStat;
-            if (::fstat(dirFd, &parentStat) < 0) {
+            struct stat sourceStat;
+            if (sourceFd.isValid() && ::fstat(sourceFd.get(), &sourceStat) < 0) {
                 return -1;
             }
-            const bool metadataSafe = parentDirectoryIsSafeForMetadata(parentStat);
-            const bool applySnapshotMetadata =
-                    sourceFd.isValid() && (!mustPreserveMetadata || metadataSafe);
 
-            // metadataを適用できない場合でも、復元先の子孫へ辿れるよう、他ユーザーには検索 (x) だけを与える
-            // ただし、snapshot側が検索を許していない場合 (例: 0700) は与えない
-            // 一律に0711で作ると、snapshot側で親が隠していた子 (0644のファイルなど) を他ユーザーが読めるようになるため
-            const bool needsTraversableFallback =
-                    sourceFd.isValid() && mustPreserveMetadata && !metadataSafe;
-            mode_t creationMode = 0700;
-            if (needsTraversableFallback) {
-                struct stat sourceStat;
-                if (::fstat(sourceFd.get(), &sourceStat) < 0) {
+            // 非信頼チェーンでは、復元元の所有者がprincipalと一致する場合だけ作成を許可する
+            // 所有者を確認できない復元元に合わせて作成すると、principalの権限の外にある所有者の領域を作ることになる
+            const bool untrustedMutation = ::geteuid() == 0 && !ownership.trusted;
+            if (untrustedMutation
+                    && (!ownership.principalKnown() || !sourceFd.isValid()
+                        || sourceStat.st_uid != ownership.principal)) {
+                errno = EPERM;
+                return -1;
+            }
+
+            // 非信頼チェーンではmkdiratの間だけfilesystem identityをprincipalへ落とす
+            // scopeの中ではfdの解放もログ出力も行わず、権限が復旧してから次の処理へ進む
+            bool createdHere = false;
+            if (untrustedMutation) {
+                bool identityOk = false;
+                int mkdirError = 0;
+                {
+                    ScopedFsIdentity identity(ownership.principal, sourceStat.st_gid);
+                    identityOk = identity.ok();
+                    if (identityOk && ::mkdirat(dirFd, name.constData(), 0700) == 0) {
+                        createdHere = true;
+                    }
+                    else if (identityOk) {
+                        mkdirError = errno;
+                    }
+                }
+                if (!identityOk) {
+                    errno = EPERM;
                     return -1;
                 }
-                creationMode = 0700 | (sourceStat.st_mode & 0011);
+                // 既に作られていた場合は、所有者がprincipalであることを確認して同じinodeを使う
+                // 名前を再解決すると別のディレクトリへmetadataを適用し得るため、下のopenatでfdを固定する
+                if (!createdHere && mkdirError != EEXIST) {
+                    errno = mkdirError;
+                    return -1;
+                }
             }
-
-            if (::mkdirat(dirFd, name.constData(), creationMode) < 0) {
-                return -1;
+            else {
+                createdHere = ::mkdirat(dirFd, name.constData(), 0700) == 0;
+                if (!createdHere) {
+                    return -1;
+                }
             }
 
             UniqueFd createdFd(::openat(dirFd, name.constData(),
@@ -246,38 +269,59 @@ namespace qsnapper::security {
                 return -1;
             }
 
-            // mkdirat()とopenat()の間に差し替えられた場合、作成者所有のディレクトリにはならないため、
-            // 所有者とpermissionが想定と異なる場合は失敗する (差し替えの検出)
+            // mkdirat()とopenat()の間に差し替えられた場合に備え、開いたinodeの所有者を確認する
+            // 非信頼チェーンではprincipal以外の所有物へmetadataを適用しない
             struct stat createdStat;
             if (::fstat(createdFd.get(), &createdStat) < 0) {
                 return -1;
             }
-            if (!S_ISDIR(createdStat.st_mode) || createdStat.st_uid != ::geteuid()
-                    || (createdStat.st_mode & 0022) != 0) {
+            if (!S_ISDIR(createdStat.st_mode)) {
+                errno = EEXIST;
+                return -1;
+            }
+            // EEXISTで既存のinodeを使う場合や作成直後に差し替えられた場合は、別subvolumeのディレクトリを開いている可能性がある
+            // metadataを適用する前に親と同じファイルシステム上かを開いたfdで確認する
+            struct stat parentStat;
+            struct statx openedInfo;
+            if (::fstat(dirFd, &parentStat) != 0
+                    || ::statx(createdFd.get(), "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO,
+                               &openedInfo) != 0) {
+                return -1;
+            }
+            if (isMountBoundary(openedInfo, parentStat.st_dev)) {
+                errno = EXDEV;
+                return -1;
+            }
+            if (untrustedMutation) {
+                if (createdStat.st_uid != ownership.principal) {
+                    errno = EPERM;
+                    return -1;
+                }
+            }
+            else if (createdStat.st_uid != ::geteuid() || (createdStat.st_mode & 0022) != 0) {
                 errno = EEXIST;
                 return -1;
             }
 
-            if (applySnapshotMetadata) {
+            if (sourceFd.isValid()) {
                 const RestoredMetadataResult metadata =
                         applyRestoredMetadata(sourceFd.get(), createdFd.get(), true);
                 if (metadata.mandatoryFailed && mustPreserveMetadata) {
-                    // 失敗したinodeを片付ける: 自分が作成したinodeのままであることを確認してから削除する
                     const int failureErrno = metadata.mandatoryErrno;
-                    struct stat currentStat;
-                    if (::fstatat(dirFd, name.constData(), &currentStat, AT_SYMLINK_NOFOLLOW) == 0
-                            && currentStat.st_dev == createdStat.st_dev
-                            && currentStat.st_ino == createdStat.st_ino
-                            && S_ISDIR(currentStat.st_mode)) {
-                        ::unlinkat(dirFd, name.constData(), AT_REMOVEDIR);
+                    // 失敗したinodeを片付ける: 自分が作成したinodeのままであることを確認してから削除する
+                    // 競合で既存のinodeを使った場合は、呼び出し元のディレクトリを消さない
+                    if (createdHere) {
+                        struct stat currentStat;
+                        if (::fstatat(dirFd, name.constData(), &currentStat, AT_SYMLINK_NOFOLLOW) == 0
+                                && currentStat.st_dev == createdStat.st_dev
+                                && currentStat.st_ino == createdStat.st_ino
+                                && S_ISDIR(currentStat.st_mode)) {
+                            ::unlinkat(dirFd, name.constData(), AT_REMOVEDIR);
+                        }
                     }
                     errno = failureErrno;
                     return -1;
                 }
-            }
-            else if (needsTraversableFallback) {
-                qWarning() << "Staged restore: parent directory is writable by other users;"
-                           << "snapshot metadata was not applied";
             }
 
             return ::dup(createdFd.get());
@@ -287,29 +331,16 @@ namespace qsnapper::security {
     /**
      * @brief 作成したディレクトリへsnapshotのmetadataを安全に適用できる親ディレクトリかを判定する
      *
-     * sticky bitが無い状態でgroup/otherへ書き込みが許可されている場合と、root以外が所有する書き込み可能な
-     * ディレクトリでは、他ユーザーが作成直後のエントリを差し替え得るため、安全と判定しない
-     * sticky bit付きでrootが所有するディレクトリでは、root所有のエントリを他ユーザーは差し替えられない
+     * root所有かつgroup/other書き込み不可だけを信頼する
+     * sticky bitがあっても他ユーザーがrootより先に名前を作れるため信頼しない
+     * 非root所有者は0555からでもmodeを変更して差し替えられるため信頼しない
      *
      * @param parentStat 親ディレクトリのstat
      * @return 安全に適用できる場合: true
      */
     bool parentDirectoryIsSafeForMetadata(const struct stat &parentStat)
     {
-        const mode_t mode = parentStat.st_mode;
-        const bool stickyProtected = (mode & S_ISVTX) != 0;
-
-        // sticky bitが無い状態でgroup/other書き込みがあれば、他ユーザーがエントリを差し替えられる
-        if (!stickyProtected && (mode & (S_IWGRP | S_IWOTH)) != 0) {
-            return false;
-        }
-
-        // root以外が所有し書き込み可能なディレクトリは、所有者が常にエントリを差し替えられる
-        if (parentStat.st_uid != 0 && (mode & S_IWUSR) != 0) {
-            return false;
-        }
-
-        return true;
+        return parentStat.st_uid == 0 && (parentStat.st_mode & (S_IWGRP | S_IWOTH)) == 0;
     }
 
     bool safeCreateParentDirectoriesFromSourceBeneathRoot(const QString &rootPath,
@@ -342,36 +373,65 @@ namespace qsnapper::security {
             return false;
         }
 
+        // 同じwalkで開いた祖先の所有者を集積し、rootが変更してよい相手を単一に限定する
+        // 途中で所有者が混在した場合は、EPERMで即座に止める
+        DirectoryChainOwnership ownership;
+        accumulateChainOwnership(ownership, rootInfo);
+        if (::geteuid() == 0 && !chainAllowsMutation(ownership)) {
+            ::close(dirFd);
+            errno = EPERM;
+            return false;
+        }
+
+        // 開いたinodeの所有者を集積してから、rootPathと同じファイルシステム上かを確認する
+        // 所有者の混在はEPERM、statxに失敗した場合は同一性を確認できないためfail-closedで拒否する
+        const auto validateOpenedDirectory = [&ownership, &rootInfo](int fd, bool checkMountBoundary) {
+            struct stat stepInfo;
+            if (::fstat(fd, &stepInfo) != 0) {
+                return false;
+            }
+            accumulateChainOwnership(ownership, stepInfo);
+            if (::geteuid() == 0 && !chainAllowsMutation(ownership)) {
+                errno = EPERM;
+                return false;
+            }
+            if (!checkMountBoundary) {
+                return true;
+            }
+
+            struct statx openedInfo;
+            if (::statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO, &openedInfo) != 0) {
+                return false;
+            }
+            if (isMountBoundary(openedInfo, rootInfo.st_dev)) {
+                errno = EXDEV;
+                return false;
+            }
+            return true;
+        };
+
         for (int i = 0; i < components.size(); ++i) {
             const QByteArray name = components.at(i).toUtf8();
 
             // 既存の成分は辿るだけで、所有者やmodeを変更しない
             int nextFd = ::openat(dirFd, name.constData(),
                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            if (nextFd >= 0) {
-                // 開いたディレクトリがrootPathと同じファイルシステム上かを確認する
-                // statxに失敗した場合は同一性を確認できないため、開いたfdを捨てて失敗させる (fail-closed)
-                struct statx openedInfo;
-                if (::statx(nextFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO,
-                            &openedInfo) != 0) {
-                    const int savedErrno = errno;
-                    ::close(nextFd);
-                    nextFd = -1;
-                    errno = savedErrno;
-                }
-                else if (isMountBoundary(openedInfo, rootInfo.st_dev)) {
-                    // 境界の下は復元先のサブボリュームではないため、作成せずに拒否する
-                    ::close(nextFd);
-                    nextFd = -1;
-                    errno = EXDEV;
-                }
-            }
-            else if (errno == ENOENT) {
+            bool checkMountBoundary = true;
+            if (nextFd < 0 && errno == ENOENT) {
                 const QString sourceRelativePath =
                         components.mid(0, i + 1).join(QLatin1Char('/'));
                 nextFd = createMissingParentFromSourceAt(dirFd, name, sourceDirFd,
                                                          sourceRelativePath,
-                                                         mustPreserveMetadata);
+                                                         mustPreserveMetadata, ownership);
+                // 境界検査はmetadataの適用前にcreateMissingParentFromSourceAt()の中で済ませている
+                checkMountBoundary = false;
+            }
+            // 既存成分と作成成分の両方に同じ所有者検証を適用し、失敗時は開いたfdだけを捨てる
+            if (nextFd >= 0 && !validateOpenedDirectory(nextFd, checkMountBoundary)) {
+                const int savedErrno = errno;
+                ::close(nextFd);
+                nextFd = -1;
+                errno = savedErrno;
             }
 
             const int savedErrno = errno;
@@ -525,6 +585,11 @@ namespace qsnapper::security {
      *
      * 親までの解決に失敗した場合は何も削除しない
      * leaf自体が存在しない場合のみENOENTを成功扱いとする (safeRemoveAllと同じ契約)
+     * root実行時は、親までの所有権の状態に削除対象と各降下先を加えて判定し、
+     * 単一principalに限定できないディレクトリをEPERMで拒否する
+     * 親までが信頼チェーンでも、削除対象やその内部で初めて非信頼になる場合に同じ判定を行う
+     * トップと各降下先の所有者を検査したfdだけで内容を削除し、名前を開き直して降下しない
+     * 最後の名前によるrmdirは空ディレクトリだけを対象とし、非空の差し替えはENOTEMPTYになる
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 削除対象の絶対パス (rootPath配下であること)
@@ -538,13 +603,14 @@ namespace qsnapper::security {
         }
 
         QByteArray leafName;
+        DirectoryChainOwnership ownership;
         const UniqueFd parentFd(
-                openLeafParentBeneathRoot(rootPath, components, false, 0, &leafName));
+                openLeafParentBeneathRoot(rootPath, components, false, 0, &leafName, &ownership));
         if (!parentFd.isValid()) {
             return errno == ENOENT;
         }
 
-        return removeEntryAt(parentFd.get(), leafName);
+        return removeEntryAt(parentFd.get(), leafName, ownership);
     }
 
     /**
@@ -629,5 +695,52 @@ namespace qsnapper::security {
         }
 
         return allOk;
+    }
+
+    /**
+     * @brief subvolume配下の .snapshots/<番号>/snapshot を1成分ずつsymlink非追従で開く
+     *
+     * .snapshots と各スナップショットはbtrfsでは別subvolumeなので、mount境界の制限は付けない
+     * .snapshots と番号ディレクトリはsnapperがroot所有で作るため、それ以外の所有者やgroupとotherの書き込み権は
+     * 一般ユーザが名前を差し替えられる状態として拒否する
+     *
+     * @param subvolumeFd snapper設定のsubvolumeのディレクトリfd
+     * @param snapshotNumber スナップショット番号
+     * @param statOut 開いたsnapshotディレクトリのstatの返却先 (nullptr可)
+     * @return 成功時snapshotディレクトリのfd、失敗時-1 (errno設定)
+     */
+    int openSnapshotDirectoryBeneathSubvolume(int subvolumeFd, unsigned int snapshotNumber,
+                                              struct stat *statOut)
+    {
+        struct stat opened {};
+        const auto openStep = [&opened](int parentFd, const QString &name, bool requireSnapperOwned) {
+            UniqueFd stepFd(openDirectoryChainAt(parentFd, QStringList {name}, 1, false, 0, false));
+            if (!stepFd.isValid() || ::fstat(stepFd.get(), &opened) != 0) {
+                return -1;
+            }
+            if (requireSnapperOwned
+                && (opened.st_uid != 0 || (opened.st_mode & (S_IWGRP | S_IWOTH)) != 0)) {
+                errno = EPERM;
+                return -1;
+            }
+            return stepFd.release();
+        };
+
+        const UniqueFd snapshotsFd(openStep(subvolumeFd, QStringLiteral(".snapshots"), true));
+        if (!snapshotsFd.isValid()) {
+            return -1;
+        }
+        const UniqueFd numberFd(openStep(snapshotsFd.get(), QString::number(snapshotNumber), true));
+        if (!numberFd.isValid()) {
+            return -1;
+        }
+        UniqueFd snapshotFd(openStep(numberFd.get(), QStringLiteral("snapshot"), false));
+        if (!snapshotFd.isValid()) {
+            return -1;
+        }
+        if (statOut) {
+            *statOut = opened;
+        }
+        return snapshotFd.release();
     }
 } // namespace qsnapper::security

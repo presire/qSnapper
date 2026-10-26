@@ -6,9 +6,6 @@
  */
 
 #include "tst_filechangemodel.h"
-#include <QtTest>
-#include <QSignalSpy>
-#include <QFileInfo>
 
 
 /**

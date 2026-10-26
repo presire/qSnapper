@@ -61,20 +61,36 @@ namespace qsnapper::security {
      * @brief 既存ディレクトリをO_NOFOLLOWで開く
      *
      * @param path 対象ディレクトリの絶対パス
-     * @return 成功時: dirfd、失敗時: -1
+     * @param requireTrustedChain 「/」から対象までの全ディレクトリにroot所有でgroupとotherが書き込めないことを要求する場合true
+     * @return 成功時: dirfd、失敗時: -1 (信頼できないディレクトリを含む場合はEPERM)
      */
-    int safeOpenDirectory(const QString &path)
+    int safeOpenDirectory(const QString &path, bool requireTrustedChain)
     {
-        if (path.isEmpty() || path == QStringLiteral("/")) {
-            return openRootDirectory();
-        }
-
         QStringList components;
-        if (!splitAbsolutePath(path, &components)) {
+        if (!path.isEmpty() && path != QStringLiteral("/") && !splitAbsolutePath(path, &components)) {
             return -1;
         }
+        if (!requireTrustedChain) {
+            return components.isEmpty() ? openRootDirectory()
+                                        : openDirectoryChainNoFollow(components, components.size(), false, 0);
+        }
 
-        return openDirectoryChainNoFollow(components, components.size(), false, 0);
+        const UniqueFd rootFd(openRootDirectory());
+        if (!rootFd.isValid()) {
+            return -1;
+        }
+        // 所有者は辿った同じfdから集め、検査と使用の間に名前を差し替えられないようにする
+        DirectoryChainOwnership ownership;
+        UniqueFd dirFd(openDirectoryChainAt(rootFd.get(), components, components.size(), false, 0, false,
+                                            &ownership));
+        if (!dirFd.isValid()) {
+            return -1;
+        }
+        if (!ownership.trusted) {
+            errno = EPERM;
+            return -1;
+        }
+        return dirFd.release();
     }
 
     /**
@@ -375,24 +391,6 @@ namespace qsnapper::security {
     }
 
     namespace detail {
-        int openParentDirectoryInRootForTesting(int dirFd, const QString &relativePath,
-                                                QByteArray *leafNameOut, bool forceNoOpenat2)
-        {
-            if (dirFd < 0) {
-                errno = EINVAL;
-                return -1;
-            }
-
-            if (!validateRelativePathAt(relativePath, nullptr)) {
-                return -1;
-            }
-
-            const QStringList components =
-                    relativePath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
-            return openParentDirectoryInRootAt(dirFd, components, leafNameOut,
-                                               forceNoOpenat2);
-        }
-
         /**
          * @brief rename直前フックの保存先
          * @return フックへの参照

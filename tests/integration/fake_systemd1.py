@@ -21,11 +21,9 @@ qSnapperのヘルパーが使うsystemdのManagerインタフェースの一部�
 振る舞いのキー (SetBehavior(key, value)) :
   state.<unit>           : "<unitFileState>,<activeState>" で初期状態を上書きする
   missing.<unit>         : 1 でGetUnitFileStateがFileNotFoundを返し、GetUnitがNoSuchUnitを返す
-  noload.<unit>          : 1 でGetUnitだけがNoSuchUnitを返す
   masked.<unit>          : 1 でunit fileの状態を常にmaskedにする (Enable/Disableで変わらない)
   job_result             : StartUnit/StopUnitのジョブ結果 (既定はdone)
   jobremoved_early       : 1 でJobRemovedをStartUnit/StopUnitの応答より前に送出する
-  jobremoved_broadcast   : 1 でJobRemovedを宛先なしの放送として送る (既定は、本物のsystemdと同じく要求元への単一宛先)
   job_delay              : JobRemovedを応答の後に送るまでの遅延をミリ秒で指定する (jobの実行中に復元の開始を試みる検査に使う)
   silent.<Method>        : 1 で指定メソッドに応答しない
   delay.<Method>         : 応答までの遅延をミリ秒で指定する
@@ -357,7 +355,7 @@ class Manager(dbus.service.Object):
         unit = str(unit)
 
         def produce():
-            if STATE.flag("missing." + unit) or STATE.flag("noload." + unit):
+            if STATE.flag("missing." + unit):
                 raise DBusException("unit not loaded", name=ERR_NO_SUCH_UNIT)
             return (unit_path(unit),)
 
@@ -437,9 +435,9 @@ class Manager(dbus.service.Object):
 
         Note:
             本物のsystemdは、Subscribeしていない要求元へ、宛先を指定した単一宛先のシグナルとして送る
-            放送で送ると、ヘルパーが受け取る経路 (宛先指定) と異なる経路を検査してしまうため、既定は単一宛先にする
+            放送で送ると、ヘルパーが受け取る経路 (宛先指定) と異なる経路を検査してしまうため、要求元が不明な場合だけ放送する
         """
-        if requester is None or STATE.flag("jobremoved_broadcast"):
+        if requester is None:
             self.JobRemoved(dbus.UInt32(job_id), job_path, dbus.String(unit), dbus.String(result))
             return
         message = dbus.lowlevel.SignalMessage(MANAGER_PATH, MANAGER_IFACE, "JobRemoved")
@@ -584,9 +582,6 @@ class UnitProperties(dbus.service.FallbackObject):
         """
         unit = unit_from_path(path)
         STATE.record("Properties.Get", [str(path), str(interface), str(name)])
-        error_spec = STATE.behavior("error.Properties.Get")
-        if error_spec:
-            raise make_error(error_spec)
         if str(interface) != UNIT_IFACE or str(name) != "ActiveState":
             raise DBusException("unknown property", name="org.freedesktop.DBus.Error.UnknownProperty")
         return dbus.String(STATE.unit_state(unit)[1])

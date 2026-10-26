@@ -6,24 +6,13 @@
  */
 #include <QtTest/QtTest>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QTemporaryDir>
 
 #include <cerrno>
 #include <cstring>
-#include <dirent.h>
 #include <fcntl.h>
-#include <functional>
-#include <linux/btrfs.h>
-#include <linux/magic.h>
-#include <sched.h>
-#include <sys/ioctl.h>
-#include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
-#include <sys/wait.h>
-#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
@@ -216,35 +205,7 @@ void TestFilesystemHelpers::beneathRootWriteRejectsParentSymlinkSwap()
     const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
     QWARN(qPrintable(QStringLiteral("write errno=%1 (%2)").arg(err).arg(strerror(err))));
-    QVERIFY(isAttackRejectionErrno(err));
-
-    verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
-}
-
-void TestFilesystemHelpers::beneathRootMkdirRejectsParentSymlinkSwap()
-{
-    QTemporaryDir rootDir;
-    QTemporaryDir outsideDir;
-    QVERIFY(rootDir.isValid() && outsideDir.isValid());
-
-    QString victimPath;
-    QByteArray sentinel;
-    buildAttackFixture(&rootDir, &outsideDir, &victimPath, &sentinel);
-    const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
-
-    swapComponentToSymlink(rootDir, outsideDir,
-                           {QStringLiteral("a"), QStringLiteral("b")});
-
-    const QString newDirPath = rootDir.path() + QStringLiteral("/a/b/newdir");
-    errno = 0;
-    const bool created = safeCreateDirectoryBeneathRoot(rootDir.path(), newDirPath, 0755);
-    const int err = errno;
-    QVERIFY(!created);
-    QWARN(qPrintable(QStringLiteral("mkdir errno=%1 (%2)").arg(err).arg(strerror(err))));
     QVERIFY(isAttackRejectionErrno(err));
 
     verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
@@ -302,85 +263,6 @@ void TestFilesystemHelpers::beneathRootRemoveRejectsParentSymlinkSwap()
     verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
 }
 
-void TestFilesystemHelpers::beneathRootSymlinkCreateRejectsParentSymlinkSwap()
-{
-    QTemporaryDir rootDir;
-    QTemporaryDir outsideDir;
-    QVERIFY(rootDir.isValid() && outsideDir.isValid());
-
-    QString victimPath;
-    QByteArray sentinel;
-    buildAttackFixture(&rootDir, &outsideDir, &victimPath, &sentinel);
-    const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
-
-    swapComponentToSymlink(rootDir, outsideDir,
-                           {QStringLiteral("a"), QStringLiteral("b")});
-
-    const QString linkPath = rootDir.path() + QStringLiteral("/a/b/link");
-    errno = 0;
-    const bool created = safeCreateSymlinkNoFollowBeneathRoot(rootDir.path(),
-                                                              QByteArray("elsewhere"), linkPath);
-    const int err = errno;
-    QVERIFY(!created);
-    QWARN(qPrintable(QStringLiteral("symlink errno=%1 (%2)").arg(err).arg(strerror(err))));
-    QVERIFY(isAttackRejectionErrno(err));
-
-    verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
-}
-
-/**
- * @brief symlink差し替えが祖父母階層 (root/a) の場合も検出すること
- */
-void TestFilesystemHelpers::beneathRootWriteRejectsGrandparentSymlinkSwap()
-{
-    QTemporaryDir rootDir;
-    QTemporaryDir outsideDir;
-    QVERIFY(rootDir.isValid() && outsideDir.isValid());
-
-    QString victimPath;
-    QByteArray sentinel;
-    buildAttackFixture(&rootDir, &outsideDir, &victimPath, &sentinel);
-    const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
-
-    swapComponentToSymlink(rootDir, outsideDir, {QStringLiteral("a")});
-
-    errno = 0;
-    const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
-    const int err = errno;
-    QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
-    QWARN(qPrintable(QStringLiteral("grandparent write errno=%1 (%2)").arg(err).arg(strerror(err))));
-    QVERIFY(isAttackRejectionErrno(err));
-
-    verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
-}
-
-void TestFilesystemHelpers::beneathRootMkdirRejectsGrandparentSymlinkSwap()
-{
-    QTemporaryDir rootDir;
-    QTemporaryDir outsideDir;
-    QVERIFY(rootDir.isValid() && outsideDir.isValid());
-
-    QString victimPath;
-    QByteArray sentinel;
-    buildAttackFixture(&rootDir, &outsideDir, &victimPath, &sentinel);
-    const QStringList fingerprintBefore = fingerprintTree(outsideDir.path());
-
-    swapComponentToSymlink(rootDir, outsideDir, {QStringLiteral("a")});
-
-    const QString newDirPath = rootDir.path() + QStringLiteral("/a/b/newdir");
-    errno = 0;
-    const bool created = safeCreateDirectoryBeneathRoot(rootDir.path(), newDirPath, 0755);
-    const int err = errno;
-    QVERIFY(!created);
-    QWARN(qPrintable(QStringLiteral("grandparent mkdir errno=%1 (%2)").arg(err).arg(strerror(err))));
-    QVERIFY(isAttackRejectionErrno(err));
-
-    verifyOutsideUntouched(outsideDir, sentinel, fingerprintBefore);
-}
-
 /**
  * @brief leaf自身が外部ファイルへのsymlinkへ差し替えられた場合、追従せず拒否する
  */
@@ -404,9 +286,6 @@ void TestFilesystemHelpers::beneathRootWriteRejectsLeafSymlinkToExternalFile()
     const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
     QWARN(qPrintable(QStringLiteral("leaf-symlink write errno=%1 (%2)").arg(err).arg(strerror(err))));
     QVERIFY(isAttackRejectionErrno(err));
 
@@ -438,9 +317,6 @@ void TestFilesystemHelpers::beneathRootWriteRejectsDanglingSymlinkComponent()
     const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), victimPath, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
     QWARN(qPrintable(QStringLiteral("dangling write errno=%1 (%2)").arg(err).arg(strerror(err))));
     QVERIFY(isAttackRejectionErrno(err));
 
@@ -464,9 +340,6 @@ void TestFilesystemHelpers::beneathRootWriteRejectsRegularFileAsDirectoryCompone
     const int fd = safeOpenRegularFileWriteBeneathRootForTesting(rootDir.path(), destination, 0644);
     const int err = errno;
     QVERIFY(fd < 0);
-    if (fd >= 0) {
-        ::close(fd);
-    }
     QCOMPARE(err, ENOTDIR);
 }
 

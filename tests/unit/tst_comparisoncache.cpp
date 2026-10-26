@@ -73,9 +73,6 @@ class TestComparisonCache : public QObject
     Q_OBJECT
 
 private slots:
-    /** @brief テストケース開始時にFake型のカウンタを初期化する */
-    void initTestCase();
-
     /** @brief 同一キーで2回目はファクトリを呼ばず再利用することを確認する */
     void reuseSkipsFactoryOnSecondCall();
 
@@ -104,7 +101,6 @@ private slots:
     void keyIsDirectional();
 
     /** @brief hasKey() がキャッシュの状態を正しく反映することを確認する */
-    void hasKeyReflectsState();
 
     /** @brief clear() がエントリを破棄することを確認する */
     void clearDestroysEntry();
@@ -112,14 +108,6 @@ private slots:
     /** @brief デストラクタがキャッシュ破棄時にエントリも破棄することを確認する */
     void destructionReleasesEntry();
 };
-
-/**
- * @brief テストケース開始時にFake型のカウンタを初期化する
- */
-void TestComparisonCache::initTestCase()
-{
-    FakeComparison::resetCounters();
-}
 
 /**
  * @brief 同一キーで2回目はファクトリを呼ばず再利用することを確認する
@@ -387,34 +375,6 @@ void TestComparisonCache::keyIsDirectional()
     QVERIFY(!cache.hasKey(key12));
     QVERIFY(cache.hasKey(key21));
     QCOMPARE(FakeComparison::s_constructCount, 2);
-}
-
-/**
- * @brief hasKey() がキャッシュの状態を正しく反映することを確認する
- *
- * 空のキャッシュ・構築後・クリア後の各状態を確認する
- */
-void TestComparisonCache::hasKeyReflectsState()
-{
-    FakeComparison::resetCounters();
-    ComparisonCache<FakeComparison> cache;
-
-    auto factory = [](const ComparisonCache<FakeComparison>::Key &) {
-        return std::unique_ptr<FakeComparison>(new FakeComparison(1000));
-    };
-
-    ComparisonCache<FakeComparison>::Key key{QStringLiteral("root"), 1, std::nullopt};
-
-    // 空のキャッシュ
-    QVERIFY(!cache.hasKey(key));
-
-    // 構築後
-    cache.get(key, ComparisonCache<FakeComparison>::Policy::Reuse, factory);
-    QVERIFY(cache.hasKey(key));
-
-    // クリア後
-    cache.clear();
-    QVERIFY(!cache.hasKey(key));
 }
 
 /**

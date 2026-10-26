@@ -112,6 +112,7 @@ set(HEADERS
     include/snappertimerstate.h
     include/configmanagermodel.h
     include/filesysteminfomodel.h
+    include/displaytext.h
 )
 
 # GUIアプリケーションの実行ファイルを生成

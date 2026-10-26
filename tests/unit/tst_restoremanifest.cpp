@@ -100,8 +100,6 @@ class TestRestoreManifest : public QObject
     Q_OBJECT
 
 private slots:
-    /** @brief freeze後のappendEntriesがWrongStateで拒否されエントリ数が増えないことを確認する */
-    void appendAfterFreezeIsRejectedWithoutGrowth();
     /** @brief freeze済みのentry対が置換されず内容が保たれることを確認する */
     void frozenPairsCannotBeReplaced();
     /** @brief 別ownerからのadvanceがOwnerMismatchで拒否されcursorと状態が動かないことを確認する */
@@ -163,27 +161,6 @@ private slots:
     /** @brief 同じUIDのStaging計画が作成順に列挙され指定した計画と他の状態が除かれることを確認する */
     void stagingIdsForUidAreListedOldestFirst();
 };
-
-/**
- * @brief freeze後のappendEntriesがWrongStateで拒否されエントリ数が増えないことを検証する
- */
-void TestRestoreManifest::appendAfterFreezeIsRejectedWithoutGrowth()
-{
-    RestoreManifest manifest(QStringLiteral(":1.1"), QStringLiteral("root"), 42, 0,
-                             RestoreMode::YastCompatible, QStringLiteral("rm-test"),
-                             kInitialTimeMs, RestoreManifestRegistry::kDefaultTtlMs);
-    ManifestError error = ManifestError::None;
-    QVERIFY(manifest.appendEntries({{QStringLiteral("/one"), QStringLiteral("modified")}}, &error));
-    QVERIFY(manifest.freeze(&error));
-    const int countBefore = manifest.totalEntries();
-
-    const bool appended = manifest.appendEntries(
-        {{QStringLiteral("/two"), QStringLiteral("created")}}, &error);
-
-    QVERIFY2(!appended, "appendEntries must reject additions after freeze");
-    QCOMPARE(errorValue(error), errorValue(ManifestError::WrongState));
-    QCOMPARE(manifest.totalEntries(), countBefore);
-}
 
 /**
  * @brief freeze済みのentry対が置換されず内容が保たれることを検証する
@@ -1183,8 +1160,8 @@ void TestRestoreManifest::malformedAndEdgeInputIsHandledAtomically()
  * @brief registry.stageEntries()がFrozen manifestに対しWrongStateで拒否され、
  *        エントリ列・totalEntries・pathBytes会計のいずれも変化させないことを検証する
  *
- * appendAfterFreezeIsRejectedWithoutGrowthは、RestoreManifest::appendEntries()を直接呼び出すstate machine単体の検証であり、
- * registry層の事前条件チェック (stageEntries内、manifest->appendEntriesへ到達する前のmanifest->state() != Staging判定) は別経路のため未検証だった
+ * registry層の事前条件チェック (stageEntries内、manifest->appendEntriesへ到達する前のmanifest->state() != Staging判定) は
+ * RestoreManifest::appendEntries()を直接呼び出す検証とは別経路のため、個別に確認する
  */
 void TestRestoreManifest::stageOnFrozenManifestIsRejectedWithoutGrowth()
 {

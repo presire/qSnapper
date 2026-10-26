@@ -18,6 +18,9 @@
     本チェッカーはこの特性を機械的に検査し、凍結後のメソッドへ可変パラメータを追加する将来の変更が
     境界を静かに弱めるのではなくここで失敗するようにする
 
+また削除済みのAuthenticateとQuitがXMLやconfへ再び現れないことも検査する
+    実行時のPoCは既定拒否のバスポリシーによる拒否とメソッド不在を区別できないため、不在の保証はここで行う
+
 本スクリプトはPython 3標準ライブラリ (xml.etree.ElementTree) のみを使うためdbusモジュールなしでどこでも実行できる
 
 使い方 : check_dbus_contract_sync.py [--xml FILE] [--conf FILE]
@@ -42,6 +45,13 @@ POST_FREEZE_METHODS = (           # 凍結後に可変引数を受け付けて�
     "ContinueRestorePlan",        # 実行を継続する
     "GetRestorePlanStatus",       # 状態を取得する
     "CancelRestorePlan",          # 実行をキャンセルする
+)
+
+# 削除済みのメソッド : 無認証で呼べる入口や認証状態の混同を招いたため廃止した
+# XMLかconfへ再び現れた時点で、バス上の攻撃面が戻ったものとして失敗させる
+FORBIDDEN_METHODS = (             # 再公開してはならないメソッド
+    "Authenticate",               # 呼び出し元ごとの認証状態を保持し、アクションの取り違えを招いた
+    "Quit",                       # 無認証でサービスを停止できた
 )
 
 
@@ -251,6 +261,13 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(msg)
         if not only_in_xml and not only_in_conf:
             print("SET SYNC: OK (XML methods == conf allowlist)")
+
+        reintroduced = sorted(
+            set(FORBIDDEN_METHODS) & (xml_method_names | conf_members)
+        )
+        print(f"FORBIDDEN methods present: {reintroduced if reintroduced else 'none'}")
+        if reintroduced:
+            failures.append(f"removed methods were reintroduced: {reintroduced}")
 
         # Post-freeze security-property assertions.
         post_freeze_failures = check_post_freeze_args(xml_methods)

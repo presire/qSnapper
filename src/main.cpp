@@ -30,6 +30,7 @@
 #include "snappersettingsmodel.h"
 #include "configmanagermodel.h"
 #include "filesysteminfomodel.h"
+#include "displaytext.h"
 
 /**
  * @brief アプリケーションを起動する
@@ -122,6 +123,9 @@ int main(int argc, char *argv[])
     qmlRegisterType<FilesystemInfoModel>("QSnapper", 1, 0, "FilesystemInfoModel");
     qmlRegisterSingletonInstance("QSnapper", 1, 0, "SnapperService", SnapperService::instance());
     qmlRegisterSingletonInstance("QSnapper", 1, 0, "ThemeManager", ThemeManager::instance());
+    // DisplayTextは状態を持たないため、共有のインスタンスを用意せず、エンジンに生成と破棄を任せる
+    qmlRegisterSingletonType<DisplayText>("QSnapper", 1, 0, "DisplayText",
+                                          [](QQmlEngine *, QJSEngine *) -> QObject * { return new DisplayText(); });
 
     qmlRegisterUncreatableMetaObject(
         FsSnapshot::staticMetaObject,

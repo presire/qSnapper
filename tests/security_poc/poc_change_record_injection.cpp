@@ -32,7 +32,6 @@
  */
 
 #include <QCoreApplication>
-#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QModelIndex>
@@ -40,7 +39,6 @@
 #include <QStringList>
 #include <QTextStream>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include "filechangemodel.h"
 #include "filesystemhelpers.h"

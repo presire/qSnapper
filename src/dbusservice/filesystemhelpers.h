@@ -24,6 +24,9 @@
 
 namespace qsnapper::security {
 
+    /** @brief 所有権の集積実装を内部headerに置いたまま親open APIへ渡すための前方宣言 */
+    struct DirectoryChainOwnership;
+
     /**
      * @brief シンボリックリンクを辿らずにディレクトリ階層を作成する
      *
@@ -36,9 +39,14 @@ namespace qsnapper::security {
      *
      * 各パス成分を openat(..., O_DIRECTORY | O_NOFOLLOW) で辿り、最終ディレクトリのfdを返す
      *
-     * @return 成功時は file descriptor、失敗時は-1
+     * requireTrustedChainがtrueの場合は、「/」から対象までの全ディレクトリがroot所有でgroupとotherが書き込めないことも要求する
+     * パスで操作する外部ライブラリ (libsnapperのmountなど) へ渡すパスを、一般ユーザが差し替えられないことの確認に使う
+     *
+     * @param path 対象ディレクトリの絶対パス
+     * @param requireTrustedChain 信頼できるディレクトリだけを辿ることを要求する場合true
+     * @return 成功時は file descriptor、失敗時は-1 (信頼できないディレクトリを含む場合はEPERM)
      */
-    int safeOpenDirectory(const QString &path);
+    int safeOpenDirectory(const QString &path, bool requireTrustedChain = false);
 
     /**
      * @brief 通常ファイルを安全に読み取りオープンする
@@ -183,22 +191,6 @@ namespace qsnapper::security {
      */
     namespace detail {
         /**
-         * @brief safeLstatAt系が使う親ディレクトリのin-root解決を直接呼び出す
-         *
-         * openat2フォールバック (カーネル5.6未満向け) は対応カーネル上では到達しないため、
-         * forceNoOpenat2で明示的に選択できるようにしてテストで検証する
-         *
-         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
-         * @param relativePath dirFdからの相対パス (leaf成分を含む)
-         * @param leafNameOut 最終成分名の返却先 (省略可)
-         * @param forceNoOpenat2 trueならopenat2を使わずフォールバック経路を強制する
-         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
-         */
-        int openParentDirectoryInRootForTesting(int dirFd, const QString &relativePath,
-                                                QByteArray *leafNameOut,
-                                                bool forceNoOpenat2);
-
-        /**
          * @brief replaceRegularFileAt / replaceSymlinkAtが一時objectをrenameする直前に呼ぶフックを設定する
          *
          * 一時名や親ディレクトリの差し替え (TOCTOU) を決定的に再現するためのテスト専用入口
@@ -273,9 +265,10 @@ namespace qsnapper::security {
      *
      * 既存の成分はO_NOFOLLOWで辿るだけで、所有者やmodeを変更しない
      * 欠けている成分は0700・作成者所有で作成し、snapshot側の同じ相対パスにディレクトリがあれば、その所有者・mode・ACL・xattrを適用する
-     * 親ディレクトリが他ユーザーに差し替えられ得る場合、metadataは適用せず、snapshot側が検索 (x) を許していた分だけをgroupとotherに与える (最大0711)
-     * snapshot側が0700で隠していた子孫を、復元によって他ユーザーへ見せないため
-     * snapshot側に無い場合 (存在しない・ディレクトリ以外) は、0700・作成者所有のままにする
+     * root所有かつgroup/other書き込み不可の祖先だけを信頼し、信頼できない祖先が現れた時点の所有者をprincipalとして、そこから下はprincipal所有の成分だけを変更する
+     * 非信頼チェーンで作成する場合は、復元元の所有者がprincipalと一致する場合だけ、principalのfilesystem identityで0700から作成し、開き直したinodeの所有者を確認してmetadataを適用する
+     * 復元元の所有者がprincipalと一致しない場合や、非信頼点より下に別の所有者の成分が混在する場合は、権限の境界を越えるためEPERMで失敗する
+     * snapshot側に無い場合 (存在しない・ディレクトリ以外) は、信頼チェーンでは0700・作成者所有のままにし、非信頼チェーンでは作成しない
      * 既存の成分が別のファイルシステム (mount境界) にある場合は、rootPathの外へ書き込まないようEXDEVで失敗する
      * snapshot側の状態を判定できない場合は、その成分を作成せずに失敗する
      *
@@ -293,9 +286,9 @@ namespace qsnapper::security {
     /**
      * @brief 作成したディレクトリへsnapshotのmetadataを安全に適用できる親ディレクトリかを判定する
      *
-     * sticky bitが無い状態でgroup/otherへ書き込みが許可されている場合と、root以外が所有する書き込み可能な
-     * ディレクトリでは、他ユーザーが作成直後のエントリを差し替え得るため、安全と判定しない
-     * sticky bit付きでrootが所有するディレクトリでは、root所有のエントリを他ユーザーは差し替えられない
+     * root所有かつgroup/other書き込み不可だけを信頼する
+     * sticky bitがあっても他ユーザーがrootより先に名前を作れるため信頼しない
+     * 非root所有者は0555からでもmodeを変更して差し替えられるため信頼しない
      *
      * @param parentStat 親ディレクトリのstat
      * @return 安全に適用できる場合: true
@@ -361,12 +354,32 @@ namespace qsnapper::security {
      * 境界の内側は削除しない
      * 降下の深さには、ディレクトリのfdとメモリを使い切らないよう上限 (最大256段、RLIMIT_NOFILEの半分以下) を設けている
      * 超えた場合はerrno=ELOOPで失敗するが、それまでに削除したエントリは戻らないため、呼び出し側は部分削除として扱うこと
+     * root実行時の非信頼チェーンでは単一principal以外のディレクトリへ降りず、EPERMで失敗する
+     * 内容は所有者を検査したfdを通じて削除するが、最後のAT_REMOVEDIRは名前による空ディレクトリの削除である
+     * 非空の差し替えはENOTEMPTYになり、非ディレクトリは所有者にかかわらずunlinkする
      *
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 削除対象の絶対パス (rootPath配下であること)
      * @return 削除成功時: true、失敗時: false (errno設定)
      */
     bool safeRemoveAllBeneathRoot(const QString &rootPath, const QString &destinationPath);
+
+    /**
+     * @brief subvolume配下のスナップショットディレクトリ (.snapshots/<番号>/snapshot) をsymlink非追従で開く
+     *
+     * libsnapperはこのパスへmountし、復元はそのパスを読むため、一般ユーザが差し替えられる成分を辿ると、
+     * 認可した番号とは別の木を復元元として使わせられる
+     * そのため1成分ずつopenat2 (RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS) で開き、
+     * .snapshots と番号ディレクトリにはroot所有でgroupとotherが書き込めないことを要求する
+     * subvolume自体の所有者は問わない (利用者ごとのbtrfs設定ではsubvolumeのrootが一般ユーザの所有になる)
+     *
+     * @param subvolumeFd snapper設定のsubvolumeのディレクトリfd
+     * @param snapshotNumber スナップショット番号
+     * @param statOut 開いたsnapshotディレクトリのstatの返却先 (nullptr可)
+     * @return 成功時snapshotディレクトリのfd、失敗時-1 (symlinkはELOOPまたはENOTDIR、所有者とmodeの違反はEPERM)
+     */
+    int openSnapshotDirectoryBeneathSubvolume(int subvolumeFd, unsigned int snapshotNumber,
+                                              struct stat *statOut);
 
     /**
      * @brief rootPath配下にsymlinkat()でsymlinkを作成する
@@ -423,10 +436,12 @@ namespace qsnapper::security {
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 宛先の絶対パス (rootPath配下であること)
      * @param leafNameOut 最終成分名の返却先
+     * @param ownershipOut 同じwalkの所有権状態 (rootが変更主体を確定できなければEPERM)
      * @return 成功時: 親ディレクトリfd (呼び出し側でclose)、失敗時: -1 (errno設定)
      */
     int openDestinationParentBeneathRoot(const QString &rootPath, const QString &destinationPath,
-                                         QByteArray *leafNameOut);
+                                         QByteArray *leafNameOut,
+                                         DirectoryChainOwnership *ownershipOut = nullptr);
 
     /**
      * @brief applyRestoredMetadataの結果

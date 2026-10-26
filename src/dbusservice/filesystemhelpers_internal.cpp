@@ -16,6 +16,7 @@
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #include <sys/ioctl.h>
+#include <sys/fsuid.h>
 #include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
@@ -31,6 +32,80 @@
 #include "filesystemhelpers_internal.h"
 
 namespace qsnapper::security {
+        /**
+         * @brief 祖先の所有権を順序どおりに集積してrootによる他者の変更を防ぐ
+         * @param ownership これまでの祖先の状態
+         * @param directoryStat 今回開いたディレクトリの状態
+         */
+        void accumulateChainOwnership(DirectoryChainOwnership &ownership, const struct stat &directoryStat)
+        {
+            if (ownership.trusted) {
+                if (parentDirectoryIsSafeForMetadata(directoryStat)) {
+                    return;
+                }
+                ownership.trusted = false;
+                if (directoryStat.st_uid != 0) {
+                    ownership.principal = directoryStat.st_uid;
+                    ownership.hasPrincipal = true;
+                }
+                else {
+                    ownership.conflict = true;
+                }
+            }
+            else if (!ownership.hasPrincipal || directoryStat.st_uid != ownership.principal) {
+                ownership.conflict = true;
+            }
+        }
+
+        /**
+         * @brief root共有親や所有者混在のチェーンへの変更を拒否する
+         * @param ownership 同一walkで検証した状態
+         * @return 信頼チェーンか単一principalが得られた場合true
+         */
+        bool chainAllowsMutation(const DirectoryChainOwnership &ownership)
+        {
+            return ownership.trusted || ownership.principalKnown();
+        }
+
+        /**
+         * @brief groupを先に落とし、失敗したidentityで作成しないようqueryで確認する
+         * @param uid 作成を行うprincipal
+         * @param gid 復元元のgroup
+         */
+        ScopedFsIdentity::ScopedFsIdentity(uid_t uid, gid_t gid)
+        {
+            const int savedErrno = errno;
+            ::setfsgid(gid);
+            ::setfsuid(uid);
+            m_ok = static_cast<gid_t>(::setfsgid(static_cast<gid_t>(-1))) == gid
+                && static_cast<uid_t>(::setfsuid(static_cast<uid_t>(-1))) == uid;
+            errno = savedErrno;
+        }
+
+        /**
+         * @brief 後続の権限検証を正しく行うためroot identityを復元し、復元不能なら続行しない
+         */
+        ScopedFsIdentity::~ScopedFsIdentity()
+        {
+            const int savedErrno = errno;
+            ::setfsuid(0);
+            ::setfsgid(0);
+            if (::setfsuid(static_cast<uid_t>(-1)) != 0
+                    || ::setfsgid(static_cast<gid_t>(-1)) != 0) {
+                qFatal("Failed to restore root filesystem identity");
+            }
+            errno = savedErrno;
+        }
+
+        /**
+         * @brief principalへの切り替えを検証できた場合だけ作成を許す
+         * @return uidとgidが指定どおりになった場合true
+         */
+        bool ScopedFsIdentity::ok() const
+        {
+            return m_ok;
+        }
+
         /**
          * @brief 絶対パスを各成分へ分解する
          *
@@ -55,7 +130,6 @@ namespace qsnapper::security {
             *components = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
             return true;
         }
-
 
         /**
          * @brief 制御文字 (C0: U+0000..U+001F / DEL: U+007F / C1: U+0080..U+009F) を含むか判定する
@@ -142,10 +216,30 @@ namespace qsnapper::security {
         }
 
         /**
-         * @brief baseFd配下の成分列をO_NOFOLLOWで辿りながらディレクトリfdを開く
+         * @brief openat2が使えないカーネルで失敗したことを記録する
          *
-         * baseFdの所有は取らない (openat(baseFd, ".") で同一ディレクトリの所有fdを得る)
-         * 成功時は呼び出し側がcloseすべきleaf fd、失敗時は-1を返す
+         * 呼び出し側はerrnoをENOSYSのまま返し、代替実装へ切り替えない
+         * 5.6未満のカーネルでは復元先の安全な解決を保証できないため、警告だけ出して失敗させる
+         * @note qWarningのlog handlerがerrnoを変更し得るため、保存したENOSYSを戻す前に復元する
+         */
+        void warnIfOpenat2Unavailable()
+        {
+            if (errno != ENOSYS) {
+                return;
+            }
+
+            const int savedErrno = errno;
+            qWarning("openat2 is not available; kernel 5.6 or later is required");
+            errno = savedErrno;
+        }
+
+        /**
+         * @brief baseFd配下の成分列を1成分ずつopenat2で辿りながらディレクトリfdを開く
+         *
+         * 複数成分を1回のopenat2で解決すると途中のmount境界を観測できないため、1成分ごとに開いてstatxする
+         * nested btrfs subvolumeはmountではないのでRESOLVE_NO_XDEVでは止まらず、基点とst_devが異なることをstatxで検出してEXDEVにする
+         * openat2のEAGAINは競合による一時失敗なので同じ操作を最大3回まで再試行する
+         * openat2が無いカーネル5.6未満では代替実装を持たず、ENOSYSのまま失敗する
          *
          * @param baseFd 走査基点のディレクトリfd
          * @param components 相対パス成分列
@@ -153,90 +247,43 @@ namespace qsnapper::security {
          * @param createMissing 存在しない成分をmkdirat()で作成するか
          * @param mode createMissing = true時の作成モード
          * @param sameMountOnly mount境界 (別mountのroot、または親と異なるデバイス) を越える成分をEXDEVで拒否する場合true
+         * @param ownershipOut 基点と各成分の所有権状態の返却先 (再walkを避けるため同時に集積する)
          * @return 成功時: 最終ディレクトリのfd、失敗時: -1
          */
-        int openDirectoryChainAtNoFollow(int baseFd, const QStringList &components,
-                                         int componentCount, bool createMissing, mode_t mode,
-                                         bool sameMountOnly)
+        int openDirectoryChainAt(int baseFd, const QStringList &components, int componentCount,
+                                 bool createMissing, mode_t mode, bool sameMountOnly,
+                                 DirectoryChainOwnership *ownershipOut)
         {
-            int dirFd = ::openat(baseFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (dirFd < 0) {
+            if (baseFd < 0 || componentCount < 0 || componentCount > components.size()) {
+                errno = EINVAL;
                 return -1;
             }
 
-            // openat2のRESOLVE_NO_XDEVと同じ制限を、成分ごとのstatxで再現するため、基点のデバイスを控えておく
-            struct stat baseInfo;
-            if (sameMountOnly && ::fstat(dirFd, &baseInfo) != 0) {
-                const int savedErrno = errno;
-                ::close(dirFd);
-                errno = savedErrno;
-                return -1;
-            }
-
-            for (int i = 0; i < componentCount; ++i) {
-                const QByteArray encodedName = components.at(i).toUtf8();
-                if (createMissing) {
-                    // 中間成分が無ければその場で作成し、直後にO_NOFOLLOWで開き直す
-                    if (::mkdirat(dirFd, encodedName.constData(), mode) < 0 && errno != EEXIST) {
-                        const int savedErrno = errno;
-                        ::close(dirFd);
-                        errno = savedErrno;
-                        return -1;
-                    }
-                }
-
-                // 各成分をO_NOFOLLOW付きで開くことで、中間symlinkを拒否する
-                int nextFd = ::openat(dirFd, encodedName.constData(),
-                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-                if (nextFd < 0) {
-                    const int savedErrno = errno;
-                    ::close(dirFd);
-                    errno = savedErrno;
+            dev_t baseDev = 0;
+            if (sameMountOnly || ownershipOut) {
+                struct stat baseInfo;
+                if (::fstat(baseFd, &baseInfo) != 0) {
                     return -1;
                 }
-
-                ::close(dirFd);
-                dirFd = nextFd;
-
-                if (sameMountOnly) {
-                    // 境界かどうかを判定できないまま書き込むと復元先の外へ出るため、確認できない場合は失敗させる
-                    struct statx openedInfo;
-                    if (::statx(dirFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_INO,
-                                &openedInfo) != 0) {
-                        const int savedErrno = errno;
-                        ::close(dirFd);
-                        errno = savedErrno;
-                        return -1;
-                    }
-
-                    if (isMountBoundary(openedInfo, baseInfo.st_dev)) {
-                        // 境界の下は復元先のサブボリュームではないため、EXDEVで拒否する
-                        ::close(dirFd);
-                        errno = EXDEV;
-                        return -1;
-                    }
+                baseDev = baseInfo.st_dev;
+                if (ownershipOut) {
+                    *ownershipOut = DirectoryChainOwnership {};
+                    accumulateChainOwnership(*ownershipOut, baseInfo);
                 }
             }
 
-            return dirFd;
-        }
-
-        int openDirectoryChainAtOpenat2(int baseFd, const QStringList &components,
-                                        int componentCount, bool createMissing, mode_t mode,
-                                        bool sameMountOnly)
-        {
             struct open_how how = {};
-            how.flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
-            how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+            how.flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+            how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
             if (sameMountOnly) {
-                // 復元先の木から別のファイルシステム (bind mountを含む) へ降りて書き込まないようにする
+                // 復元先の木から別のmountへ降りて書き込まないようにする
                 how.resolve |= RESOLVE_NO_XDEV;
             }
 
-            auto openBeneathBase = [&how, baseFd](const QByteArray &relativePath) {
+            auto openBeneath = [&how](int parentFd, const QByteArray &name) {
                 constexpr int MAX_EAGAIN_RETRIES = 3;
                 for (int attempt = 0; attempt < MAX_EAGAIN_RETRIES; ++attempt) {
-                    const long result = ::syscall(SYS_openat2, baseFd, relativePath.constData(),
+                    const long result = ::syscall(SYS_openat2, parentFd, name.constData(),
                                                   &how, sizeof(how));
                     if (result >= 0) {
                         return static_cast<int>(result);
@@ -248,12 +295,12 @@ namespace qsnapper::security {
                 return -1;
             };
 
-            int dirFd = openBeneathBase(QByteArrayLiteral("."));
+            int dirFd = openBeneath(baseFd, QByteArrayLiteral("."));
             if (dirFd < 0) {
+                warnIfOpenat2Unavailable();
                 return -1;
             }
 
-            QByteArray relativePath;
             for (int i = 0; i < componentCount; ++i) {
                 const QByteArray encodedName = components.at(i).toUtf8();
                 if (createMissing) {
@@ -265,17 +312,51 @@ namespace qsnapper::security {
                     }
                 }
 
-                if (!relativePath.isEmpty()) {
-                    relativePath.append('/');
-                }
-                relativePath.append(encodedName);
-
-                const int nextFd = openBeneathBase(relativePath);
+                const int nextFd = openBeneath(dirFd, encodedName);
                 if (nextFd < 0) {
                     const int savedErrno = errno;
+                    if (savedErrno == ENOSYS) {
+                        warnIfOpenat2Unavailable();
+                    }
                     ::close(dirFd);
                     errno = savedErrno;
                     return -1;
+                }
+
+                if (sameMountOnly) {
+                    struct statx openedInfo = {};
+                    if (::statx(nextFd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW,
+                                STATX_TYPE | STATX_MODE | STATX_UID | STATX_INO,
+                                &openedInfo) != 0) {
+                        const int savedErrno = errno;
+                        if (savedErrno == ENOSYS) {
+                            warnIfOpenat2Unavailable();
+                        }
+                        ::close(nextFd);
+                        ::close(dirFd);
+                        errno = savedErrno;
+                        return -1;
+                    }
+
+                    if (isMountBoundary(openedInfo, baseDev)) {
+                        // 境界の下は復元先のサブボリュームではないため、EXDEVで拒否する
+                        ::close(nextFd);
+                        ::close(dirFd);
+                        errno = EXDEV;
+                        return -1;
+                    }
+                }
+
+                if (ownershipOut) {
+                    struct stat stepInfo;
+                    if (::fstat(nextFd, &stepInfo) != 0) {
+                        const int savedErrno = errno;
+                        ::close(nextFd);
+                        ::close(dirFd);
+                        errno = savedErrno;
+                        return -1;
+                    }
+                    accumulateChainOwnership(*ownershipOut, stepInfo);
                 }
 
                 ::close(dirFd);
@@ -283,20 +364,6 @@ namespace qsnapper::security {
             }
 
             return dirFd;
-        }
-
-        int openDirectoryChainAt(int baseFd, const QStringList &components, int componentCount,
-                                 bool createMissing, mode_t mode, bool sameMountOnly)
-        {
-            const int dirFd = openDirectoryChainAtOpenat2(baseFd, components, componentCount,
-                                                           createMissing, mode, sameMountOnly);
-            if (dirFd >= 0 || errno != ENOSYS) {
-                return dirFd;
-            }
-
-            // openat2が未実装のカーネルでは、同じ制限を成分ごとのstatxとO_NOFOLLOWで再現した経路に切り替える
-            return openDirectoryChainAtNoFollow(baseFd, components, componentCount,
-                                                createMissing, mode, sameMountOnly);
         }
 
         /**
@@ -360,11 +427,13 @@ namespace qsnapper::security {
          * @param createMissing 中間成分を作成するか
          * @param mode createMissing = true時の作成モード
          * @param leafName 最終成分名の返却先
+         * @param ownershipOut 同一walkで集積する所有権状態 (rootが変更主体を確定できなければEPERM)
          * @return 成功時: 親dirfd (呼び出し側でclose)、失敗時: -1
          */
         int openLeafParentBeneathRoot(const QString &rootPath,
                                       const QStringList &relativeComponents,
-                                      bool createMissing, mode_t mode, QByteArray *leafName)
+                                      bool createMissing, mode_t mode, QByteArray *leafName,
+                                      DirectoryChainOwnership *ownershipOut)
         {
             if (relativeComponents.isEmpty()) {
                 errno = EINVAL;
@@ -380,9 +449,17 @@ namespace qsnapper::security {
                 return -1;
             }
 
-            return openDirectoryChainAt(rootFd.get(), relativeComponents,
+            UniqueFd parentFd(openDirectoryChainAt(rootFd.get(), relativeComponents,
                                         static_cast<int>(relativeComponents.size()) - 1,
-                                        createMissing, mode, true);
+                                        createMissing, mode, true, ownershipOut));
+            if (!parentFd.isValid()) {
+                return -1;
+            }
+            if (::geteuid() == 0 && ownershipOut && !chainAllowsMutation(*ownershipOut)) {
+                errno = EPERM;
+                return -1;
+            }
+            return parentFd.release();
         }
 
         /**
@@ -446,8 +523,9 @@ namespace qsnapper::security {
          * 中身を削除し終えたら、親ディレクトリからnameInParentをAT_REMOVEDIRで削除する
          */
         struct RemovalFrame {
-            DIR *dir = nullptr;         // 走査中のディレクトリ (fdを所有する)
-            QByteArray nameInParent;    // 親ディレクトリ上の名前
+            DIR *dir = nullptr;                 // 走査中のディレクトリ (fdを所有する)
+            QByteArray nameInParent;            // 親ディレクトリ上の名前
+            DirectoryChainOwnership ownership;  // 基点からこのディレクトリまでの所有権の状態
         };
 
         constexpr int kMaxRemovalDepth = 256;   // 明示スタックで降りる深さの上限 (攻撃者が作った深い階層でfdとメモリを使い切らないため)
@@ -487,10 +565,15 @@ namespace qsnapper::security {
          * @param parentDev 削除をこのデバイス内に限定するための最上位の親デバイス番号
          * @param entryName 対象のleaf名
          * @param dirOut Descendを返した場合に、開いたディレクトリを受け取る (呼び出し元がclosedirする)
+         * @param ownership 入力は親までの所有権の状態、Descendを返した場合は開いたディレクトリを含む状態に更新する
          * @return 処理結果
+         * @note root実行時は、開いたディレクトリを加えた状態がchainAllowsMutationを満たさなければerrno=EPERMで失敗する
+         *       親までが信頼できても削除対象やその内部で初めて非信頼になる場合があり、
+         *       利用者が他者のディレクトリをそこへrenameで持ち込めるため、各段で判定する
          */
         RemovalStep removeOrOpenEntryAt(int parentFd, dev_t parentDev,
-                                        const QByteArray &entryName, DIR **dirOut)
+                                        const QByteArray &entryName, DIR **dirOut,
+                                        DirectoryChainOwnership &ownership)
         {
             constexpr int kStatxFlags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_DONT_SYNC;
             struct statx stx;
@@ -512,34 +595,40 @@ namespace qsnapper::security {
                 return RemovalStep::Failed;
             }
 
-            const int childFd = ::openat(parentFd, entryName.constData(),
-                                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-            if (childFd < 0) {
+            UniqueFd childFd(::openat(parentFd, entryName.constData(),
+                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            if (!childFd.isValid()) {
                 return RemovalStep::Failed;
             }
 
             // statxからopenatまでの間に名前を差し替えられていないか、開いたディレクトリ自体が境界でないかを確認する
             struct statx opened;
-            if (::statx(childFd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
+            if (::statx(childFd.get(), "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
                         STATX_TYPE | STATX_INO, &opened) < 0) {
-                const int savedErrno = errno;
-                ::close(childFd);
-                errno = savedErrno;
                 return RemovalStep::Failed;
             }
             if (isMountBoundary(opened, parentDev) || opened.stx_ino != stx.stx_ino) {
-                ::close(childFd);
                 errno = EXDEV;
                 return RemovalStep::Failed;
             }
 
-            DIR *dir = ::fdopendir(childFd);
+            if (::geteuid() == 0) {
+                struct stat directoryStat;
+                if (::fstat(childFd.get(), &directoryStat) < 0) {
+                    return RemovalStep::Failed;
+                }
+                accumulateChainOwnership(ownership, directoryStat);
+                if (!chainAllowsMutation(ownership)) {
+                    errno = EPERM;
+                    return RemovalStep::Failed;
+                }
+            }
+
+            DIR *dir = ::fdopendir(childFd.get());
             if (!dir) {
-                const int savedErrno = errno;
-                ::close(childFd);
-                errno = savedErrno;
                 return RemovalStep::Failed;
             }
+            childFd.release();
 
             *dirOut = dir;
             return RemovalStep::Descend;
@@ -551,23 +640,30 @@ namespace qsnapper::security {
          * 攻撃者が深い階層を作ってもスタックを使い切らないよう、再帰呼び出しではなく明示的なスタックで降りる
          * 深さがremovalDepthLimit()を超える場合は、途中まで削除した状態でerrno=ELOOPの失敗を返す
          * mount境界を見つけた場合はerrno=EXDEVで失敗し、境界の内側は1件も削除しない
+         * root実行時は、所有者を検査したfdでのみ内容を削除し、単一principalに限定できないディレクトリへは降りない
+         * 最後の名前によるAT_REMOVEDIRは空の場合に限るためprincipal自身でも削除可能な範囲に留まる
+         * 非空のディレクトリへ差し替えられた場合はENOTEMPTYで失敗し、その中身を削除しない
          *
          * @param parentFd 親ディレクトリfd
          * @param parentDev 親ディレクトリのst_dev
          * @param entryName 削除対象のleaf名
+         * @param parentOwnership 基点から親ディレクトリまでの所有権の状態
          * @return 削除成功時 (対象が存在しない場合を含む): true
          */
-        bool removeEntryWithinDeviceAt(int parentFd, dev_t parentDev, const QByteArray &entryName)
+        bool removeEntryWithinDeviceAt(int parentFd, dev_t parentDev, const QByteArray &entryName,
+                                       const DirectoryChainOwnership &parentOwnership)
         {
             DIR *topDir = nullptr;
-            const RemovalStep topStep = removeOrOpenEntryAt(parentFd, parentDev, entryName, &topDir);
+            DirectoryChainOwnership topOwnership = parentOwnership;
+            const RemovalStep topStep = removeOrOpenEntryAt(parentFd, parentDev, entryName, &topDir,
+                                                           topOwnership);
             if (topStep != RemovalStep::Descend) {
                 return topStep == RemovalStep::Removed;
             }
 
             const int maxDepth = removalDepthLimit();
             std::vector<RemovalFrame> stack;
-            stack.push_back(RemovalFrame{topDir, entryName});
+            stack.push_back(RemovalFrame{topDir, entryName, topOwnership});
 
             // 失敗時は開いている全段を閉じ、原因のerrnoを呼び出し元へ返す (closedirがerrnoを上書きするため)
             const auto abortRemoval = [&stack]() {
@@ -615,8 +711,10 @@ namespace qsnapper::security {
 
                 const QByteArray childName(name);
                 DIR *childDir = nullptr;
+                // 兄弟の判定が混ざらないよう、子ごとに親の状態の写しから判定する
+                DirectoryChainOwnership childOwnership = stack.back().ownership;
                 const RemovalStep step = removeOrOpenEntryAt(::dirfd(currentDir), parentDev,
-                                                             childName, &childDir);
+                                                            childName, &childDir, childOwnership);
                 if (step == RemovalStep::Failed) {
                     return abortRemoval();
                 }
@@ -627,7 +725,7 @@ namespace qsnapper::security {
                         errno = ELOOP;
                         return abortRemoval();
                     }
-                    stack.push_back(RemovalFrame{childDir, childName});
+                    stack.push_back(RemovalFrame{childDir, childName, childOwnership});
                 }
             }
 
@@ -641,15 +739,17 @@ namespace qsnapper::security {
          *
          * @param parentFd 親ディレクトリfd
          * @param entryName 削除対象のleaf名
+         * @param parentOwnership 基点から親ディレクトリまでの所有権の状態
          * @return 削除成功時: true
          */
-        bool removeEntryAt(int parentFd, const QByteArray &entryName)
+        bool removeEntryAt(int parentFd, const QByteArray &entryName,
+                           const DirectoryChainOwnership &parentOwnership)
         {
             struct stat parentStat;
             if (::fstat(parentFd, &parentStat) < 0) {
                 return false;
             }
-            return removeEntryWithinDeviceAt(parentFd, parentStat.st_dev, entryName);
+            return removeEntryWithinDeviceAt(parentFd, parentStat.st_dev, entryName, parentOwnership);
         }
 
         /**
@@ -747,161 +847,19 @@ namespace qsnapper::security {
         }
 
         /**
-         * @brief dirfd基点で親成分列を手動のin-root解決で辿る (openat2非対応カーネル用フォールバック)
-         *
-         * RESOLVE_IN_ROOT相当の解決をfdスタックで再現する:
-         *  - 各成分はfstatat(AT_SYMLINK_NOFOLLOW)で検査してからopenat(O_NOFOLLOW)で開く
-         *  - symlinkのtargetはroot内で解釈し、絶対targetならrootへ巻き戻す
-         *  - ".." はroot自身ではrootに留まる ("/.." が"/"であるのと同じ挙動)
-         * このため絶対symlink targetがdirfdの外へ解決されることは構造的にない
-         *
-         * symlink targetは生バイト列であり、非UTF-8のファイル名を含み得る
-         * work listをQByteArrayで保持することで、検証済み成分もtarget成分もバイト単位で扱う
-         *
-         * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
-         * @param parentComponents leaf成分を除いた親成分列 (非空)
-         * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
-         */
-        int openParentDirectoryInRootAtNoFollow(int dirFd, const QStringList &parentComponents)
-        {
-            // symlink連鎖とwork listの無制限成長に対する上限 (カーネルの40回相当)
-            constexpr int MAX_SYMLINK_FOLLOWS = 40;
-            constexpr int MAX_PROCESSED_COMPONENTS = 4096;
-
-            const int rootFd = ::openat(dirFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (rootFd < 0) {
-                return -1;
-            }
-
-            // stack[0]はrootであり、決してpopしない
-            QList<int> stack;
-            stack.append(rootFd);
-
-            auto closeStack = [&stack]() {
-                for (int fd : stack) {
-                    ::close(fd);
-                }
-                stack.clear();
-            };
-
-            int symlinkBudget = MAX_SYMLINK_FOLLOWS;
-            int processedCount = 0;
-            QList<QByteArray> workList;
-            for (const QString &component : parentComponents) {
-                workList.append(component.toUtf8());
-            }
-
-            while (!workList.isEmpty()) {
-                if (++processedCount > MAX_PROCESSED_COMPONENTS) {
-                    closeStack();
-                    errno = ELOOP;
-                    return -1;
-                }
-
-                const QByteArray component = workList.takeFirst();
-                if (component == ".") {
-                    continue;
-                }
-                if (component == "..") {
-                    // RESOLVE_IN_ROOT相当: root自身の".."はrootに留まる
-                    if (stack.size() > 1) {
-                        ::close(stack.takeLast());
-                    }
-                    continue;
-                }
-
-                struct stat st;
-                if (::fstatat(stack.last(), component.constData(), &st,
-                              AT_SYMLINK_NOFOLLOW) < 0) {
-                    const int savedErrno = errno;
-                    closeStack();
-                    errno = savedErrno;
-                    return -1;
-                }
-
-                if (S_ISLNK(st.st_mode)) {
-                    if (--symlinkBudget < 0) {
-                        closeStack();
-                        errno = ELOOP;
-                        return -1;
-                    }
-
-                    // 固定PATH_MAXで切り詰めないよう、必要に応じてバッファを拡張する
-                    QByteArray buffer(256, '\0');
-                    for (;;) {
-                        const ssize_t len = ::readlinkat(stack.last(), component.constData(),
-                                                         buffer.data(),
-                                                         static_cast<size_t>(buffer.size()));
-                        if (len < 0) {
-                            const int savedErrno = errno;
-                            closeStack();
-                            errno = savedErrno;
-                            return -1;
-                        }
-                        if (len < buffer.size()) {
-                            buffer.truncate(static_cast<qsizetype>(len));
-                            break;
-                        }
-                        buffer.resize(buffer.size() * 2);
-                    }
-
-                    // 空targetはカーネルの解決でもENOENTとなる
-                    if (buffer.isEmpty()) {
-                        closeStack();
-                        errno = ENOENT;
-                        return -1;
-                    }
-
-                    // 絶対targetはdirfdの外ではなくrootへ巻き戻す (RESOLVE_IN_ROOTの解決)
-                    if (buffer.startsWith('/')) {
-                        while (stack.size() > 1) {
-                            ::close(stack.takeLast());
-                        }
-                    }
-
-                    // target成分を解決済みパスの先頭へ挿入する ("//" は単一の区切りとして扱う)
-                    const QList<QByteArray> targetComponents =
-                            buffer.split('/');
-                    for (int i = targetComponents.size() - 1; i >= 0; --i) {
-                        if (!targetComponents.at(i).isEmpty()) {
-                            workList.prepend(targetComponents.at(i));
-                        }
-                    }
-                    continue;
-                }
-
-                const int nextFd = ::openat(stack.last(), component.constData(),
-                                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-                if (nextFd < 0) {
-                    const int savedErrno = errno;
-                    closeStack();
-                    errno = savedErrno;
-                    return -1;
-                }
-                stack.append(nextFd);
-            }
-
-            // 成功: 最上位fdの所有を呼び出し側へ移し、残りを全てcloseする
-            const int resultFd = stack.takeLast();
-            closeStack();
-            return resultFd;
-        }
-
-        /**
          * @brief dirfd基点で親ディレクトリをin-root解決により開き、leaf名も返す
          *
          * 検証済みrelativePathと同一の入力から親dirfdとleaf名を導出することで、
          * 「検証した値」と「操作する対象」の一致 (TOCTOUなし) を保証する
+         * openat2が無いカーネル5.6未満では代替実装を持たず、ENOSYSのまま失敗する
          *
          * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
          * @param components 検証済み相対パスの成分列 (非空)
          * @param leafNameOut 最終成分名の返却先 (省略可)
-         * @param forceNoOpenat2 openat2を使わずフォールバック経路を強制するか (テスト用)
          * @return 成功時: 親ディレクトリのfd (呼び出し側でclose)、失敗時: -1
          */
         int openParentDirectoryInRootAt(int dirFd, const QStringList &components,
-                                        QByteArray *leafNameOut,
-                                        bool forceNoOpenat2)
+                                        QByteArray *leafNameOut)
         {
             if (dirFd < 0 || components.isEmpty()) {
                 errno = EINVAL;
@@ -921,14 +879,11 @@ namespace qsnapper::security {
             const QStringList parentComponents =
                     components.mid(0, components.size() - 1);
 
-            if (!forceNoOpenat2) {
-                const int parentFd =
-                        openParentDirectoryInRootAtOpenat2(dirFd, parentComponents);
-                if (parentFd >= 0 || errno != ENOSYS) {
-                    return parentFd;
-                }
+            const int parentFd =
+                    openParentDirectoryInRootAtOpenat2(dirFd, parentComponents);
+            if (parentFd < 0) {
+                warnIfOpenat2Unavailable();
             }
-
-            return openParentDirectoryInRootAtNoFollow(dirFd, parentComponents);
+            return parentFd;
         }
 } // namespace qsnapper::security

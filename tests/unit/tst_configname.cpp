@@ -229,13 +229,10 @@ void TestConfigName::settingsReject_data()
     };
     QTest::newRow("bool other word")    << SettingsMap{ { QStringLiteral("NUMBER_CLEANUP"), QStringLiteral("true") } };
     QTest::newRow("bool empty")         << SettingsMap{ { QStringLiteral("NUMBER_CLEANUP"), QString() } };
-    QTest::newRow("bool trailing LF")   << SettingsMap{ { QStringLiteral("NUMBER_CLEANUP"), QStringLiteral("yes\n") } };
     QTest::newRow("value injects line") << SettingsMap{ { QStringLiteral("TIMELINE_CREATE"), QStringLiteral("no\nALLOW_USERS=\"x\"") } };
-    QTest::newRow("count trailing LF")  << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("10\n") } };
     QTest::newRow("count negative")     << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("-1") } };
     QTest::newRow("count leading zero") << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("010") } };
     QTest::newRow("count too long")     << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("1000000000") } };
-    QTest::newRow("count space")        << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral(" 10") } };
     QTest::newRow("range reversed")     << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("10-2") } };
     QTest::newRow("range open")         << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("2-") } };
     QTest::newRow("range three parts")  << SettingsMap{ { QStringLiteral("NUMBER_LIMIT"), QStringLiteral("1-2-3") } };

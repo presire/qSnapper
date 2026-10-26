@@ -12,7 +12,7 @@ SnapperdOperationが変更要求を転送する相手のうち、一覧の照会
     org.opensuse.Snapper : ListSnapshots / DeleteSnapshots / ListConfigs (応答を失った後の完了の確認)
   org.opensuse.Snapper の /org/opensuse/Snapper
     com.presire.qsnapper.Test.FakeSnapperd : SetSnapshots / SetMutationBehavior /
-                                            GetCalls / GetMutations / Reset
+                                            GetCalls / GetMutations
 
 制御用のインタフェースを同じバス名と同じオブジェクトに載せるのは、隔離環境のバスポリシーに追加するルールを増やさないため
 
@@ -209,16 +209,6 @@ class FakeSnapperd(dbus.service.Object):
             受信回数
         """
         return dbus.UInt32(self._mutations)
-
-    @dbus.service.method(CONTROL_IFACE, in_signature="", out_signature="")
-    def Reset(self):
-        """
-        @brief 記録と振る舞いを初期状態へ戻す
-        """
-        self._snapshots = []
-        self._mutation_behavior = "ok"
-        self._calls = []
-        self._mutations = 0
 
 
 def main():

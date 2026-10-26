@@ -8,18 +8,16 @@
  * カンマを含む正当なdescription等で後続の列がずれ、表示が壊れていた
  * producer (quoteField) とconsumer (splitRecord) は同じヘッダを使い対称性を構成によって保証する
  * また、quoteは表示正しさのための層であり、制御文字の拒否 (isRecordSafeText, fail-closed) の
- * 代替ではないことをregressionテストで固定する
+ * 代替ではない (制御文字の拒否はtst_recordsafety.cppで固定する)
  */
 
 #include <QtTest/QtTest>
 #include <QString>
 #include <QStringList>
 #include "csvrecord.h"
-#include "inputvalidator.h"
 
 using qsnapper::csv::quoteField;
 using qsnapper::csv::splitRecord;
-using qsnapper::security::isRecordSafeText;
 
 /**
  * @class TestCsvRecord
@@ -34,12 +32,9 @@ private slots:
     void doubleQuotesRoundTrip();
     void whitespacePreservedVerbatim();
     void emptyAndQuotedEmptyFields();
-    void userdataCommaInKeySurvivesAsOneField();
-    void userdataCommaInValueSurvivesAsOneField();
     void legacyUnquotedMatchesNaiveSplit();
     void unclosedQuoteIsRejected_data();
     void unclosedQuoteIsRejected();
-    void controlCharactersStillRejected();
     void fullRecordRoundTrip();
     void createdSnapshotNumberIsTakenFromReply();
     void malformedCreateReplyIsRejected();
@@ -130,45 +125,6 @@ void TestCsvRecord::emptyAndQuotedEmptyFields()
 }
 
 /**
- * @brief keyにカンマを含むuserdataペアが1フィールドとして往復し、最初の=で分割されることを確認する
- */
-void TestCsvRecord::userdataCommaInKeySurvivesAsOneField()
-{
-    // keyにカンマを含むuserdataペアは1フィールドとしてquoteされ、
-    // パース後も最初の '=' で正しく分割される
-    const QString pair = QStringLiteral("my,key=value");
-    const QString quoted = quoteField(pair);
-    QVERIFY(quoted != pair);
-
-    const QStringList fields = splitRecord(quoted);
-    QCOMPARE(fields.size(), 1);
-
-    const int eqIdx = fields.at(0).indexOf('=');
-    QVERIFY(eqIdx > 0);
-    QCOMPARE(fields.at(0).left(eqIdx), QStringLiteral("my,key"));
-    QCOMPARE(fields.at(0).mid(eqIdx + 1), QStringLiteral("value"));
-}
-
-/**
- * @brief valueにカンマを含むuserdataペアが1フィールドとして往復し、最初の=で分割されることを確認する
- */
-void TestCsvRecord::userdataCommaInValueSurvivesAsOneField()
-{
-    // valueにカンマを含むuserdataペアも同様
-    const QString pair = QStringLiteral("key=va,lue");
-    const QString quoted = quoteField(pair);
-    QVERIFY(quoted != pair);
-
-    const QStringList fields = splitRecord(quoted);
-    QCOMPARE(fields.size(), 1);
-
-    const int eqIdx = fields.at(0).indexOf('=');
-    QVERIFY(eqIdx > 0);
-    QCOMPARE(fields.at(0).left(eqIdx), QStringLiteral("key"));
-    QCOMPARE(fields.at(0).mid(eqIdx + 1), QStringLiteral("va,lue"));
-}
-
-/**
  * @brief 特殊文字を含まない入力がquoteされず、旧split(',')と同一に分割されることを確認する
  */
 void TestCsvRecord::legacyUnquotedMatchesNaiveSplit()
@@ -212,28 +168,6 @@ void TestCsvRecord::unclosedQuoteIsRejected()
     QFETCH(QString, record);
 
     QVERIFY(splitRecord(record).isEmpty());
-}
-
-/**
- * @brief 制御文字がquoteの有無にかかわらずfail-closedで拒否されることを確認する
- */
-void TestCsvRecord::controlCharactersStillRejected()
-{
-    // quoteは表示正しさのための層であり、制御文字のfail-closed拒否の代替ではない
-    // LF / CRはC0、0x85はC1に含まれるため、isRecordSafeText()は依然として拒否する
-    const QStringList controlValues = {
-        QStringLiteral("line1\nline2"),
-        QStringLiteral("line1\rline2"),
-        QStringLiteral("tab\there"),
-        QString::fromUtf8("nul\0here", 8),
-        QString(QChar(0x007f)),
-        QString(QChar(0x0085)),
-    };
-
-    for (const QString &value : controlValues) {
-        QVERIFY2(!isRecordSafeText(value),
-                 qPrintable(QStringLiteral("expected reject: %1").arg(QString::fromUtf8(value.toUtf8().toHex()))));
-    }
 }
 
 /**

@@ -57,7 +57,7 @@ static void logPluginReport(const snapper::Plugins::Report& report)
  * @brief Snapperが設定されているか確認
  *
  * Snapper設定が1つ以上存在するかを確認する
- * 認証は不要 (list-snapshotsと同じアクションでactiveユーザは自動許可)
+ * polkitに照会しない (返すのは設定の有無だけで、設定名やパスは返さないため認可を求める必要がない)
  *
  * @return Snapper設定が存在する場合: true
  */
@@ -377,7 +377,8 @@ QString SnapshotOperations::createSnapshotAuthorized(
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName);
+        // 認可後に読み直すのは、snapperdやCLIが作成・削除したスナップショットをlibsnapperが取り込まず、古いインスタンスが再利用された番号を操作し得るため
+        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return QString();
@@ -583,7 +584,8 @@ bool SnapshotOperations::modifySnapshotAuthorized(
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName);
+        // 認可後に読み直すのは、snapperdやCLIが作成・削除したスナップショットをlibsnapperが取り込まず、古いインスタンスが再利用された番号を操作し得るため
+        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -686,7 +688,8 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
     }
 
     try {
-        snapper::Snapper *snapper = getSnapper(configName);
+        // 認可後に読み直すのは、snapperdやCLIが作成・削除したスナップショットをlibsnapperが取り込まず、古いインスタンスが再利用された番号を操作し得るため
+        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;
@@ -771,7 +774,8 @@ bool SnapshotOperations::RollbackSnapshot(const QString &configName, int number)
 bool SnapshotOperations::rollbackSnapshotAuthorized(const QString &configName, int number)
 {
     try {
-        snapper::Snapper *snapper = getSnapper(configName);
+        // 認可後に読み直すのは、snapperdやCLIが作成・削除したスナップショットをlibsnapperが取り込まず、古いインスタンスが再利用された番号を操作し得るため
+        snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
         if (!snapper) {
             replyError(QDBusError::Failed, "Failed to initialize Snapper");
             return false;

@@ -98,6 +98,12 @@ target_link_libraries(tst_filesystemhelpers PRIVATE
     Qt6::Core
     Qt6::Test
 )
+# QSNAPPER_ENABLE_TEST_METADATA_HOOKSは、applyRestoredMetadataの途中で復元先の状態を観測するフックと、
+# ACLの同期をわざと失敗させるフックを有効にする
+# 製品のhelperにテスト用の入口を残さないよう、インストールしないテスト用ターゲットだけで定義する
+target_compile_definitions(tst_filesystemhelpers PRIVATE
+    QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+)
 set_target_properties(tst_filesystemhelpers PROPERTIES AUTOMOC ON)
 add_test(NAME tst_filesystemhelpers COMMAND tst_filesystemhelpers)
 
@@ -257,8 +263,10 @@ target_include_directories(tst_snapshotoperations PRIVATE
 )
 # QSNAPPER_ENABLE_TEST_HOOKSで、polkitの代わりに即時許可を返すテスト用フックと、復元計画の判定を取り出すフックを有効にする
 # 認可を迂回できるため、インストールしないテスト用ターゲットだけで定義する
+# QSNAPPER_ENABLE_TEST_METADATA_HOOKSは、ディレクトリを復元するときに、modeを適用する直前のACLを観測するために定義する
 target_compile_definitions(tst_snapshotoperations PRIVATE
     QSNAPPER_ENABLE_TEST_HOOKS
+    QSNAPPER_ENABLE_TEST_METADATA_HOOKS
     LIBSNAPPER_VERSION_MAJOR=${SNAPPER_VERSION_MAJOR}
     LIBSNAPPER_VERSION_MINOR=${SNAPPER_VERSION_MINOR}
 )

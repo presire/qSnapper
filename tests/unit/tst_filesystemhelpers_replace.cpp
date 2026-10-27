@@ -140,10 +140,11 @@ namespace {
      * @param source 復元元パス
      * @param destination 宛先パス
      * @param metadataOut metadataの適用結果
+     * @param mustPreserveMetadata 必須metadataの失敗時に差し替えを中止する場合true
      * @return 差し替えに成功した場合true
      */
     bool replaceFromPath(const QString &root, const QString &source, const QString &destination,
-                         RestoredMetadataResult *metadataOut = nullptr)
+                         RestoredMetadataResult *metadataOut = nullptr, bool mustPreserveMetadata = true)
     {
         const int sourceFd = ::open(source.toUtf8().constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         if (sourceFd < 0) {
@@ -155,7 +156,8 @@ namespace {
             ::close(sourceFd);
             return false;
         }
-        const bool replaced = replaceRegularFileAt(parentFd, leafName, sourceFd, false, true, metadataOut);
+        const bool replaced = replaceRegularFileAt(parentFd, leafName, sourceFd, false,
+                                                   mustPreserveMetadata, metadataOut);
         const int savedErrno = errno;
         ::close(parentFd);
         ::close(sourceFd);
@@ -180,6 +182,153 @@ namespace {
     }
 
     /**
+     * @brief 開いているfdから、xattrの値を読み出す
+     *
+     * 復元中の一時ファイルの名前はテストから分からないため、パスではなく通知で受け取ったfdから読む
+     *
+     * @param fd 対象fd
+     * @param name xattr名
+     * @param valueOut 値の返却先
+     * @return 1: 値あり、0: 属性なし、-1: 読み出しエラー
+     */
+    int readFdXattr(int fd, const char *name, QByteArray *valueOut)
+    {
+        char buffer[4096];
+        const ssize_t length = ::fgetxattr(fd, name, buffer, sizeof(buffer));
+        if (length < 0) {
+            return errno == ENODATA ? 0 : -1;
+        }
+        *valueOut = QByteArray(buffer, static_cast<qsizetype>(length));
+        return 1;
+    }
+
+    /**
+     * @brief ACLのxattr値から、指定したエントリの権限ビットを取り出す
+     *
+     * maskエントリの権限を調べ、継承した名前付きエントリが有効になっているかを判定するために使う
+     *
+     * @param acl ACLのxattr値 (先頭4バイトのヘッダの後に、8バイトのエントリが並ぶ形式)
+     * @param tag エントリの種類 (kAclUser、kAclMaskなど)
+     * @param id エントリのid (名前付きユーザ以外のエントリはkAclUndefinedId)
+     * @return 権限ビット (0から7)、エントリが無い場合は-1
+     */
+    int aclEntryPerm(const QByteArray &acl, quint16 tag, quint32 id)
+    {
+        const auto byteAt = [&acl](qsizetype index) {
+            return static_cast<quint32>(static_cast<quint8>(acl.at(index)));
+        };
+
+        // 各エントリは、種類(2バイト)、権限(2バイト)、id(4バイト)をlittle endianで並べたもの
+        for (qsizetype offset = 4; offset + 8 <= acl.size(); offset += 8) {
+            const quint32 entryTag = byteAt(offset) | (byteAt(offset + 1) << 8);
+            const quint32 entryId = byteAt(offset + 4) | (byteAt(offset + 5) << 8)
+                    | (byteAt(offset + 6) << 16) | (byteAt(offset + 7) << 24);
+            if (entryTag == tag && entryId == id) {
+                return static_cast<int>(byteAt(offset + 2) | (byteAt(offset + 3) << 8));
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * @brief 復元元のmodeを適用する直前に観測した、復元先の状態
+     *
+     * modeを広げる前にACLの同期が終わっているかを、テスト本体で判定するために記録する
+     */
+    struct ModeRestoreObservation {
+        mode_t mode = 0;        // 観測時点のmode (fstatに失敗した場合は全ビットを立てた値)
+        int accessState = -1;   // access ACLの有無 (1: あり、0: なし、-1: 読み出し失敗)
+        QByteArray accessAcl;   // access ACLの値 (accessStateが1の場合だけ有効)
+        int defaultState = 0;   // default ACLの有無 (ディレクトリ以外は読み出さないため常に0)
+        QByteArray defaultAcl;  // default ACLの値 (defaultStateが1の場合だけ有効)
+    };
+
+    /**
+     * @brief BeforeModeRestoreの通知を受けるたびに、復元先fdのmodeとACLを記録する
+     *
+     * 製品コードの処理の途中から呼ばれるため、QTestのマクロで判定して処理を中断せず、記録だけを行う
+     * 記録した内容は、製品コードの処理が戻った後にテスト本体で判定する
+     *
+     * @param stage 通知された段階
+     * @param destinationFd 復元先fd (状態を読み取るだけで、閉じない)
+     * @param context 記録先のQList<ModeRestoreObservation>へのポインタ
+     * @note contextが指すリストへ、観測結果を1件追加する
+     */
+    void recordModeRestoreObservation(detail::MetadataStage stage, int destinationFd, void *context)
+    {
+        if (stage != detail::MetadataStage::BeforeModeRestore) {
+            return;
+        }
+
+        ModeRestoreObservation observation;
+        struct stat destinationStat;
+        const bool statOk = ::fstat(destinationFd, &destinationStat) == 0;
+        observation.mode = statOk ? (destinationStat.st_mode & 07777) : mode_t(~0);
+        observation.accessState = readFdXattr(destinationFd, "system.posix_acl_access",
+                                              &observation.accessAcl);
+
+        // default ACLはディレクトリだけが持てるため、通常ファイルでは読み出さない
+        if (statOk && S_ISDIR(destinationStat.st_mode)) {
+            observation.defaultState = readFdXattr(destinationFd, "system.posix_acl_default",
+                                                   &observation.defaultAcl);
+        }
+        static_cast<QList<ModeRestoreObservation> *>(context)->append(observation);
+    }
+
+    /**
+     * @brief 観測結果を、テストの失敗メッセージに表示する文字列へ変換する
+     *
+     * テストが失敗したときのログで、modeを適用する直前に残っていたACLを確認できるようにする
+     *
+     * @param observation 観測結果
+     * @return modeを8進数、ACLのxattr値を16進数で表した文字列
+     */
+    QByteArray describeObservation(const ModeRestoreObservation &observation)
+    {
+        return QStringLiteral("before fchmod: mode=%1 access(%2)=%3 default(%4)=%5")
+                .arg(static_cast<uint>(observation.mode), 4, 8, QLatin1Char('0'))
+                .arg(observation.accessState)
+                .arg(QString::fromLatin1(observation.accessAcl.toHex()))
+                .arg(observation.defaultState)
+                .arg(QString::fromLatin1(observation.defaultAcl.toHex()))
+                .toUtf8();
+    }
+
+    /**
+     * @brief modeを適用する直前の観測を、ガードの生存期間だけ有効にする
+     *
+     * 観測結果の記録先はガードのメンバであるため、ガードの破棄時にobserverを解除し、
+     * 破棄済みのリストを指すポインタがフックに残らないようにする
+     */
+    struct ModeRestoreObserverGuard {
+        QList<ModeRestoreObservation> observations;  // 通知された順の観測結果
+
+        ModeRestoreObserverGuard()
+        {
+            detail::setMetadataStageObserverForTesting(&recordModeRestoreObservation, &observations);
+        }
+
+        ~ModeRestoreObserverGuard()
+        {
+            detail::setMetadataStageObserverForTesting(nullptr, nullptr);
+        }
+
+        ModeRestoreObserverGuard(const ModeRestoreObserverGuard &) = delete;
+        ModeRestoreObserverGuard &operator=(const ModeRestoreObserverGuard &) = delete;
+    };
+
+    /**
+     * @brief ファイルの内容を全て読み出す
+     * @param path 対象パス
+     * @return ファイルの内容、開けない場合は空のQByteArray
+     */
+    QByteArray readFileContent(const QString &path)
+    {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    }
+
+    /**
      * @brief rename直前フックをスコープ終了時に解除する
      */
     struct ReplaceHookGuard {
@@ -196,6 +345,13 @@ namespace {
     };
 
 }
+
+void TestFilesystemHelpers::cleanup()
+{
+    // テスト関数がQVERIFYなどの失敗で途中で戻った場合でも、フックの設定が次のテストへ残らないよう、各テストの終了時に解除する
+    detail::clearMetadataTestHooksForTesting();
+}
+
 void TestFilesystemHelpers::replaceRegularFileAtReplacesContentWithNewInode()
 {
     QTemporaryDir tempDir;
@@ -372,6 +528,425 @@ void TestFilesystemHelpers::applyRestoredMetadataSyncsDirectoryAcls()
 
     struct stat restoredStat;
     QVERIFY(::lstat(copyTarget.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0755U);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtSyncsInheritedAclBeforeModeRestore()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString liveDir = root + QStringLiteral("/live");
+    const QString destination = liveDir + QStringLiteral("/file");
+    QVERIFY(QDir().mkpath(liveDir));
+    QVERIFY(createFile(source, "secret", 0640));
+
+    // 復元先ディレクトリに、別のユーザ(名前付きユーザ)の読み取りを許すdefault ACLを設定し、
+    // 復元中に作成する一時ファイルが、そのACLを継承する状況を再現する
+    // 名前付きユーザのuidは、ACLのエントリとして使うだけなので、実在しなくてよい
+    const quint32 namedUser = ::getuid() + 1000;
+    const int setError = writeXattr(liveDir, "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 4, namedUser},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    ModeRestoreObserverGuard observer;
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    // 一時ファイルのmodeを0640へ広げると、ACLのmaskがr--になり、継承した名前付きユーザの読み取りが有効になる
+    // 名前付きユーザが一時ファイルを読めないよう、modeを適用する直前には継承したACLが削除されている必要がある
+    QCOMPARE(observer.observations.size(), 1);
+    const ModeRestoreObservation &beforeMode = observer.observations.constFirst();
+    QVERIFY2(beforeMode.accessState == 0, describeObservation(beforeMode).constData());
+
+    QByteArray restoredAcl;
+    QCOMPARE(readXattr(destination, "system.posix_acl_access", &restoredAcl), 0);
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0640U);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtSyncsSourceAclBeforeModeRestore()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString liveDir = root + QStringLiteral("/live");
+    const QString destination = liveDir + QStringLiteral("/file");
+    QVERIFY(QDir().mkpath(liveDir));
+    QVERIFY(createFile(source, "secret", 0640));
+
+    // 復元先ディレクトリのdefault ACLと、復元元のaccess ACLに、異なる名前付きユーザを設定する
+    // これにより、modeを適用する直前のACLが、継承したACLか復元元のACLかを区別できる
+    const quint32 inheritedUser = ::getuid() + 1000;
+    const quint32 sourceUser = ::getuid() + 2000;
+    const int setError = writeXattr(liveDir, "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 7, inheritedUser},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+    QCOMPARE(writeXattr(source, "system.posix_acl_access", namedUserAcl(sourceUser)), 0);
+    QByteArray sourceAcl;
+    QCOMPARE(readXattr(source, "system.posix_acl_access", &sourceAcl), 1);
+
+    ModeRestoreObserverGuard observer;
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    // modeを適用する直前に、継承したACLが復元元のACLへ置き換わり、継承した名前付きユーザが残っていないことを確認する
+    QCOMPARE(observer.observations.size(), 1);
+    const ModeRestoreObservation &beforeMode = observer.observations.constFirst();
+    QVERIFY2(beforeMode.accessState == 1 && beforeMode.accessAcl == sourceAcl,
+             describeObservation(beforeMode).constData());
+    QCOMPARE(aclEntryPerm(beforeMode.accessAcl, kAclUser, inheritedUser), -1);
+
+    QByteArray restoredAcl;
+    QCOMPARE(readXattr(destination, "system.posix_acl_access", &restoredAcl), 1);
+    QCOMPARE(restoredAcl, sourceAcl);
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0640U);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtKeepsFinalAclAndMode()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString plainSource = root + QStringLiteral("/plain-source");
+    const QString aclSource = root + QStringLiteral("/acl-source");
+    const QString liveDir = root + QStringLiteral("/live");
+    const QString plainDestination = liveDir + QStringLiteral("/plain");
+    const QString aclDestination = liveDir + QStringLiteral("/acl");
+    QVERIFY(QDir().mkpath(liveDir));
+    QVERIFY(createFile(plainSource, "plain", 0644));
+    QVERIFY(createFile(aclSource, "acl", 0640));
+    QVERIFY(createFile(plainDestination, "old", 0600));
+    QVERIFY(createFile(aclDestination, "old", 0600));
+
+    // 復元先ディレクトリにdefault ACLがある場合でも、
+    // 復元後のmodeとACLは、ACLの同期をmodeの適用より先に行う前と同じく、復元元と一致する必要がある
+    // 復元元にACLが無い場合と有る場合の両方を確認する
+    const int setError = writeXattr(liveDir, "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 7, ::getuid() + 1000},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+    QCOMPARE(writeXattr(aclSource, "system.posix_acl_access", namedUserAcl(::getuid() + 2000)), 0);
+
+    QVERIFY(replaceFromPath(root, plainSource, plainDestination));
+    QVERIFY(replaceFromPath(root, aclSource, aclDestination));
+
+    QByteArray value;
+    QCOMPARE(readXattr(plainDestination, "system.posix_acl_access", &value), 0);
+    QByteArray sourceAcl;
+    QByteArray restoredAcl;
+    QCOMPARE(readXattr(aclSource, "system.posix_acl_access", &sourceAcl), 1);
+    QCOMPARE(readXattr(aclDestination, "system.posix_acl_access", &restoredAcl), 1);
+    QCOMPARE(restoredAcl, sourceAcl);
+
+    struct stat restoredStat;
+    QVERIFY(::lstat(plainDestination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0644U);
+    QVERIFY(::lstat(aclDestination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0640U);
+    QCOMPARE(readFileContent(plainDestination), QByteArray("plain"));
+    QCOMPARE(readFileContent(aclDestination), QByteArray("acl"));
+}
+
+void TestFilesystemHelpers::applyRestoredMetadataDoesNotWidenModeOnAccessAclFailure()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString source = tempDir.path() + QStringLiteral("/source");
+    const QString liveDir = tempDir.path() + QStringLiteral("/live");
+    QVERIFY(QDir().mkpath(liveDir));
+    QVERIFY(createFile(source, "secret", 0640));
+
+    const quint32 namedUser = ::getuid() + 1000;
+    const int setError = writeXattr(liveDir, "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 4, namedUser},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    // replaceRegularFileAtは、metadataの適用に失敗すると一時ファイルを削除するため、失敗後のmodeを観測できない
+    // そのため、復元先のファイルをテスト側で作成してfdを保持し、applyRestoredMetadataを直接呼び出す
+    const int sourceFd = ::open(source.toUtf8().constData(), O_RDONLY | O_CLOEXEC);
+    const int destinationFd = ::open((liveDir + QStringLiteral("/file")).toUtf8().constData(),
+                                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    QByteArray inheritedAcl;
+    const int inheritedState = destinationFd >= 0
+            ? readFdXattr(destinationFd, "system.posix_acl_access", &inheritedAcl) : -1;
+
+    detail::setAclSyncFailureForTesting("system.posix_acl_access", EACCES);
+    RestoredMetadataResult result;
+    struct stat afterStat {};
+    bool afterStatOk = false;
+    QByteArray afterAcl;
+    int afterState = -1;
+    int observationCount = -1;
+
+    // QVERIFYで途中終了するとfdが閉じられないため、判定より先に観測とfdのクローズを済ませる
+    if (sourceFd >= 0 && destinationFd >= 0) {
+        ModeRestoreObserverGuard observer;
+        result = applyRestoredMetadata(sourceFd, destinationFd, false);
+        observationCount = static_cast<int>(observer.observations.size());
+        afterStatOk = ::fstat(destinationFd, &afterStat) == 0;
+        afterState = readFdXattr(destinationFd, "system.posix_acl_access", &afterAcl);
+    }
+
+    if (sourceFd >= 0) {
+        ::close(sourceFd);
+    }
+
+    if (destinationFd >= 0) {
+        ::close(destinationFd);
+    }
+
+    QVERIFY(sourceFd >= 0);
+    QVERIFY(destinationFd >= 0);
+
+    // 前提として、0600で作成した直後はACLのmaskが---になり、継承した名前付きユーザの読み取りは無効になっている
+    QCOMPARE(inheritedState, 1);
+    QCOMPARE(aclEntryPerm(inheritedAcl, kAclUser, namedUser), 4);
+    QCOMPARE(aclEntryPerm(inheritedAcl, kAclMask, kAclUndefinedId), 0);
+
+    // access ACLを同期できない場合は、modeを0600から広げず、maskも---のままにする
+    // これにより、継承した名前付きユーザの読み取りは無効のまま保たれる
+    // modeを適用しないため、modeの適用直前の通知も行われない
+    QVERIFY(result.mandatoryFailed);
+    QCOMPARE(result.mandatoryErrno, EACCES);
+    QVERIFY(afterStatOk);
+    QCOMPARE(afterStat.st_mode & 07777, 0600U);
+    QCOMPARE(afterState, 1);
+    QCOMPARE(aclEntryPerm(afterAcl, kAclMask, kAclUndefinedId), 0);
+    QCOMPARE(observationCount, 0);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtRelaxedPathDoesNotWidenModeOnAclFailure()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/live/file");
+    QVERIFY(QDir().mkpath(root + QStringLiteral("/live")));
+    QVERIFY(createFile(source, "relaxed", 0640));
+    QVERIFY(createFile(destination, "old", 0644));
+
+    // metadataを必須としない経路(relaxed)は、ACLの同期に失敗しても差し替えを続ける
+    // そのため、差し替え後の復元先のmodeが、一時ファイルを作成したときの0600から広がっていないことを確認する
+    detail::setAclSyncFailureForTesting("system.posix_acl_access", EACCES);
+    RestoredMetadataResult metadata;
+    QVERIFY(replaceFromPath(root, source, destination, &metadata, false));
+
+    QVERIFY(metadata.mandatoryFailed);
+    QCOMPARE(metadata.mandatoryErrno, EACCES);
+    QCOMPARE(readFileContent(destination), QByteArray("relaxed"));
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
+    QCOMPARE(restoredStat.st_mode & 07777, 0600U);
+    QVERIFY(hasNoTemporaryLeftovers(root + QStringLiteral("/live")));
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtStrictPathDoesNotRenameOnAclFailure()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/live/file");
+    QVERIFY(QDir().mkpath(root + QStringLiteral("/live")));
+    QVERIFY(createFile(source, "snapshot", 0640));
+    QVERIFY(createFile(destination, "live", 0644));
+
+    // metadataを必須とする経路(strict)は、ACLの同期に失敗すると差し替えを中止する
+    // 復元先の内容とmodeが変わらず、一時ファイルも残らないことを確認する
+    detail::setAclSyncFailureForTesting("system.posix_acl_access", EACCES);
+    RestoredMetadataResult metadata;
+    errno = 0;
+    const bool replaced = replaceFromPath(root, source, destination, &metadata);
+    const int replaceErrno = errno;
+
+    QVERIFY(!replaced);
+    QCOMPARE(replaceErrno, EACCES);
+    QVERIFY(metadata.mandatoryFailed);
+    QCOMPARE(metadata.mandatoryErrno, EACCES);
+    QCOMPARE(readFileContent(destination), QByteArray("live"));
+    struct stat liveStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &liveStat) == 0);
+    QCOMPARE(liveStat.st_mode & 07777, 0644U);
+    QVERIFY(hasNoTemporaryLeftovers(root + QStringLiteral("/live")));
+}
+
+void TestFilesystemHelpers::applyRestoredMetadataDoesNotWidenDirectoryModeOnDefaultAclFailure()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString sourceDir = tempDir.path() + QStringLiteral("/source-dir");
+    const QString destinationDir = tempDir.path() + QStringLiteral("/destination-dir");
+    QVERIFY(QDir().mkpath(sourceDir));
+    QVERIFY(QDir().mkpath(destinationDir));
+    QVERIFY(::chmod(sourceDir.toUtf8().constData(), 0750) == 0);
+    QVERIFY(::chmod(destinationDir.toUtf8().constData(), 0700) == 0);
+
+    const int sourceFd = ::open(sourceDir.toUtf8().constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int destinationFd = ::open(destinationDir.toUtf8().constData(),
+                                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+    // default ACLの同期だけを失敗させ、access ACLの同期に成功した場合でも、
+    // ディレクトリのmodeを復元元の0750へ広げないことを確認する
+    detail::setAclSyncFailureForTesting("system.posix_acl_default", EROFS);
+    RestoredMetadataResult result;
+    struct stat afterStat {};
+    bool afterStatOk = false;
+    int observationCount = -1;
+
+    // QVERIFYで途中終了するとfdが閉じられないため、判定より先に観測とfdのクローズを済ませる
+    if (sourceFd >= 0 && destinationFd >= 0) {
+        ModeRestoreObserverGuard observer;
+        result = applyRestoredMetadata(sourceFd, destinationFd, true);
+        observationCount = static_cast<int>(observer.observations.size());
+        afterStatOk = ::fstat(destinationFd, &afterStat) == 0;
+    }
+
+    if (sourceFd >= 0) {
+        ::close(sourceFd);
+    }
+
+    if (destinationFd >= 0) {
+        ::close(destinationFd);
+    }
+
+    QVERIFY(sourceFd >= 0);
+    QVERIFY(destinationFd >= 0);
+
+    QVERIFY(result.mandatoryFailed);
+    QCOMPARE(result.mandatoryErrno, EROFS);
+    QVERIFY(afterStatOk);
+    QCOMPARE(afterStat.st_mode & 07777, 0700U);
+    QCOMPARE(observationCount, 0);
+}
+
+void TestFilesystemHelpers::safeCreateParentDirectoriesSyncsAclBeforeModeRestore()
+{
+    QTemporaryDir liveDir;
+    QTemporaryDir snapshotDir;
+    QVERIFY(liveDir.isValid() && snapshotDir.isValid());
+
+    // スナップショット側に、ACLを持たない親ディレクトリaとa/bを、異なるmodeで用意する
+    QVERIFY(QDir(snapshotDir.path()).mkpath(QStringLiteral("a/b")));
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a")).constData(), 0750), 0);
+    QCOMPARE(::chmod(QFile::encodeName(snapshotDir.path() + QStringLiteral("/a/b")).constData(), 0710), 0);
+
+    // 復元先にdefault ACLを設定し、復元時に作成する親ディレクトリが、
+    // そのACLをaccess ACLとdefault ACLの両方として継承する状況を再現する
+    const int setError = writeXattr(liveDir.path(), "system.posix_acl_default", makeAclXattr({
+        {kAclUserObj, 7, kAclUndefinedId},
+        {kAclUser, 5, ::getuid() + 1000},
+        {kAclGroupObj, 5, kAclUndefinedId},
+        {kAclMask, 7, kAclUndefinedId},
+        {kAclOther, 0, kAclUndefinedId},
+    }));
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    const int snapshotFd = ::open(QFile::encodeName(snapshotDir.path()).constData(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    QVERIFY(snapshotFd >= 0);
+    bool created = false;
+    QList<ModeRestoreObservation> observations;
+
+    // 観測を親ディレクトリの作成中だけに限定し、作成後の確認でobserverが呼ばれないようにする
+    {
+        ModeRestoreObserverGuard observer;
+        created = safeCreateParentDirectoriesFromSourceBeneathRoot(
+                liveDir.path(), liveDir.path() + QStringLiteral("/a/b"), snapshotFd, true);
+        observations = observer.observations;
+    }
+    ::close(snapshotFd);
+    QVERIFY(created);
+
+    // 親ディレクトリaとa/bの2つを作成するため、modeの適用直前の通知も2回ある
+    // どちらのディレクトリも、modeを適用する直前には継承したaccess ACLとdefault ACLが削除されている必要がある
+    QCOMPARE(observations.size(), 2);
+    for (const ModeRestoreObservation &beforeMode : std::as_const(observations)) {
+        QVERIFY2(beforeMode.accessState == 0 && beforeMode.defaultState == 0,
+                 describeObservation(beforeMode).constData());
+    }
+
+    QByteArray value;
+    struct stat createdStat;
+    const QString createdA = liveDir.path() + QStringLiteral("/a");
+    const QString createdB = liveDir.path() + QStringLiteral("/a/b");
+    QVERIFY(::lstat(createdA.toUtf8().constData(), &createdStat) == 0);
+    QCOMPARE(createdStat.st_mode & 07777, 0750U);
+    QVERIFY(::lstat(createdB.toUtf8().constData(), &createdStat) == 0);
+    QCOMPARE(createdStat.st_mode & 07777, 0710U);
+    QCOMPARE(readXattr(createdA, "system.posix_acl_access", &value), 0);
+    QCOMPARE(readXattr(createdA, "system.posix_acl_default", &value), 0);
+    QCOMPARE(readXattr(createdB, "system.posix_acl_access", &value), 0);
+    QCOMPARE(readXattr(createdB, "system.posix_acl_default", &value), 0);
+}
+
+void TestFilesystemHelpers::replaceRegularFileAtPreservesFileCapability()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString root = tempDir.path();
+    const QString source = root + QStringLiteral("/source");
+    const QString destination = root + QStringLiteral("/destination");
+    QVERIFY(createFile(source, "#!/bin/sh\n", 0755));
+    QVERIFY(createFile(destination, "old", 0644));
+
+    // security.capabilityの値の形式はVFS_CAP_REVISION_2で、permittedにCAP_NET_BIND_SERVICE(bit 10)だけを持つ
+    const QByteArray capability = QByteArray::fromHex("0000000200040000000000000000000000000000");
+    const int setError = writeXattr(source, "security.capability", capability);
+    if (setError == EPERM || setError == ENOTSUP) {
+        QSKIP("Setting file capabilities requires CAP_SETFCAP on a supporting filesystem");
+    }
+    QCOMPARE(setError, 0);
+    QByteArray sourceCapability;
+    QCOMPARE(readXattr(source, "security.capability", &sourceCapability), 1);
+
+    // file capabilityは、所有者やmodeを変更するとカーネルが削除する
+    // ACLとmodeの適用より後に設定していれば、復元後のファイルにcapabilityが残る
+    QVERIFY(replaceFromPath(root, source, destination));
+
+    QByteArray restoredCapability;
+    QCOMPARE(readXattr(destination, "security.capability", &restoredCapability), 1);
+    QCOMPARE(restoredCapability, sourceCapability);
+    struct stat restoredStat;
+    QVERIFY(::lstat(destination.toUtf8().constData(), &restoredStat) == 0);
     QCOMPARE(restoredStat.st_mode & 07777, 0755U);
 }
 

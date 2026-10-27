@@ -38,6 +38,48 @@ namespace qsnapper::security {
         constexpr const char *kCapabilityXattr = "security.capability";
         constexpr const char *kSelinuxXattr = "security.selinux";
 
+#ifdef QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+        /**
+         * @brief metadata適用のテスト用フックの設定
+         *
+         * QSNAPPER_ENABLE_TEST_METADATA_HOOKSを定義したテスト用ターゲットだけでコンパイルし、
+         * 製品のhelperにはフックの設定を持たせない
+         */
+        struct MetadataTestHooks {
+            detail::MetadataStageObserver observer = nullptr;  // 段階の通知先 (nullptrの場合は通知しない)
+            void *context = nullptr;                           // observerへ渡すポインタ (観測結果の記録先など)
+            QByteArray failingAclXattr;                        // 同期を失敗させるACLのxattr名 (空の場合は失敗させない)
+            int failingAclErrno = 0;                           // 失敗時に設定するerrno (0の場合は失敗させない)
+        };
+
+        /**
+         * @brief テスト用フックの設定を返す
+         *
+         * 他の翻訳単位の静的初期化から呼ばれた場合でも初期化済みの設定を返せるよう、関数内のstatic変数で保持する
+         *
+         * @return 設定への参照
+         */
+        MetadataTestHooks &metadataTestHooks()
+        {
+            static MetadataTestHooks hooks;
+            return hooks;
+        }
+
+        /**
+         * @brief テストが設定したobserverへ段階を通知する
+         * @param stage 通知する段階
+         * @note observerが設定されていない場合は何もしない
+         * @param destinationFd 復元先fd
+         */
+        void notifyMetadataStage(detail::MetadataStage stage, int destinationFd)
+        {
+            const MetadataTestHooks &hooks = metadataTestHooks();
+            if (hooks.observer) {
+                hooks.observer(stage, destinationFd, hooks.context);
+            }
+        }
+#endif
+
         /**
          * @brief fdからxattrの値を読み出す
          *
@@ -93,6 +135,16 @@ namespace qsnapper::security {
          */
         bool syncAclXattrFd(int sourceFd, int destinationFd, const char *name)
         {
+#ifdef QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+            // テストが失敗を指定したACLは、復元先のACLを変更する前に失敗させる
+            // 実際のファイルシステムで書き込みに失敗した場合と同じく、falseを返してerrnoを設定する
+            const MetadataTestHooks &hooks = metadataTestHooks();
+            if (hooks.failingAclErrno != 0 && hooks.failingAclXattr == name) {
+                errno = hooks.failingAclErrno;
+                return false;
+            }
+#endif
+
             QByteArray value;
             const int state = readXattrFd(sourceFd, name, &value);
             if (state < 0 && errno != ENOTSUP) {
@@ -398,6 +450,29 @@ namespace qsnapper::security {
         return adjusted;
     }
 
+#ifdef QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+    namespace detail {
+        void setMetadataStageObserverForTesting(MetadataStageObserver observer, void *context)
+        {
+            MetadataTestHooks &hooks = metadataTestHooks();
+            hooks.observer = observer;
+            hooks.context = observer ? context : nullptr;
+        }
+
+        void setAclSyncFailureForTesting(const char *xattrName, int errorNumber)
+        {
+            MetadataTestHooks &hooks = metadataTestHooks();
+            hooks.failingAclXattr = errorNumber != 0 && xattrName ? QByteArray(xattrName) : QByteArray();
+            hooks.failingAclErrno = hooks.failingAclXattr.isEmpty() ? 0 : errorNumber;
+        }
+
+        void clearMetadataTestHooksForTesting()
+        {
+            metadataTestHooks() = MetadataTestHooks{};
+        }
+    }
+#endif
+
     RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory)
     {
         RestoredMetadataResult result;
@@ -425,18 +500,32 @@ namespace qsnapper::security {
         const mode_t restoredMode = ownershipRestored
                 ? (sourceStat.st_mode & 07777)
                 : (sourceStat.st_mode & (07777 & ~(S_ISUID | S_ISGID)));
+
+        // ACLは、復元元のmodeを適用するより先に同期する
+        // 復元先に作った一時ファイルやディレクトリは、親ディレクトリのdefault ACLから名前付きエントリを継承している
+        // 作成直後のmodeは0600 (ディレクトリは0700) で、ACLのmaskが---になるため、継承したエントリは効いていない
+        // 先にfchmodでgroupのビットを広げるとmaskも広がり、ACLを同期するまでの間、名前付きユーザが復元中の内容を開けてしまう
+        // ACLの同期に失敗した場合は、modeを広げずに戻る
+        // 必須metadataの失敗で差し替えを中止しない呼び出し元 (relaxed) でも、復元元のmodeまでは広がらない
+        if (!syncAclXattrFd(sourceFd, destinationFd, kAclAccessXattr)) {
+            recordMandatoryFailure();
+            return result;
+        }
+
+        if (isDirectory && !syncAclXattrFd(sourceFd, destinationFd, kAclDefaultXattr)) {
+            recordMandatoryFailure();
+            return result;
+        }
+
+#ifdef QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+        notifyMetadataStage(detail::MetadataStage::BeforeModeRestore, destinationFd);
+#endif
         if (::fchmod(destinationFd, restoredMode) < 0) {
             recordMandatoryFailure();
         }
 
-        if (!syncAclXattrFd(sourceFd, destinationFd, kAclAccessXattr)) {
-            recordMandatoryFailure();
-        }
-        if (isDirectory && !syncAclXattrFd(sourceFd, destinationFd, kAclDefaultXattr)) {
-            recordMandatoryFailure();
-        }
-
-        // ACLの設定はgroupのpermission bitを書き換えるため、最終的なmodeを復元元と一致させる
+        // 最初のfchmodが失敗した場合や、ACLの設定でgroupのビットが変わった場合に備えて、
+        // 最終的なmodeが復元元と異なるときだけ、もう一度fchmodする
         struct stat destinationStat;
         if (::fstat(destinationFd, &destinationStat) == 0
                 && (destinationStat.st_mode & 07777) != restoredMode

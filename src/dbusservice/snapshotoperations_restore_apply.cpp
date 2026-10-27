@@ -500,7 +500,7 @@ bool SnapshotOperations::applyDirectoryBeneathRoot(int sourceDirFd,
  * @brief live宛先の親ディレクトリを1回だけ解決し、通常ファイルをコピーして差し替える
  *
  * live側を直接O_TRUNCで開くと、実行中のバイナリ (復元を実行しているqSnapper自身や稼働中のサービス) がETXTBSYで拒否され、既存inodeのhardlinkや緩いmodeも引き継いでしまう
- * そのため、同じ親dirfd上の一時ファイルへ書き出し、data → 所有者 → mode → ACL → xattr → capability → 時刻をfd経由で適用してから、renameat()で差し替える
+ * そのため、同じ親dirfd上の一時ファイルへ書き出し、data → 所有者 → ACL → mode → xattr → capability → 時刻をfd経由で適用してから、renameat()で差し替える
  * 一時ファイルの作成からrenameまで名前を再解決しないため、書き込み可能な親ディレクトリを制御する攻撃者が途中で一時名や親を差し替えても、
  * 別objectをrenameしたり、攻撃者のobjectへmetadataを適用したりしない (差し替えはrenameの前後で検出して失敗にする)
  *

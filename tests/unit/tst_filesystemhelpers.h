@@ -33,6 +33,9 @@ class TestFilesystemHelpers : public QObject
     Q_OBJECT
 
 private slots:
+    /** @brief 各テストの終了時に、metadata適用のテスト用フックを解除する */
+    void cleanup();
+
     void safeMkpathCreatesNestedDirectories();
     void safeMkpathRejectsSymlinkComponents();
     void safeMkpathRejectsTargetSymlink();
@@ -54,6 +57,24 @@ private slots:
     void replaceRegularFileAtCopiesAccessAcl();
     void replaceRegularFileAtDropsInheritedDefaultAcl();
     void applyRestoredMetadataSyncsDirectoryAcls();
+    /** @brief 復元先ディレクトリから継承したdefault ACLの名前付きエントリが、modeを広げる前に削除されていることを確認する */
+    void replaceRegularFileAtSyncsInheritedAclBeforeModeRestore();
+    /** @brief 復元元にACLがある場合、modeを広げる前に、継承したACLが復元元のACLへ置き換わっていることを確認する */
+    void replaceRegularFileAtSyncsSourceAclBeforeModeRestore();
+    /** @brief ACLの同期をmodeの適用より先に行っても、最終的なmodeとACLが復元元と一致することを確認する */
+    void replaceRegularFileAtKeepsFinalAclAndMode();
+    /** @brief access ACLを同期できない場合に、作成時の0600からmodeを広げないことを確認する */
+    void applyRestoredMetadataDoesNotWidenModeOnAccessAclFailure();
+    /** @brief metadataの失敗時も差し替えを続ける経路(relaxed)で、ACLの同期に失敗してもmodeを広げないことを確認する */
+    void replaceRegularFileAtRelaxedPathDoesNotWidenModeOnAclFailure();
+    /** @brief metadataの失敗時に差し替えを中止する経路(strict)で、ACLの同期に失敗すると復元先を差し替えないことを確認する */
+    void replaceRegularFileAtStrictPathDoesNotRenameOnAclFailure();
+    /** @brief ディレクトリのdefault ACLを同期できない場合に、modeを広げないことを確認する */
+    void applyRestoredMetadataDoesNotWidenDirectoryModeOnDefaultAclFailure();
+    /** @brief 復元時に作成する親ディレクトリでも、modeを広げる前に継承ACLが削除されていることを確認する */
+    void safeCreateParentDirectoriesSyncsAclBeforeModeRestore();
+    /** @brief ACLとmodeの後に設定するfile capabilityが、最終状態に残ることを確認する (CAP_SETFCAPが無い環境ではスキップする) */
+    void replaceRegularFileAtPreservesFileCapability();
     void replaceRegularFileAtDetectsTemporaryNameSwap();
     void replaceRegularFileAtKeepsResolvedParentAfterParentSwap();
     void replaceSymlinkAtAppliesMetadataAndDetectsSwap();

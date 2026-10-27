@@ -27,6 +27,7 @@
 #include <sys/fsuid.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include "filesystemhelpers.h"
@@ -46,6 +47,8 @@ class TestSnapshotOperations : public QObject
 
 private slots:
     void init();
+    /** @brief 各テストの終了時に、metadata適用のテスト用フックを解除する */
+    void cleanup();
 
     void beginThenCancelDoesNotTouchRootSubvolume();
 
@@ -89,6 +92,8 @@ private slots:
     void specialFileSourceIsSkippedWithoutTouchingLive();
     /** @brief ディレクトリとファイルの間の種別変更を、YaST方式でも復元できることを検証する */
     void typechangedReplacesDirectoryAndFileInYastMode();
+    /** @brief 既存のディレクトリと新規に作成するディレクトリの両方で、modeを適用する直前に継承ACLが削除されていることを検証する */
+    void applyRestoreEntrySyncsDirectoryAclBeforeModeRestore();
     /** @brief 退避前と退避後の他者所有ディレクトリを対比するケースを提供する */
     void typechangedGuardsForeignDirectories_data();
     /** @brief 他者の木の退避を拒否し、退避後に削除を拒否した場合も失敗を報告する */
@@ -235,6 +240,124 @@ namespace {
         return true;
     }
 
+    /**
+     * @brief 名前付きユーザへ読み取りと検索を許すdefault ACLの、xattrの値を作る
+     *
+     * 復元先の下にあるディレクトリが、名前付きユーザのエントリを継承する状況を再現するために使う
+     * maskをr-xにして、ACLを継承したディレクトリのgroupのビットに書き込みが含まれないようにする
+     *
+     * @param namedUser 名前付きユーザのuid (ACLのエントリとして使うだけなので、実在しなくてよい)
+     * @return system.posix_acl_defaultへ設定する値 (先頭4バイトのヘッダの後に、8バイトのエントリが並ぶ形式)
+     */
+    QByteArray namedUserDefaultAcl(quint32 namedUser)
+    {
+        /**
+         * @brief ACLの1エントリ
+         */
+        struct AclEntry {
+            quint16 tag;   // エントリの種類
+            quint16 perm;  // 権限ビット (0から7)
+            quint32 id;    // 名前付きユーザのuid (それ以外のエントリは未定義を表す0xffffffff)
+        };
+
+        const AclEntry entries[] = {
+            {0x01, 7, 0xffffffffU},  // 所有者 (user_obj)
+            {0x02, 5, namedUser},    // 名前付きユーザ (user)
+            {0x04, 5, 0xffffffffU},  // 所有グループ (group_obj)
+            {0x10, 5, 0xffffffffU},  // 名前付きエントリとgroupに許す権限の上限 (mask)
+            {0x20, 0, 0xffffffffU},  // その他のユーザ (other)
+        };
+
+        // xattrの値は、各フィールドをlittle endianで並べる
+        QByteArray value;
+        const auto appendLittleEndian = [&value](quint32 number, int byteCount) {
+            for (int index = 0; index < byteCount; ++index) {
+                value.append(static_cast<char>((number >> (8 * index)) & 0xff));
+            }
+        };
+
+        // ヘッダはACLの形式のversionで、Linuxのxattrでは2を使う
+        appendLittleEndian(2, 4);
+        for (const AclEntry &entry : entries) {
+            appendLittleEndian(entry.tag, 2);
+            appendLittleEndian(entry.perm, 2);
+            appendLittleEndian(entry.id, 4);
+        }
+        return value;
+    }
+
+    /**
+     * @brief パスのxattrが存在するかを調べる
+     * @param path 対象パス (シンボリックリンクはたどらない)
+     * @param name xattr名
+     * @return 1: 値あり、0: 属性なし、-1: 読み出しエラー
+     */
+    int pathXattrState(const QString &path, const char *name)
+    {
+        if (::lgetxattr(QFile::encodeName(path).constData(), name, nullptr, 0) >= 0) {
+            return 1;
+        }
+        return errno == ENODATA ? 0 : -1;
+    }
+
+    /**
+     * @brief 復元元のmodeを適用する直前に観測した、ディレクトリのmodeとACLの有無
+     *
+     * modeを広げる前にACLの同期が終わっているかを、テスト本体で判定するために記録する
+     */
+    struct DirectoryAclObservation {
+        mode_t mode = 0;        // 観測時点のmode (fstatに失敗した場合は全ビットを立てた値)
+        int accessState = -1;   // access ACLの有無 (1: あり、0: なし、-1: 読み出し失敗)
+        int defaultState = -1;  // default ACLの有無 (1: あり、0: なし、-1: 読み出し失敗)
+    };
+
+    /**
+     * @brief BeforeModeRestoreの通知を受けるたびに、復元先のディレクトリのmodeとACLの有無を記録する
+     *
+     * 製品コードの処理の途中から呼ばれるため、QTestのマクロで判定して処理を中断せず、記録だけを行う
+     *
+     * @param stage 通知された段階
+     * @param destinationFd 復元先のディレクトリのfd (状態を読み取るだけで、閉じない)
+     * @param context 記録先のQList<DirectoryAclObservation>へのポインタ
+     * @note contextが指すリストへ、観測結果を1件追加する
+     */
+    void recordDirectoryAclObservation(qsnapper::security::detail::MetadataStage stage, int destinationFd,
+                                       void *context)
+    {
+        if (stage != qsnapper::security::detail::MetadataStage::BeforeModeRestore) {
+            return;
+        }
+
+        const auto xattrState = [destinationFd](const char *name) {
+            if (::fgetxattr(destinationFd, name, nullptr, 0) >= 0) {
+                return 1;
+            }
+            return errno == ENODATA ? 0 : -1;
+        };
+
+        DirectoryAclObservation observation;
+        struct stat destinationStat;
+        observation.mode = ::fstat(destinationFd, &destinationStat) == 0 ? (destinationStat.st_mode & 07777)
+                                                                          : mode_t(~0);
+        observation.accessState = xattrState("system.posix_acl_access");
+        observation.defaultState = xattrState("system.posix_acl_default");
+        static_cast<QList<DirectoryAclObservation> *>(context)->append(observation);
+    }
+
+    /**
+     * @brief 観測結果を、テストの失敗メッセージに表示する文字列へ変換する
+     * @param observation 観測結果
+     * @return modeを8進数で表し、ACLの有無を並べた文字列
+     */
+    QByteArray describeDirectoryAclObservation(const DirectoryAclObservation &observation)
+    {
+        return QStringLiteral("before fchmod: mode=%1 access=%2 default=%3")
+                .arg(static_cast<uint>(observation.mode), 4, 8, QLatin1Char('0'))
+                .arg(observation.accessState)
+                .arg(observation.defaultState)
+                .toUtf8();
+    }
+
 }
 
 /** @brief 元の名前を守る拒否と、退避物を保存してFailedを返す拒否を区別する */
@@ -308,6 +431,12 @@ void TestSnapshotOperations::init()
 {
     m_readOnlyProbeCalls = 0;
     m_readWriteRestoreCalls = 0;
+}
+
+void TestSnapshotOperations::cleanup()
+{
+    // テスト関数がQVERIFYなどの失敗で途中で戻った場合でも、フックの設定が次のテストへ残らないよう、各テストの終了時に解除する
+    qsnapper::security::detail::clearMetadataTestHooksForTesting();
 }
 
 void TestSnapshotOperations::installRootSubvolumeSpies(SnapshotOperations &operations)
@@ -963,6 +1092,79 @@ void TestSnapshotOperations::typechangedReplacesDirectoryAndFileInYastMode()
 
     operations.finishRestorePlanForTesting(QStringLiteral("apply-typechanged"),
                                            qsnapper::restore::ManifestState::Completed);
+}
+
+/**
+ * @brief 既存のディレクトリと新規に作成するディレクトリの両方で、modeを適用する直前に継承ACLが削除されていることを検証する
+ *
+ * 復元先にdefault ACLがあると、その下のディレクトリは名前付きユーザのエントリを継承する
+ * 復元元のmodeを適用してgroupのビットが広がると、継承したエントリが有効になり、名前付きユーザが復元中のディレクトリを参照できる
+ * そのため、ACLの同期がmodeの適用より先に終わっていることを、applyDirectoryBeneathRootを通る両方の経路で確認する
+ */
+void TestSnapshotOperations::applyRestoreEntrySyncsDirectoryAclBeforeModeRestore()
+{
+    const QString manifestId = QStringLiteral("apply-directory-acl");
+    ApplyFixture fixture;
+    QVERIFY(fixture.setUp());
+
+    // 復元元のディレクトリは、ACLを持たないmode 0710とする
+    // live側にあるexistingは既存のディレクトリとして、live側に無いfreshは新規に作成するディレクトリとして復元する
+    const QStringList names = {QStringLiteral("existing"), QStringLiteral("fresh")};
+    for (const QString &name : names) {
+        const QString sourceDir = fixture.sourcePath + QLatin1Char('/') + name;
+        QVERIFY(QDir().mkpath(sourceDir));
+        QCOMPARE(::chmod(QFile::encodeName(sourceDir).constData(), 0710), 0);
+    }
+
+    // 復元先にdefault ACLを設定してから既存のディレクトリを作成し、既存のディレクトリにもACLを継承させる
+    const QByteArray defaultAcl = namedUserDefaultAcl(::getuid() + 1000);
+    const int setResult = ::lsetxattr(QFile::encodeName(fixture.livePath).constData(), "system.posix_acl_default",
+                                      defaultAcl.constData(), static_cast<size_t>(defaultAcl.size()), 0);
+    const int setError = setResult == 0 ? 0 : errno;
+    if (setError == ENOTSUP) {
+        QSKIP("POSIX ACLs are not supported on this filesystem");
+    }
+    QCOMPARE(setError, 0);
+
+    const QString existingDir = fixture.livePath + QStringLiteral("/existing");
+    QVERIFY(QDir().mkpath(existingDir));
+    QCOMPARE(pathXattrState(existingDir, "system.posix_acl_access"), 1);
+    QCOMPARE(pathXattrState(existingDir, "system.posix_acl_default"), 1);
+
+    SnapshotOperations operations;
+    QVERIFY(fixture.begin(operations, manifestId, false));
+
+    // 既存のディレクトリはmodifiedとして、live側に無いディレクトリはdeletedとして復元する
+    // 観測結果の記録先はこの関数のローカル変数であるため、判定で途中終了する前にobserverを解除する
+    QList<DirectoryAclObservation> observations;
+    qsnapper::security::detail::setMetadataStageObserverForTesting(&recordDirectoryAclObservation, &observations);
+    const qsnapper::restore::RestoreEntryOutcome existingOutcome =
+            operations.applyRestoreEntryForTesting(manifestId, {QStringLiteral("/existing"), QStringLiteral("modified")});
+    const qsnapper::restore::RestoreEntryOutcome freshOutcome =
+            operations.applyRestoreEntryForTesting(manifestId, {QStringLiteral("/fresh"), QStringLiteral("deleted")});
+    qsnapper::security::detail::setMetadataStageObserverForTesting(nullptr, nullptr);
+
+    QCOMPARE(existingOutcome, qsnapper::restore::RestoreEntryOutcome::Applied);
+    QCOMPARE(freshOutcome, qsnapper::restore::RestoreEntryOutcome::Applied);
+
+    // 2つのディレクトリのどちらも、modeを適用する直前には継承したaccess ACLとdefault ACLが削除されている必要がある
+    QCOMPARE(observations.size(), 2);
+    for (const DirectoryAclObservation &beforeMode : std::as_const(observations)) {
+        QVERIFY2(beforeMode.accessState == 0 && beforeMode.defaultState == 0,
+                 describeDirectoryAclObservation(beforeMode).constData());
+    }
+
+    // 復元後のmodeとACLは、復元元と一致する
+    for (const QString &name : names) {
+        const QString restoredDir = fixture.livePath + QLatin1Char('/') + name;
+        struct stat restoredStat;
+        QCOMPARE(::lstat(QFile::encodeName(restoredDir).constData(), &restoredStat), 0);
+        QCOMPARE(restoredStat.st_mode & 07777, 0710U);
+        QCOMPARE(pathXattrState(restoredDir, "system.posix_acl_access"), 0);
+        QCOMPARE(pathXattrState(restoredDir, "system.posix_acl_default"), 0);
+    }
+
+    operations.finishRestorePlanForTesting(manifestId, qsnapper::restore::ManifestState::Completed);
 }
 
 /**

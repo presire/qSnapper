@@ -459,9 +459,10 @@ namespace qsnapper::security {
      *
      * 適用順序は次のとおり (名前の再解決は行わない):
      * 1. fchown() : 所有者変更はS_ISUID / S_ISGIDとsecurity.capabilityを落とすため、最初に行う
-     * 2. fchmod() : S_ISUID / S_ISGIDを含むmodeを設定する
-     * 3. system.posix_acl_access (ディレクトリはsystem.posix_acl_defaultも) :
+     * 2. system.posix_acl_access (ディレクトリはsystem.posix_acl_defaultも) :
      *    復元元にあれば設定し、無ければ復元先から削除する (親のdefault ACLから継承したentryを残さない)
+     *    modeを広げるより先に行い、継承した名前付きエントリがmaskの拡大で一時的に有効になるのを防ぐ
+     * 3. fchmod() : S_ISUID / S_ISGIDを含むmodeを設定する
      * 4. その他のxattr (security.selinux、user.*など) : best-effortでコピーし、失敗件数のみを返す
      *    security.selinuxがSELinuxユーザの違いで拒否された場合は、ユーザ部分だけを復元先の値にして再試行する
      * 5. security.capability (通常ファイルのみ) : 所有者とmodeの変更後に設定する
@@ -470,8 +471,62 @@ namespace qsnapper::security {
      * @param destinationFd 復元先のfd
      * @param isDirectory ディレクトリとして扱う場合true (default ACLを同期し、capabilityは扱わない)
      * @return 適用結果
+     * @note ACLの同期に失敗した場合は、最初のerrnoを記録して、3以降を行わずに戻る
+     *       復元先のmodeは作成時のまま (既存のディレクトリは現在のまま) となり、復元元のmodeまで広がらない
      */
     RestoredMetadataResult applyRestoredMetadata(int sourceFd, int destinationFd, bool isDirectory);
+
+#ifdef QSNAPPER_ENABLE_TEST_METADATA_HOOKS
+    // テスト用の観測点と故障注入(処理をわざと失敗させる仕組み)は、
+    // QSNAPPER_ENABLE_TEST_METADATA_HOOKSを定義したテスト用ターゲットだけでコンパイルする
+    // 製品のhelperがテスト用の入口を持たないよう、宣言もマクロで囲む
+    namespace detail {
+        /**
+         * @brief applyRestoredMetadataの処理のうち、テストが復元先の状態を観測できる段階
+         */
+        enum class MetadataStage {
+            BeforeModeRestore,  // 復元元のmodeを適用する最初のfchmodを呼ぶ直前
+        };
+
+        /**
+         * @brief 段階の通知を受け取る関数の型
+         *
+         * テスト専用の入口のために依存を増やさないよう、std::functionではなく関数ポインタと任意のデータへのポインタを使う
+         * 通知はapplyRestoredMetadataの実行中に同じスレッドから呼び出される
+         * 通知を受け取る関数が復元先fdを閉じたり変更したりすると、その後の適用結果が変わるため、fdの状態の読み取りだけを行うこと
+         */
+        using MetadataStageObserver = void (*)(MetadataStage stage, int destinationFd, void *context);
+
+        /**
+         * @brief applyRestoredMetadataの段階を通知する関数を設定する
+         *
+         * ACLの同期がmodeの適用より先に終わっていることを、競合のタイミングに頼らずテストで確認するために使う
+         * nullptrを渡すと通知を止める
+         *
+         * @param observer 通知を受け取る関数
+         * @param context observerの第3引数へそのまま渡すポインタ (観測結果の記録先など)
+         */
+        void setMetadataStageObserverForTesting(MetadataStageObserver observer, void *context);
+
+        /**
+         * @brief 指定したACLのxattrの同期を、復元先のACLを変更する前に失敗させる
+         *
+         * ACLの同期に失敗した場合にmodeを広げないことを、
+         * 実際のファイルシステムでACLの書き込みを失敗させずにテストで確認するために使う
+         *
+         * @param xattrName 失敗させるxattr名 (system.posix_acl_accessまたはsystem.posix_acl_default)
+         * @param errorNumber 失敗時に設定するerrno (0を渡すと失敗させる設定を解除する)
+         */
+        void setAclSyncFailureForTesting(const char *xattrName, int errorNumber);
+
+        /**
+         * @brief metadata適用のテスト用フックを全て解除する
+         *
+         * フックの設定が次のテストへ残ると、無関係なテストの結果まで変わるため、各テストの終了時に呼ぶ
+         */
+        void clearMetadataTestHooksForTesting();
+    }
+#endif
 
     /**
      * @brief スナップショットのSELinuxコンテキストのユーザ部分だけを、復元先の現在のユーザに置き換える

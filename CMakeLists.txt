@@ -55,9 +55,13 @@ pkg_check_modules(POLKIT_GOBJECT REQUIRED IMPORTED_TARGET polkit-gobject-1)
 
 qt6_standard_project_setup()
 
-# QTP0004: サブディレクトリ (qml/pages, qml/components) のqmldir要求を抑制
-# NO_PLUGIN指定でリソース埋め込みのためqmldirは不要
-qt6_policy(SET QTP0004 OLD)
+# QTP0004: QMLファイルを置くサブディレクトリ (qml/、qml/pages、qml/components) ごとにqmldirを生成する
+# 各qmldirはモジュール本体へ暗黙のimportを向けるため、サブディレクトリのQMLからも同じモジュールの型が見える
+# OLDの挙動は非推奨で、将来のQtで削除されるためNEWにする
+# QTP0004はQt 6.8で追加されたポリシーであり、6.5から6.7では未知のポリシーとしてエラーになるため、存在する場合だけ設定する
+if(QT_KNOWN_POLICY_QTP0004)
+    qt6_policy(SET QTP0004 NEW)
+endif()
 
 # コンパイラとリンカの堅牢化機能を確認する
 #

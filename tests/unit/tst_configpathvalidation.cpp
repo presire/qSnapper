@@ -209,10 +209,11 @@ void TestConfigPathValidation::openTrustedDirectoryAcceptsRootOwnedDirectories()
  */
 void TestConfigPathValidation::openTrustedDirectoryRejectsUntrustedTemporaryDirectory()
 {
-    QTemporaryDir dir;
+    // /tmpはsticky bit付きで誰でも書き込めるため、配下のパスは差し替えを防げない
+    // TMPDIRを信頼できるディレクトリへ向けて実行しても前提が崩れないよう、/tmpを明示する
+    QTemporaryDir dir(QStringLiteral("/tmp/qsnapper-test-XXXXXX"));
     QVERIFY(dir.isValid());
 
-    // /tmpはsticky bit付きで誰でも書き込めるため、配下のパスは差し替えを防げない
     int fd = -1;
     QCOMPARE(openTrustedDirectory(dir.path(), &fd), TrustedPathResult::Untrusted);
     QCOMPARE(fd, -1);

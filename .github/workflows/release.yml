@@ -13,7 +13,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract and validate version
         id: version
@@ -33,7 +33,7 @@ jobs:
     container:
       image: opensuse/tumbleweed:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -54,8 +54,14 @@ jobs:
             -DENABLE_SELINUX=OFF
           cmake --build build
 
+      # コンテナ内ではテストがrootで動き、rootだけが通る復元経路の検査も実行される
+      # 復元処理は、root以外が名前を変えられる祖先 (/tmpなど) の下では変更を拒否するため、
+      # 一時ディレクトリをrootだけが書き込める0755のディレクトリへ向ける
+      # 0700にしないのは、一般ユーザとして攻撃を再現するテストが中へ入れる必要があるためである
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          install -d -m 0755 /var/lib/qsnapper-test-tmp
+          TMPDIR=/var/lib/qsnapper-test-tmp ctest --test-dir build --output-on-failure
 
   build-rpm-opensuse:
     needs: validate
@@ -63,7 +69,7 @@ jobs:
     container:
       image: opensuse/leap:16.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -95,7 +101,7 @@ jobs:
             mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-leap16.x86_64.rpm"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qsnapper-${{ needs.validate.outputs.version }}-leap16.x86_64.rpm
           path: build/*.rpm
@@ -106,7 +112,7 @@ jobs:
     container:
       image: opensuse/tumbleweed:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -138,7 +144,7 @@ jobs:
             mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-tumbleweed.x86_64.rpm"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qsnapper-${{ needs.validate.outputs.version }}-tumbleweed.x86_64.rpm
           path: build/*.rpm
@@ -149,7 +155,7 @@ jobs:
     container:
       image: fedora:44
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -180,7 +186,7 @@ jobs:
             mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-fc44.x86_64.rpm"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qsnapper-${{ needs.validate.outputs.version }}-fc44.x86_64.rpm
           path: build/*.rpm
@@ -191,7 +197,7 @@ jobs:
     container:
       image: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -219,7 +225,7 @@ jobs:
             mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-debian-trixie_amd64.deb"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qsnapper-${{ needs.validate.outputs.version }}-debian-trixie.amd64.deb
           path: build/*.deb
@@ -230,10 +236,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true

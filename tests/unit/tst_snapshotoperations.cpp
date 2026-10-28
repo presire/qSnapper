@@ -6,18 +6,21 @@
  * rootサブボリュームへの操作はテスト用の差し替え関数で観測し、実システムには触れない
  * 復元計画の終了状態、config操作との排他、エントリ適用の安全性、認可と例外の境界を確認する
  *
- * 依存 : Qt Test、SnapshotOperations、RestoreManifestRegistry、snapshotoperations_internal
+ * 実行方法 : QTEST_GUILESS_MAINから実行する単体テスト
+ * 依存 : Qt Test、SnapshotOperations、RestoreManifestRegistry、snapshotoperations_internal、filesystemhelpers
  */
 
 #include <QtTest/QtTest>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
-
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <new>
 #include <stdexcept>
-
+#include <vector>
 #include <fcntl.h>
+#include <grp.h>
 #include <linux/btrfs.h>
 #include <linux/magic.h>
 #include <sched.h>
@@ -29,27 +32,33 @@
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
-
 #include "filesystemhelpers.h"
 #include "snapshotoperations.h"
 #include "restoremanifestregistry.h"
 #include "snapshotoperations_internal.h"
 
 /**
- * @brief SnapshotOperationsの復元計画まわりの特権境界を検証するテスト
+ * @class TestSnapshotOperations
+ * @brief SnapshotOperationsの復元計画とエントリ適用の特権境界を検証するテスト
  *
  * D-Busを介さずにスロットを直接呼ぶ (呼び出し元ownerは空文字列になる)
  * rootサブボリュームへの操作はテスト用の差し替え関数で観測し、実システムには触れない
+ * private slotsの宣言順はQTestの実行順になるため、並べ替えない
+ *
+ * m_readOnlyProbeCalls : rootの読み取り専用状態を確認した回数
+ * m_readWriteRestoreCalls : rootをrwへ戻した回数
  */
 class TestSnapshotOperations : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief 各テストの前に、root操作の観測回数を0へ戻す */
     void init();
     /** @brief 各テストの終了時に、metadata適用のテスト用フックを解除する */
     void cleanup();
 
+    /** @brief 計画の作成と取り消しだけではrootサブボリュームに触れないことを検証する */
     void beginThenCancelDoesNotTouchRootSubvolume();
 
     // --- config操作を止める復元計画の判定 ---
@@ -69,17 +78,27 @@ private slots:
     void expiredPlanIsRemovedFromOwnerTableOnStatus();
 
     // --- 差分生成の資源上限 ---
+    /** @brief 小さな差分では、従来どおりunified形式の差分を返すことを検証する */
     void diffStillProducesUnifiedOutputForSmallChanges();
+    /** @brief 片方がバイナリの場合に、内容を差分へ載せずbinaryの理由で省略することを検証する */
     void diffOmitsBinaryFiles();
+    /** @brief ファイルサイズの既定の上限を超える場合にtoo_largeの理由で省略することを検証する */
     void diffOmitsTooLargeFiles();
+    /** @brief 行数の上限を超える場合にtoo_largeの理由で省略することを検証する */
     void diffOmitsFilesWithTooManyLines();
+    /** @brief FIFOを開かずにspecial_fileの理由で省略することを検証する */
     void diffDoesNotOpenFifo();
+    /** @brief 作業領域と探索ステップ数の上限を超える差分をtoo_many_changesの理由で省略することを検証する */
     void diffOmitsTooManyChanges();
+    /** @brief 編集距離が最大になる入力でも、既定の上限で打ち切って短時間で戻ることを検証する */
     void diffWithDefaultLimitsReturnsQuicklyOnPathologicalInput();
 
     // --- 書き込み可能な復元元の拒否 ---
+    /** @brief btrfs以外の書き込み可能なディレクトリを復元元として受け入れないことを検証する */
     void writableDirectoryIsNotReadOnlyRestoreSource();
+    /** @brief btrfsでは読み取り専用フラグの立ったsubvolumeだけを受け入れることを検証する */
     void btrfsSubvolumeReadOnlyFlagIsRequired();
+    /** @brief btrfs以外では読み取り専用でmountされたファイルシステムを受け入れることを検証する */
     void readOnlyMountIsAcceptedForNonBtrfs();
 
     // --- 認可待ちの上限 ---
@@ -103,7 +122,8 @@ private slots:
     /** @brief 復元先の同名symlinkの先へmetadataを適用しないことを検証する */
     void existingSymlinkIsNotUsedAsDirectory();
     /** @brief 他ユーザが書き換えられる親の下では、入れ替えられた可能性のある
-     *        ディレクトリへmetadataを適用しないことを検証する */
+     *        ディレクトリへmetadataを適用しないことを検証する
+     */
     void untrustedParentRefusesMetadataOnUnprovenDirectories();
     /** @brief 共有親の拒否とprincipal所有親の正常復元を対比する */
     void untrustedParentRefusesMetadataOnUnprovenDirectories_data();
@@ -117,6 +137,12 @@ private slots:
     void vanishedOwnerStillRunsRootSafetyNet();
     /** @brief 退避先の名前が推測できない乱数の接尾辞を持つことを検証する */
     void siblingTemporaryPathIsUnpredictable();
+    /** @brief 同じ所有者のディレクトリを入れ替える攻撃と、拒否してはならない正常系を行ごとに提供する */
+    void sameOwnerDirectorySwapIsRefused_data();
+    /** @brief 所有者以外の利用者が名前を変更できるディレクトリの下では、rootが復元を拒否することを検証する */
+    void sameOwnerDirectorySwapIsRefused();
+    /** @brief 退避の後に元の名前へ戻すことも拒否された場合に、退避物を残して退避名をログに記録することを検証する */
+    void refusedReattachKeepsDetachedEntry();
 
     // --- 例外と入力の検査 ---
     /** @brief 認可済みの本体の想定外の例外がスロットの外へ出ないことを検証する */
@@ -131,8 +157,8 @@ private:
      */
     void installRootSubvolumeSpies(SnapshotOperations &operations);
 
-    int m_readOnlyProbeCalls = 0;
-    int m_readWriteRestoreCalls = 0;
+    int m_readOnlyProbeCalls = 0;      // rootの読み取り専用状態を確認した回数
+    int m_readWriteRestoreCalls = 0;   // rootをrwへ戻した回数
 };
 
 namespace {
@@ -241,12 +267,12 @@ namespace {
     }
 
     /**
-     * @brief 名前付きユーザへ読み取りと検索を許すdefault ACLの、xattrの値を作る
+     * @brief 名前付きユーザへ読み取りと検索を許すdefault ACL(アクセス制御リスト)のxattr(拡張属性)の値を作る
      *
      * 復元先の下にあるディレクトリが、名前付きユーザのエントリを継承する状況を再現するために使う
      * maskをr-xにして、ACLを継承したディレクトリのgroupのビットに書き込みが含まれないようにする
      *
-     * @param namedUser 名前付きユーザのuid (ACLのエントリとして使うだけなので、実在しなくてよい)
+     * @param namedUser 名前付きユーザのUID (ACLのエントリとして使うだけなので、実在しなくてよい)
      * @return system.posix_acl_defaultへ設定する値 (先頭4バイトのヘッダの後に、8バイトのエントリが並ぶ形式)
      */
     QByteArray namedUserDefaultAcl(quint32 namedUser)
@@ -257,7 +283,7 @@ namespace {
         struct AclEntry {
             quint16 tag;   // エントリの種類
             quint16 perm;  // 権限ビット (0から7)
-            quint32 id;    // 名前付きユーザのuid (それ以外のエントリは未定義を表す0xffffffff)
+            quint32 id;    // 名前付きユーザのUID (それ以外のエントリは未定義を表す0xffffffff)
         };
 
         const AclEntry entries[] = {
@@ -358,6 +384,206 @@ namespace {
                 .toUtf8();
     }
 
+    // --- グループの他の利用者が、同じ所有者のディレクトリを入れ替える攻撃の補助 ---
+    // 復元先の所有者(利用者A)と、共有グループを通じて同じディレクトリへ書き込める利用者Bを用意する
+    // Bは自分では読めないAの非公開ディレクトリを、rootが復元する名前の位置へ入れ替えようとする
+
+    constexpr uid_t DIRECTORY_OWNER_UID = 1000;                 // 復元先のディレクトリを所有する利用者AのUID
+    constexpr gid_t DIRECTORY_OWNER_GID = 1000;                 // A専用のグループ(Aだけが属するグループ)のGID
+    constexpr uid_t GROUP_MEMBER_UID = 2000;                    // 共有グループを通じて書き込める利用者BのUID
+    constexpr gid_t SHARED_GROUP_GID = 3000;                    // AとBが共に属する共有グループのGID
+
+    bool privateGroupCheckResult = true;                        // A専用のグループかの判定で、AとA専用のグループの組へ返す値
+    QList<QPair<int, int>> privateGroupCheckIdentities;         // 判定が呼ばれた時点のfsuidとfsgidの記録
+
+    /**
+     * @brief isUserPrivateGroupの代わりに呼ばれ、所有者専用のグループかの判定を差し替えて、呼ばれた時点の識別子を記録する
+     * @param owner ディレクトリの所有者のUID
+     * @param group ディレクトリのグループのGID
+     * @return privateGroupCheckResultが真で、AとA専用のグループの組の場合だけtrue
+     * @note テストを実行するホストのpasswdとgroupの登録に結果を左右されないように、判定の結果をテストの行ごとに固定する
+     *       NSS(Name Service Switch、利用者やグループの名前解決)の問い合わせが、利用者の権限へ切り替えた状態
+     *       (ScopedFsIdentityの中)で行われていないことを確かめるため、fsuidとfsgidを記録する
+     */
+    bool recordingPrivateGroupCheck(uid_t owner, gid_t group)
+    {
+        const int fsuid = ::setfsuid(static_cast<uid_t>(-1));
+        const int fsgid = ::setfsgid(static_cast<gid_t>(-1));
+        privateGroupCheckIdentities.append(qMakePair(fsuid, fsgid));
+        return privateGroupCheckResult && owner == DIRECTORY_OWNER_UID && group == DIRECTORY_OWNER_GID;
+    }
+
+    QString detachWatchedDirectory;                             // 退避名が現れたかを調べるディレクトリ
+
+    /**
+     * @brief 退避名が現れるまではA専用のグループと答え、現れた後はそうでないと答える判定の代わり
+     * @param owner ディレクトリの所有者のUID
+     * @param group ディレクトリのグループのGID
+     * @return AとA専用のグループの組で、detachWatchedDirectoryにまだ退避名が無い場合だけtrue
+     * @note 種別の変更で既存のエントリを退避した直後に、親のディレクトリが共有へ変わった状況を作る
+     *       退避の後の適用と、退避物を元の名前へ戻すrenameの両方を拒否させ、退避物を残す経路を通すためである
+     *       recordingPrivateGroupCheckと同じく、呼ばれた時点のfsuidとfsgidを記録する
+     */
+    bool privateUntilDetached(uid_t owner, gid_t group)
+    {
+        const int fsuid = ::setfsuid(static_cast<uid_t>(-1));
+        const int fsgid = ::setfsgid(static_cast<gid_t>(-1));
+        privateGroupCheckIdentities.append(qMakePair(fsuid, fsgid));
+        if (owner != DIRECTORY_OWNER_UID || group != DIRECTORY_OWNER_GID) {
+            return false;
+        }
+        const QStringList detached = QDir(detachWatchedDirectory).entryList(
+            {QStringLiteral(".entry.qsnapper-old.*")},
+            QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+        return detached.isEmpty();
+    }
+
+    /**
+     * @brief 子プロセスを利用者Bとして動かし、関数の戻り値を終了コードとして返す
+     * @param groups Bの補助グループ
+     * @param operation Bとして実行する処理 (成功時は0を返す)
+     * @return 処理の戻り値、識別子の切り替えに失敗した場合は200、異常終了の場合は201
+     * @note 親のテストプロセスの識別子を変えないように、fork後の子プロセスだけで切り替える
+     */
+    int runAsGroupMember(const std::vector<gid_t> &groups, const std::function<int()> &operation)
+    {
+        const pid_t child = ::fork();
+        if (child < 0) {
+            return 201;
+        }
+        if (child == 0) {
+            if (::setgroups(groups.size(), groups.data()) != 0
+                || ::setresgid(SHARED_GROUP_GID, SHARED_GROUP_GID, SHARED_GROUP_GID) != 0
+                || ::setresuid(GROUP_MEMBER_UID, GROUP_MEMBER_UID, GROUP_MEMBER_UID) != 0) {
+                ::_exit(200);
+            }
+            ::_exit(operation());
+        }
+        int status = 0;
+        if (::waitpid(child, &status, 0) != child || !WIFEXITED(status)) {
+            return 201;
+        }
+        return WEXITSTATUS(status);
+    }
+
+    /**
+     * @brief 所有者とmodeを設定する
+     * @param path 対象のパス
+     * @param owner 所有者
+     * @param group グループ
+     * @param mode 設定するmode
+     * @return 両方に成功した場合true
+     */
+    bool setOwnerAndMode(const QString &path, uid_t owner, gid_t group, mode_t mode)
+    {
+        const QByteArray encoded = QFile::encodeName(path);
+        return ::chown(encoded.constData(), owner, group) == 0
+               && ::chmod(encoded.constData(), mode) == 0;
+    }
+
+    /**
+     * @brief ディレクトリを作成し、所有者とmodeを設定する
+     * @param path 作成するディレクトリ
+     * @param owner 所有者
+     * @param group グループ
+     * @param mode 設定するmode
+     * @return 作成と設定に成功した場合true
+     */
+    bool createOwnedDirectory(const QString &path, uid_t owner, gid_t group, mode_t mode)
+    {
+        return QDir().mkpath(path) && setOwnerAndMode(path, owner, group, mode);
+    }
+
+    /**
+     * @brief ファイルを作成し、所有者とmodeを設定する
+     * @param path 作成するファイル
+     * @param content ファイルの内容
+     * @param mode 設定するmode
+     * @return 作成と設定に成功した場合true
+     */
+    bool createOwnedFile(const QString &path, const QByteArray &content, mode_t mode)
+    {
+        return writeFile(path, content) && setOwnerAndMode(path, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, mode);
+    }
+
+    /**
+     * @brief シンボリックリンクをたどらずにinode番号を取得する
+     * @param path 対象のパス
+     * @return inode番号、取得に失敗した場合は0
+     */
+    ino_t inodeOf(const QString &path)
+    {
+        struct stat info {};
+        if (::lstat(QFile::encodeName(path).constData(), &info) != 0) {
+            return 0;
+        }
+        return info.st_ino;
+    }
+
+    /**
+     * @brief シンボリックリンクをたどらずにmodeの権限部分を取得する
+     * @param path 対象のパス
+     * @return 権限部分のmode、取得に失敗した場合は-1
+     */
+    int permissionBitsOf(const QString &path)
+    {
+        struct stat info {};
+        if (::lstat(QFile::encodeName(path).constData(), &info) != 0) {
+            return -1;
+        }
+        return static_cast<int>(info.st_mode & 07777);
+    }
+
+    /**
+     * @brief 名前付き利用者を1人含むアクセスACLのxattrの値を組み立てる
+     * @param namedUser 名前付き利用者のUID
+     * @param namedPermission 名前付き利用者の権限 (rwxを0から7で表す)
+     * @param maskPermission maskの権限 (rwxを0から7で表す)
+     * @return system.posix_acl_accessへ設定するバイト列
+     * @note 設定するとmodeのグループの桁がmaskの値になるため、ls上のmodeとACLの実効権限の両方を作れる
+     */
+    QByteArray namedUserAccessAcl(quint32 namedUser, quint16 namedPermission, quint16 maskPermission)
+    {
+        struct AclEntry {
+            quint16 tag;                                // ACLのタグ
+            quint16 permission;                         // rwxの権限
+            quint32 id;                                 // UIDまたはGID
+        };
+        const AclEntry entries[] = {
+            {0x01, 7, 0xffffffffU},
+            {0x02, namedPermission, namedUser},
+            {0x04, 5, 0xffffffffU},
+            {0x10, maskPermission, 0xffffffffU},
+            {0x20, 0, 0xffffffffU},
+        };
+        QByteArray value;
+        const auto appendLittleEndian = [&value](quint32 number, int byteCount) {
+            for (int index = 0; index < byteCount; ++index) {
+                value.append(static_cast<char>((number >> (8 * index)) & 0xff));
+            }
+        };
+        appendLittleEndian(2, 4);
+        for (const AclEntry &entry : entries) {
+            appendLittleEndian(entry.tag, 2);
+            appendLittleEndian(entry.permission, 2);
+            appendLittleEndian(entry.id, 4);
+        }
+        return value;
+    }
+
+    /**
+     * @brief ディレクトリの中の名前を並べ替えて返す
+     * @param path 対象のディレクトリ
+     * @return 隠しファイルを含む名前の一覧
+     */
+    QStringList sortedEntryNames(const QString &path)
+    {
+        QStringList names = QDir(path).entryList(QDir::AllEntries | QDir::NoDotAndDotDot
+                                                 | QDir::Hidden | QDir::System);
+        names.sort();
+        return names;
+    }
+
 }
 
 /** @brief 元の名前を守る拒否と、退避物を保存してFailedを返す拒否を区別する */
@@ -427,18 +653,34 @@ void TestSnapshotOperations::typechangedGuardsForeignDirectories()
     operations.finishRestorePlanForTesting(manifestId, qsnapper::restore::ManifestState::Failed);
 }
 
+/**
+ * @brief 各テストの前に、root操作の観測回数を0へ戻す
+ *
+ * テスト関数は同じインスタンスで続けて実行されるため、前のテストの観測結果を持ち越さない
+ */
 void TestSnapshotOperations::init()
 {
     m_readOnlyProbeCalls = 0;
     m_readWriteRestoreCalls = 0;
 }
 
+/**
+ * @brief 各テストの終了時に、metadata適用のテスト用フックを解除する
+ *
+ * フックはプロセス全体で共有されるため、解除しないと次のテストの結果が前のテストの設定に左右される
+ */
 void TestSnapshotOperations::cleanup()
 {
     // テスト関数がQVERIFYなどの失敗で途中で戻った場合でも、フックの設定が次のテストへ残らないよう、各テストの終了時に解除する
     qsnapper::security::detail::clearMetadataTestHooksForTesting();
 }
 
+/**
+ * @brief rootサブボリュームへの操作を観測する差し替え関数を設定する
+ * @param operations 対象のSnapshotOperations
+ *
+ * 実システムのsubvolumeに触れず、読み取り専用の確認とrwへの復帰が呼ばれた回数を記録する
+ */
 void TestSnapshotOperations::installRootSubvolumeSpies(SnapshotOperations &operations)
 {
     operations.setRootSubvolumeAccessForTesting(
@@ -453,6 +695,11 @@ void TestSnapshotOperations::installRootSubvolumeSpies(SnapshotOperations &opera
         });
 }
 
+/**
+ * @brief 計画の作成と取り消しだけでは、rootサブボリュームをrwへ変えないことを検証する
+ *
+ * 実行前は差分の閲覧だけを認めるため、view-diffの認可だけでrootの状態が変わる経路があってはならない
+ */
 void TestSnapshotOperations::beginThenCancelDoesNotTouchRootSubvolume()
 {
     SnapshotOperations operations;
@@ -548,7 +795,7 @@ void TestSnapshotOperations::beginRestorePlanRequiresAuthorization()
                  QStringLiteral("staging"));
     }
 
-    // 上限を超える1件で、認可済みの最も古い計画が破棄されることから、上記の検出が有効であることを示す
+    // 上限を超える1件を作ると認可済みの最も古い計画が破棄されるため、この破棄の有無で拒否時の枠の消費を検出できる
     QVERIFY(!operations.BeginRestorePlan(QStringLiteral("root"), 1, 0, QStringLiteral("direct")).isEmpty());
     QCOMPARE(finishedSpy.count(), 1);
     QCOMPARE(finishedSpy.at(0).at(0).toString(), plans.first());
@@ -679,6 +926,11 @@ void TestSnapshotOperations::runningRestoreBlocksConfigOperations()
     QVERIFY(!operations.hasUnfinishedRestorePlanForTesting(QStringLiteral("root")));
 }
 
+/**
+ * @brief 小さな差分では、従来どおりunified形式の差分を返すことを検証する
+ *
+ * 資源の上限を加えても、設定ファイル程度の変更は省略されずに読める
+ */
 void TestSnapshotOperations::diffStillProducesUnifiedOutputForSmallChanges()
 {
     QTemporaryDir tempDir;
@@ -699,6 +951,11 @@ void TestSnapshotOperations::diffStillProducesUnifiedOutputForSmallChanges()
     QVERIFY(same.omittedReason.isEmpty());
 }
 
+/**
+ * @brief 片方がバイナリの場合、内容を差分へ載せずbinaryの理由で省略することを検証する
+ *
+ * 制御文字を含む内容をそのまま差分へ載せると、表示側やログが壊れる
+ */
 void TestSnapshotOperations::diffOmitsBinaryFiles()
 {
     QTemporaryDir tempDir;
@@ -713,6 +970,9 @@ void TestSnapshotOperations::diffOmitsBinaryFiles()
     QCOMPARE(result.omittedReason, QStringLiteral("binary"));
 }
 
+/**
+ * @brief ファイルサイズが既定の上限を超える場合に、too_largeの理由で省略することを検証する
+ */
 void TestSnapshotOperations::diffOmitsTooLargeFiles()
 {
     QTemporaryDir tempDir;
@@ -729,6 +989,9 @@ void TestSnapshotOperations::diffOmitsTooLargeFiles()
     QCOMPARE(result.omittedReason, QStringLiteral("too_large"));
 }
 
+/**
+ * @brief 行数が上限を超える場合に、too_largeの理由で省略することを検証する
+ */
 void TestSnapshotOperations::diffOmitsFilesWithTooManyLines()
 {
     QTemporaryDir tempDir;
@@ -745,6 +1008,11 @@ void TestSnapshotOperations::diffOmitsFilesWithTooManyLines()
     QCOMPARE(result.omittedReason, QStringLiteral("too_large"));
 }
 
+/**
+ * @brief FIFOを差分の対象にしても開かず、special_fileの理由で省略することを検証する
+ *
+ * 書き込み側のいないFIFOを開くと、差分の生成が永久にブロックする
+ */
 void TestSnapshotOperations::diffDoesNotOpenFifo()
 {
     QTemporaryDir tempDir;
@@ -768,6 +1036,11 @@ void TestSnapshotOperations::diffDoesNotOpenFifo()
     QCOMPARE(errno, EINVAL);
 }
 
+/**
+ * @brief 作業領域と探索ステップ数の上限を超える差分を、too_many_changesの理由で省略することを検証する
+ *
+ * どちらの上限でも打ち切られることと、既定の上限の範囲内では同じ入力の差分を生成できることを併せて確認する
+ */
 void TestSnapshotOperations::diffOmitsTooManyChanges()
 {
     QTemporaryDir tempDir;
@@ -797,6 +1070,11 @@ void TestSnapshotOperations::diffOmitsTooManyChanges()
     QVERIFY(result.text.contains(QStringLiteral("@@ -1,2000 +1,2000 @@")));
 }
 
+/**
+ * @brief 編集距離が最大になる入力でも、既定の上限で打ち切って短時間で戻ることを検証する
+ *
+ * 差分の計算量は入力の組み合わせで急増するため、上限がなければサービスが応答しなくなる
+ */
 void TestSnapshotOperations::diffWithDefaultLimitsReturnsQuicklyOnPathologicalInput()
 {
     QTemporaryDir tempDir;
@@ -846,6 +1124,12 @@ namespace {
 
 }
 
+/**
+ * @brief btrfs以外の書き込み可能なディレクトリを、復元元として受け入れないことを検証する
+ *
+ * 復元元が書き換わると、復元の途中で内容と所有者の前提が崩れる
+ * btrfsと申告されてもsubvolumeとして確認できなければ受け入れないため、その場合も併せて確認する
+ */
 void TestSnapshotOperations::writableDirectoryIsNotReadOnlyRestoreSource()
 {
     QTemporaryDir tempDir;
@@ -859,6 +1143,12 @@ void TestSnapshotOperations::writableDirectoryIsNotReadOnlyRestoreSource()
     ::close(dirFd);
 }
 
+/**
+ * @brief btrfsでは読み取り専用フラグの立ったsubvolumeだけを復元元として受け入れることを検証する
+ *
+ * 書き込み可能なsubvolumeはrollbackのwritable copy(書き込み可能な複製)に相当し、復元の途中で書き換わり得る
+ * HOMEがbtrfsでない場合やsubvolumeを作れない場合は、前提を用意できないためテストをスキップする
+ */
 void TestSnapshotOperations::btrfsSubvolumeReadOnlyFlagIsRequired()
 {
     const QString base = QDir::homePath();
@@ -907,6 +1197,12 @@ void TestSnapshotOperations::btrfsSubvolumeReadOnlyFlagIsRequired()
     }
 }
 
+/**
+ * @brief btrfs以外では、読み取り専用でmountされたファイルシステムを復元元として受け入れることを検証する
+ *
+ * 非特権の利用者とmount名前空間の中で読み取り専用のtmpfsをmountし、実システムのmount設定に依存せず確認する
+ * btrfsと申告された場合はsubvolumeの確認を通らないため、同じtmpfsでも受け入れないことを併せて確認する
+ */
 void TestSnapshotOperations::readOnlyMountIsAcceptedForNonBtrfs()
 {
     QTemporaryDir tempDir;
@@ -1358,6 +1654,7 @@ void TestSnapshotOperations::directoryMetadataFollowsChainOwnership_data()
     QTest::newRow("ix-readonly-principal-parent") << QStringLiteral("home/alice/new") << 1000 << 0555 << -1 << 1000 << 0750 << EACCES << false;
     QTest::newRow("x-identity-restored") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 1000 << 0700 << 0 << false;
     QTest::newRow("xi-principal-group-writable") << QStringLiteral("home/alice/grp/x") << 1000 << 0755 << -1 << 1000 << 0775 << 0 << false;
+    QTest::newRow("xi-principal-group-writable-non-upg") << QStringLiteral("home/alice/grp/x") << 1000 << 0755 << -1 << 1000 << 0775 << EPERM << false;
     QTest::newRow("source-foreign-refused-before-mkdir") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 2000 << 02775 << EPERM << false;
     QTest::newRow("principal-root-source-refused") << QStringLiteral("home/alice/new") << 1000 << 0755 << -1 << 0 << 04755 << EPERM << false;
 }
@@ -1420,6 +1717,12 @@ void TestSnapshotOperations::directoryMetadataFollowsChainOwnership()
     struct stat before {};
     if (targetUid >= 0) {
         QCOMPARE(::lstat(QFile::encodeName(target).constData(), &before), 0);
+    }
+    // grpのグループ1000を、xiでは所有者専用のグループ(UPG、user private group)、non-upgではそうでないとフックで固定し、ホストのNSSに結果を左右させない
+    if (relative.contains(QStringLiteral("/grp/"))) {
+        privateGroupCheckResult = QByteArray(QTest::currentDataTag()) == "xi-principal-group-writable";
+        privateGroupCheckIdentities.clear();
+        qsnapper::security::detail::setUserPrivateGroupCheckForTesting(&recordingPrivateGroupCheck);
     }
     SnapshotOperations operations;
     const QString manifestId = QStringLiteral("chain-policy");
@@ -1693,6 +1996,401 @@ void TestSnapshotOperations::vanishedOwnerStillRunsRootSafetyNet()
 
     QCOMPARE(restoreCalls, 1);
     QVERIFY(operations.GetRestorePlanStatus(planId).isEmpty());
+}
+
+/**
+ * @brief 同じ所有者のディレクトリを入れ替える攻撃と、拒否してはならない正常系を行ごとに提供する
+ *
+ * expectAppliedが偽の行は、修正前はApplied、修正後はEPERMによるFailedになる攻撃の行である
+ * expectAppliedが真の行は、修正の前後でAppliedのままでなければならない正常系の行である
+ */
+void TestSnapshotOperations::sameOwnerDirectorySwapIsRefused_data()
+{
+    QTest::addColumn<QString>("entryPath");
+    QTest::addColumn<QString>("changeType");
+    QTest::addColumn<bool>("ownerGroupIsPrivate");
+    QTest::addColumn<bool>("expectApplied");
+
+    QTest::newRow("s1-exchange-0770") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << false;
+    QTest::newRow("s2-file-0770") << QStringLiteral("/team/public/index.html") << QStringLiteral("modified") << true << false;
+    QTest::newRow("s3-created-0770") << QStringLiteral("/team/cache") << QStringLiteral("created") << true << false;
+    QTest::newRow("s1-acl") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << false;
+    QTest::newRow("s1-upg-0775-with-member") << QStringLiteral("/team/public") << QStringLiteral("modified") << false << false;
+    QTest::newRow("sticky-smuggle") << QStringLiteral("/team/public/private") << QStringLiteral("modified") << true << false;
+    QTest::newRow("symlink-0770") << QStringLiteral("/team/public/link") << QStringLiteral("deleted") << true << false;
+    QTest::newRow("typechanged-0770") << QStringLiteral("/team/public/entry") << QStringLiteral("typechanged") << true << false;
+    QTest::newRow("parent-create-shared") << QStringLiteral("/team/public/sub/file") << QStringLiteral("deleted") << true << false;
+    QTest::newRow("delete-mid-tree") << QStringLiteral("/team/cache") << QStringLiteral("created") << true << false;
+    QTest::newRow("base-ancestor") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << false;
+    QTest::newRow("base-owner-break") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << false;
+    QTest::newRow("dir-times-swap") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << true;
+    QTest::newRow("leaf-shared-mode") << QStringLiteral("/team/shared") << QStringLiteral("modified") << true << true;
+    QTest::newRow("acl-masked") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << true;
+    QTest::newRow("upg-0775") << QStringLiteral("/team/public") << QStringLiteral("modified") << true << true;
+}
+
+/**
+ * @brief 所有者以外の利用者が名前を変更できるディレクトリの下では、rootが復元を拒否することを検証する
+ *
+ * 攻撃の行では、Bが復元の対象を直接変更できないことと、Bの入れ替えが成功したことを先に確かめる
+ * その上で、復元がEPERMで失敗し、入れ替えで差し込まれたAの非公開ディレクトリが変わらないことを確かめる
+ * 復元元の木は全ての行でAが所有し、rootが所有する復元元を拒否する既存の規則に結果を左右させない
+ */
+void TestSnapshotOperations::sameOwnerDirectorySwapIsRefused()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to change directory owners and to act as another user");
+    }
+    QFETCH(QString, entryPath);
+    QFETCH(QString, changeType);
+    QFETCH(bool, ownerGroupIsPrivate);
+    QFETCH(bool, expectApplied);
+    const QByteArray scenario(QTest::currentDataTag());
+
+    // ホストのNSSに左右されないように、所有者専用のグループかどうかの判定をフックで固定する
+    privateGroupCheckResult = ownerGroupIsPrivate;
+    privateGroupCheckIdentities.clear();
+    qsnapper::security::detail::setUserPrivateGroupCheckForTesting(&recordingPrivateGroupCheck);
+
+    ApplyFixture fixture;
+    QVERIFY(fixture.setUp());
+    const QString base = fixture.root.path();
+    QVERIFY(setOwnerAndMode(base, 0, 0, 0755));
+    QVERIFY(setOwnerAndMode(fixture.livePath, 0, 0, 0755));
+    const QString liveTeam = fixture.livePath + QStringLiteral("/team");
+    const QString sourceTeam = fixture.sourcePath + QStringLiteral("/team");
+    const QString sourcePublic = sourceTeam + QStringLiteral("/public");
+
+    // 復元元の木は全てAが所有する
+    QVERIFY(createOwnedDirectory(sourceTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+    QVERIFY(createOwnedDirectory(sourcePublic, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+    QVERIFY(createOwnedFile(sourcePublic + QStringLiteral("/index.html"), "PUBLIC-SNAPSHOT\n", 0644));
+
+    const auto makeVictim = [](const QString &path) {
+        return createOwnedDirectory(path, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0700)
+               && createOwnedFile(path + QStringLiteral("/secret"), "SECRET\n", 0600)
+               && createOwnedFile(path + QStringLiteral("/index.html"), "PRIVATE-INDEX\n", 0600);
+    };
+    const auto exchangeNames = [](const QString &first, const QString &second) {
+        const QByteArray firstName = QFile::encodeName(first);
+        const QByteArray secondName = QFile::encodeName(second);
+        return std::function<int()>([firstName, secondName]() {
+            return ::renameat2(AT_FDCWD, firstName.constData(), AT_FDCWD, secondName.constData(),
+                               RENAME_EXCHANGE) == 0 ? 0 : errno;
+        });
+    };
+    const auto renameName = [](const QString &from, const QString &to) {
+        const QByteArray fromName = QFile::encodeName(from);
+        const QByteArray toName = QFile::encodeName(to);
+        return [fromName, toName]() {
+            return ::rename(fromName.constData(), toName.constData()) == 0 ? 0 : errno;
+        };
+    };
+
+    QString victim;                                     // 攻撃の前のAの非公開ディレクトリ
+    QString victimAfter;                                // 攻撃の後に非公開ディレクトリが現れる名前
+    QStringList victimEntries = {QStringLiteral("index.html"), QStringLiteral("secret")};
+    std::vector<gid_t> memberGroups = {SHARED_GROUP_GID};
+    std::function<int()> attack;
+
+    const QSet<QByteArray> exchangeScenarios = {
+        "s1-exchange-0770", "s2-file-0770", "s3-created-0770", "s1-acl", "s1-upg-0775-with-member",
+        "symlink-0770", "typechanged-0770", "parent-create-shared",
+    };
+    if (exchangeScenarios.contains(scenario)) {
+        // Bがpublicとprivateを入れ替え、Aの非公開ディレクトリを復元の経路へ差し込む
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QVERIFY(createOwnedDirectory(liveTeam + QStringLiteral("/public"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0750));
+        QVERIFY(createOwnedFile(liveTeam + QStringLiteral("/public/index.html"), "PUBLIC-LIVE\n", 0644));
+        victim = liveTeam + QStringLiteral("/private");
+        QVERIFY(makeVictim(victim));
+        victimAfter = liveTeam + QStringLiteral("/public");
+        attack = exchangeNames(liveTeam + QStringLiteral("/public"), victim);
+
+        if (scenario == "s3-created-0770") {
+            // cacheを退かしてから非公開ディレクトリをcacheへ移し、復元によるcacheの削除を非公開ディレクトリへ向ける
+            const QString cache = liveTeam + QStringLiteral("/cache");
+            QVERIFY(createOwnedDirectory(cache, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0700));
+            victimAfter = cache;
+            const auto moveCache = renameName(cache, cache + QStringLiteral(".moved"));
+            const auto moveVictim = renameName(victim, cache);
+            attack = [moveCache, moveVictim]() {
+                const int result = moveCache();
+                return result != 0 ? result : moveVictim();
+            };
+        }
+        else if (scenario == "symlink-0770") {
+            const QByteArray link = QFile::encodeName(sourcePublic + QStringLiteral("/link"));
+            QCOMPARE(::symlink("index.html", link.constData()), 0);
+            QCOMPARE(::lchown(link.constData(), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID), 0);
+        }
+        else if (scenario == "typechanged-0770") {
+            QVERIFY(createOwnedFile(liveTeam + QStringLiteral("/public/entry"), "PUBLIC-ENTRY\n", 0644));
+            QVERIFY(createOwnedFile(victim + QStringLiteral("/entry"), "PRIVATE-ENTRY\n", 0600));
+            QVERIFY(createOwnedDirectory(sourcePublic + QStringLiteral("/entry"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+            victimEntries = {QStringLiteral("entry"), QStringLiteral("index.html"), QStringLiteral("secret")};
+        }
+        else if (scenario == "parent-create-shared") {
+            QVERIFY(createOwnedDirectory(sourcePublic + QStringLiteral("/sub"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+            QVERIFY(createOwnedFile(sourcePublic + QStringLiteral("/sub/file"), "SUB-FILE\n", 0644));
+        }
+
+        if (scenario == "s1-acl") {
+            // modeは0750のまま、名前付き利用者BへACLでrwxを与え、modeのグループの桁をmaskの0770にする
+            QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0750));
+            const QByteArray acl = namedUserAccessAcl(GROUP_MEMBER_UID, 7, 7);
+            QCOMPARE(::setxattr(QFile::encodeName(liveTeam).constData(), "system.posix_acl_access",
+                                acl.constData(), static_cast<size_t>(acl.size()), 0), 0);
+            QCOMPARE(permissionBitsOf(liveTeam), 0770);
+        }
+        else if (scenario == "s1-upg-0775-with-member") {
+            // 所有者専用のグループに見えるがBも属するグループのため、フックは所有者専用ではないと答える
+            QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0775));
+            memberGroups = {SHARED_GROUP_GID, DIRECTORY_OWNER_GID};
+        }
+        else {
+            QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 0770));
+        }
+    }
+    else if (scenario == "sticky-smuggle") {
+        // stickyのteamでは同じ親での入れ替えが止まるため、別の共有ディレクトリから非公開ディレクトリを箱ごと持ち込む
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        const QString staging = fixture.livePath + QStringLiteral("/staging");
+        QVERIFY(createOwnedDirectory(staging, DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 0770));
+        QVERIFY(createOwnedDirectory(staging + QStringLiteral("/box"), DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 01770));
+        victim = staging + QStringLiteral("/box/private");
+        QVERIFY(makeVictim(victim));
+        QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 01770));
+        victimAfter = liveTeam + QStringLiteral("/public/private");
+        attack = renameName(staging + QStringLiteral("/box"), liveTeam + QStringLiteral("/public"));
+        QVERIFY(createOwnedDirectory(sourcePublic + QStringLiteral("/private"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+    }
+    else if (scenario == "base-ancestor" || scenario == "base-owner-break") {
+        // 復元先の根であるliveそのものを、Bが非公開ディレクトリと入れ替える
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QVERIFY(createOwnedDirectory(liveTeam + QStringLiteral("/public"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0750));
+        victim = base + QStringLiteral("/private");
+        QVERIFY(makeVictim(victim));
+        victimAfter = fixture.livePath;
+        attack = exchangeNames(fixture.livePath, victim);
+        if (scenario == "base-ancestor") {
+            QVERIFY(setOwnerAndMode(fixture.livePath, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+            QVERIFY(setOwnerAndMode(base, DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 0770));
+        }
+        else {
+            QVERIFY(setOwnerAndMode(fixture.livePath, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0700));
+            QVERIFY(setOwnerAndMode(base, GROUP_MEMBER_UID, GROUP_MEMBER_UID, 0755));
+        }
+    }
+    else if (scenario == "delete-mid-tree") {
+        // 削除の途中で降りるbだけが、共有グループの利用者にも名前の変更を許している
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        const QString cache = liveTeam + QStringLiteral("/cache");
+        QVERIFY(createOwnedDirectory(cache, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0700));
+        QVERIFY(createOwnedDirectory(cache + QStringLiteral("/a"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0700));
+        QVERIFY(createOwnedFile(cache + QStringLiteral("/a/file"), "A\n", 0600));
+        QVERIFY(createOwnedDirectory(cache + QStringLiteral("/b"), DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 0770));
+        QVERIFY(createOwnedFile(cache + QStringLiteral("/b/file"), "B\n", 0600));
+    }
+    else if (scenario == "leaf-shared-mode") {
+        // 復元の対象そのものが共有のmodeになるだけで、親は安全なので拒否しない
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QVERIFY(createOwnedDirectory(liveTeam + QStringLiteral("/shared"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QVERIFY(createOwnedDirectory(sourceTeam + QStringLiteral("/shared"), DIRECTORY_OWNER_UID, SHARED_GROUP_GID, 0770));
+    }
+    else {
+        QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QVERIFY(createOwnedDirectory(liveTeam + QStringLiteral("/public"), DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0750));
+        if (scenario == "acl-masked") {
+            // 名前付き利用者Bのrwxをmaskのr-xで打ち消し、modeのグループの桁を書き込み不可の0750にする
+            QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0750));
+            const QByteArray acl = namedUserAccessAcl(GROUP_MEMBER_UID, 7, 5);
+            QCOMPARE(::setxattr(QFile::encodeName(liveTeam).constData(), "system.posix_acl_access",
+                                acl.constData(), static_cast<size_t>(acl.size()), 0), 0);
+            QCOMPARE(permissionBitsOf(liveTeam), 0750);
+        }
+        else if (scenario == "upg-0775") {
+            QVERIFY(setOwnerAndMode(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0775));
+        }
+    }
+
+    // 復元元のディレクトリの時刻は、中身を作り終えた後に固定する
+    const struct timespec sourceTimes[2] = {{1000000000, 0}, {1000000000, 0}};
+    QCOMPARE(::utimensat(AT_FDCWD, QFile::encodeName(sourcePublic).constData(), sourceTimes,
+                         AT_SYMLINK_NOFOLLOW), 0);
+
+    ino_t victimInode = 0;
+    if (attack) {
+        // Bが非公開ディレクトリを直接は読めず、変更もできないことを先に確かめる
+        const QByteArray victimName = QFile::encodeName(victim);
+        const QByteArray victimIndex = QFile::encodeName(victim + QStringLiteral("/index.html"));
+        QCOMPARE(runAsGroupMember(memberGroups, [victimName, victimIndex]() {
+            if (::open(victimName.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) >= 0) {
+                return 1;
+            }
+            if (::chmod(victimName.constData(), 0777) == 0) {
+                return 2;
+            }
+            if (::open(victimIndex.constData(), O_WRONLY | O_CLOEXEC) >= 0) {
+                return 3;
+            }
+            return 0;
+        }), 0);
+        victimInode = inodeOf(victim);
+        QVERIFY(victimInode != 0);
+    }
+
+    SnapshotOperations operations;
+    const QString manifestId = QStringLiteral("same-owner-swap");
+    QVERIFY(fixture.begin(operations, manifestId, false));
+    if (attack) {
+        QCOMPARE(runAsGroupMember(memberGroups, attack), 0);
+        QCOMPARE(inodeOf(victimAfter), victimInode);
+    }
+
+    errno = 0;
+    const auto outcome = operations.applyRestoreEntryForTesting(manifestId, {entryPath, changeType});
+    const int applyError = errno;
+    // 成功と失敗のどちらでもidentityを戻し、次のroot操作に権限状態を持ち越さない
+    QCOMPARE(::setfsuid(static_cast<uid_t>(-1)), 0);
+    QCOMPARE(::setfsgid(static_cast<gid_t>(-1)), 0);
+
+    ino_t swappedInode = 0;
+    const struct timespec swappedTimes[2] = {{1100000000, 0}, {1100000000, 0}};
+    if (scenario == "dir-times-swap") {
+        // 時刻の反映の前に、復元したディレクトリを別のinodeへ差し替える
+        const QString restored = liveTeam + QStringLiteral("/public");
+        QCOMPARE(::rename(QFile::encodeName(restored).constData(),
+                          QFile::encodeName(restored + QStringLiteral(".orig")).constData()), 0);
+        QVERIFY(createOwnedDirectory(restored, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+        QCOMPARE(::utimensat(AT_FDCWD, QFile::encodeName(restored).constData(), swappedTimes,
+                             AT_SYMLINK_NOFOLLOW), 0);
+        swappedInode = inodeOf(restored);
+    }
+    operations.finishRestorePlanForTesting(
+        manifestId, outcome == qsnapper::restore::RestoreEntryOutcome::Applied
+                        ? qsnapper::restore::ManifestState::Completed
+                        : qsnapper::restore::ManifestState::Failed);
+
+    // 所有者専用のグループかどうかの判定は、ScopedFsIdentityの外でrootの識別子のまま行われなければならない
+    qInfo("user private group checks: %lld", static_cast<long long>(privateGroupCheckIdentities.size()));
+    // groupが書き込めてACLの無い行だけは判定まで必ず到達するため、記録が空のまま下のループを素通りさせない
+    // ACLで先に拒否する行や、groupが書き込めない行では判定が呼ばれないので要求しない
+    if (scenario == "upg-0775" || scenario == "s1-upg-0775-with-member") {
+        QVERIFY(!privateGroupCheckIdentities.isEmpty());
+    }
+    for (const auto &identity : std::as_const(privateGroupCheckIdentities)) {
+        QCOMPARE(identity.first, 0);
+        QCOMPARE(identity.second, 0);
+    }
+
+    QCOMPARE(outcome, expectApplied ? qsnapper::restore::RestoreEntryOutcome::Applied
+                                    : qsnapper::restore::RestoreEntryOutcome::Failed);
+    if (!expectApplied) {
+        QCOMPARE(applyError, EPERM);
+    }
+
+    if (attack) {
+        QCOMPARE(inodeOf(victimAfter), victimInode);
+        QCOMPARE(permissionBitsOf(victimAfter), 0700);
+        QCOMPARE(sortedEntryNames(victimAfter), victimEntries);
+        QCOMPARE(readFile(victimAfter + QStringLiteral("/secret")), QByteArray("SECRET\n"));
+        QCOMPARE(readFile(victimAfter + QStringLiteral("/index.html")), QByteArray("PRIVATE-INDEX\n"));
+        if (scenario == "typechanged-0770") {
+            const QFileInfo entry(victimAfter + QStringLiteral("/entry"));
+            QVERIFY(entry.isFile() && !entry.isSymLink());
+            QCOMPARE(readFile(entry.filePath()), QByteArray("PRIVATE-ENTRY\n"));
+        }
+    }
+    else if (scenario == "delete-mid-tree") {
+        const QString cache = liveTeam + QStringLiteral("/cache");
+        QVERIFY(QFileInfo::exists(cache + QStringLiteral("/b/file")));
+        qInfo("delete-mid-tree: a %s", QFileInfo::exists(cache + QStringLiteral("/a")) ? "remains" : "was removed");
+    }
+    else if (scenario == "dir-times-swap") {
+        struct stat swapped {};
+        QCOMPARE(::lstat(QFile::encodeName(liveTeam + QStringLiteral("/public")).constData(), &swapped), 0);
+        QCOMPARE(swapped.st_ino, swappedInode);
+        QCOMPARE(static_cast<long long>(swapped.st_mtim.tv_sec), 1100000000LL);
+    }
+    else if (scenario == "leaf-shared-mode") {
+        struct stat shared {};
+        QCOMPARE(::lstat(QFile::encodeName(liveTeam + QStringLiteral("/shared")).constData(), &shared), 0);
+        QCOMPARE(static_cast<int>(shared.st_mode & 07777), 0770);
+        QCOMPARE(shared.st_gid, SHARED_GROUP_GID);
+    }
+    else {
+        QCOMPARE(permissionBitsOf(liveTeam + QStringLiteral("/public")), 0755);
+    }
+}
+
+/**
+ * @brief 種別の変更で退避した後に、適用と元の名前へ戻す処理の両方が拒否された場合の後始末を検証する
+ *
+ * 退避の後に親のディレクトリが、所有者以外の利用者も名前を変更できる状態へ変わった状況を、判定のフックで作る
+ * 戻すrenameも拒否されるため、退避物は退避名のまま残り、管理者が復旧できるようにその名前がログに記録されなければならない
+ */
+void TestSnapshotOperations::refusedReattachKeepsDetachedEntry()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Requires root to change directory owners");
+    }
+    ApplyFixture fixture;
+    QVERIFY(fixture.setUp());
+    QVERIFY(setOwnerAndMode(fixture.root.path(), 0, 0, 0755));
+    QVERIFY(setOwnerAndMode(fixture.livePath, 0, 0, 0755));
+
+    // liveでは通常ファイル、スナップショットではディレクトリとし、適用の前に既存のファイルを退避させる
+    const QString liveTeam = fixture.livePath + QStringLiteral("/team");
+    const QString liveEntry = liveTeam + QStringLiteral("/entry");
+    QVERIFY(createOwnedDirectory(liveTeam, DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0775));
+    QVERIFY(createOwnedFile(liveEntry, "LIVE-ENTRY", 0644));
+    const ino_t entryInode = inodeOf(liveEntry);
+    QVERIFY(entryInode != 0);
+    QVERIFY(createOwnedDirectory(fixture.sourcePath + QStringLiteral("/team"),
+                                 DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+    QVERIFY(createOwnedDirectory(fixture.sourcePath + QStringLiteral("/team/entry"),
+                                 DIRECTORY_OWNER_UID, DIRECTORY_OWNER_GID, 0755));
+
+    // 退避名が現れるまでは0775をA専用のグループとして許可し、現れた後は共有として拒否させる
+    privateGroupCheckIdentities.clear();
+    detachWatchedDirectory = liveTeam;
+    qsnapper::security::detail::setUserPrivateGroupCheckForTesting(&privateUntilDetached);
+
+    SnapshotOperations operations;
+    const QString manifestId = QStringLiteral("refused-reattach");
+    QVERIFY(fixture.begin(operations, manifestId, false));
+    // 退避名はランダムな接尾辞を持つため形式で照合し、ログが出なければ失敗させる
+    QTest::ignoreMessage(QtCriticalMsg, QRegularExpression(
+        QStringLiteral(".*preserved at:.*") + QRegularExpression::escape(liveTeam)
+        + QStringLiteral("/\\.entry\\.qsnapper-old\\.[0-9a-f]{16}.*")));
+    errno = 0;
+    const auto outcome = operations.applyRestoreEntryForTesting(
+        manifestId, {QStringLiteral("/team/entry"), QStringLiteral("typechanged")});
+    const int applyError = errno;
+    QCOMPARE(::setfsuid(static_cast<uid_t>(-1)), 0);
+    QCOMPARE(::setfsgid(static_cast<gid_t>(-1)), 0);
+    operations.finishRestorePlanForTesting(manifestId, qsnapper::restore::ManifestState::Failed);
+
+    QCOMPARE(outcome, qsnapper::restore::RestoreEntryOutcome::Failed);
+    QCOMPARE(applyError, EPERM);
+    // 判定はScopedFsIdentityの外でrootの識別子のまま行われなければならない
+    QVERIFY(!privateGroupCheckIdentities.isEmpty());
+    for (const auto &identity : std::as_const(privateGroupCheckIdentities)) {
+        QCOMPARE(identity.first, 0);
+        QCOMPARE(identity.second, 0);
+    }
+
+    // 元の名前には何も作られず、退避物は同じinodeと内容のまま退避名で残る
+    QCOMPARE(inodeOf(liveEntry), static_cast<ino_t>(0));
+    const QStringList names = sortedEntryNames(liveTeam);
+    QCOMPARE(names.size(), 1);
+    QVERIFY2(QRegularExpression(QStringLiteral("^\\.entry\\.qsnapper-old\\.[0-9a-f]{16}$"))
+                 .match(names.first()).hasMatch(),
+             qPrintable(names.first()));
+    const QString detachedPath = liveTeam + QLatin1Char('/') + names.first();
+    QCOMPARE(inodeOf(detachedPath), entryInode);
+    QCOMPARE(readFile(detachedPath), QByteArray("LIVE-ENTRY"));
 }
 
 QTEST_GUILESS_MAIN(TestSnapshotOperations)

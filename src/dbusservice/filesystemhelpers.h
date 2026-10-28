@@ -2,16 +2,17 @@
  * @file filesystemhelpers.h
  * @brief symlinkを辿らない経路でファイルシステムを読み書きするヘルパー
  *
- * 復元先 (live filesystem) の絶対パスと、pin済みスナップショットのdirfdに対して、
+ * 復元先(live filesystem)の絶対パスと、開いたまま保持したスナップショットのdirfd(ディレクトリfd)に対して、
  * メタデータの取得、ディレクトリの作成、ファイルの差し替え、削除を行う
  * 呼び出し元はsnapshotoperations系の復元・差分処理と単体テストである
  *
- * 入力 : rootPath (復元先の基点) または基点dirfd、およびdirfdからの相対パス
- * 出力 : stat、file descriptor、操作の成否 (失敗時はerrno)
- * 依存 : openat2とstatx (カーネル5.6未満はfdスタックによる同等の代替経路を使う)、Qt Core
+ * 入力 : rootPath(復元先の基点)または基点dirfd、およびdirfdからの相対パス
+ * 出力 : stat、file descriptor(fd)、操作の成否(失敗時はerrno)
+ * 依存 : openat2とstatx(openat2はカーネル5.6以降が必要で、未対応のカーネルではENOSYSで失敗する)、Qt Core
  *
- * 検証したパスを文字列のまま使い続けず、dirfdを基点に操作するのは、
- * 検証から使用までの間に親ディレクトリを差し替えられるTOCTOUを避けるため
+ * パス文字列の検証結果を保持したまま後でそのパスを使い直すと、
+ * 検証から使用までの間に親ディレクトリを差し替えられるTOCTOU(検査と使用の間の競合)が生じる
+ * そのため、検証したパスは文字列のまま使い続けず、dirfdを基点に操作する
  */
 #ifndef QSNAPPER_FILESYSTEMHELPERS_H
 #define QSNAPPER_FILESYSTEMHELPERS_H
@@ -24,27 +25,41 @@
 
 namespace qsnapper::security {
 
-    /** @brief 所有権の集積実装を内部headerに置いたまま親open APIへ渡すための前方宣言 */
+    /**
+     * @brief 祖先の所有権を集積した状態を表す型の前方宣言
+     *
+     * 実装は内部ヘッダfilesystemhelpers_internal.hに置き、
+     * 公開APIでは所有権の状態を受け渡すためだけに型名を使う
+     * 呼び出し側が内部ヘッダの内容へ依存しないよう、定義は公開しない
+     */
     struct DirectoryChainOwnership;
 
     /**
      * @brief シンボリックリンクを辿らずにディレクトリ階層を作成する
      *
-     * 各パス成分を openat(..., O_DIRECTORY | O_NOFOLLOW) で辿るため、中間成分のsymlink差し替えに対して強い
+     * 各パス成分をopenat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)で1段ずつ開き、
+     * 存在しない成分はmkdirat()で作成する
+     * 中間成分をsymlinkへ差し替えられても基点の外へは辿らない
+     *
+     * @param path 作成対象の絶対パス
+     * @param mode 新規作成するディレクトリのmode(umaskの影響を受ける)
+     * @return 全ての成分を用意できた場合true(失敗時はerrno設定)
      */
     bool safeMkpath(const QString &path, mode_t mode = 0755);
 
     /**
      * @brief シンボリックリンクを辿らずに既存ディレクトリを開く
      *
-     * 各パス成分を openat(..., O_DIRECTORY | O_NOFOLLOW) で辿り、最終ディレクトリのfdを返す
+     * 各パス成分をopenat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)で1段ずつ開き、最終ディレクトリのfdを返す
      *
-     * requireTrustedChainがtrueの場合は、「/」から対象までの全ディレクトリがroot所有でgroupとotherが書き込めないことも要求する
-     * パスで操作する外部ライブラリ (libsnapperのmountなど) へ渡すパスを、一般ユーザが差し替えられないことの確認に使う
+     * requireTrustedChainがtrueの場合は、「/」から対象までの全ディレクトリがroot所有で、
+     * groupとotherに書き込みを許さないことも要求する
+     * libsnapperのmountのようにパス文字列だけを受け取る外部ライブラリへ渡す前に、
+     * 一般ユーザが名前を差し替えられないことを確かめるために使う
      *
      * @param path 対象ディレクトリの絶対パス
      * @param requireTrustedChain 信頼できるディレクトリだけを辿ることを要求する場合true
-     * @return 成功時は file descriptor、失敗時は-1 (信頼できないディレクトリを含む場合はEPERM)
+     * @return 成功時はfile descriptor(fd)、失敗時は-1(信頼できないディレクトリを含む場合はEPERM)
      */
     int safeOpenDirectory(const QString &path, bool requireTrustedChain = false);
 
@@ -52,69 +67,77 @@ namespace qsnapper::security {
      * @brief 通常ファイルを安全に読み取りオープンする
      *
      * 親ディレクトリをO_NOFOLLOWで開いた後、fstatat()でleafがregular fileであることを確認してから
-     * O_NONBLOCK | O_NOCTTYでopenat()し、fstat() でregular fileであることを再確認する
-     * FIFOやデバイスは開かないため、呼び出し側が永久にブロックすることはない
+     * O_NONBLOCK | O_NOCTTYでopenat()し、fstat()でregular fileであることを再確認する
+     * FIFOやデバイスを開くと読み取りが永久にブロックし得るため、種別の確認を開く前後に行う
      *
-     * @return 成功時: file descriptor、失敗時: -1
+     * @param path 対象ファイルの絶対パス
+     * @return 成功時はfile descriptor(fd)、失敗時は-1(errno設定)
      */
     int safeOpenRegularFileRead(const QString &path);
 
     /**
      * @brief read-onlyなメタデータ取得用のlstat()ラッパー
      *
-     * fdベースhelper群とは異なり、path stringをそのままlstat()に渡す
-     * セキュリティ判断後に同一路径へ書き込む用途では使わず、信頼済み親配下や表示用メタデータ取得に限定して使用する
+     * fdを基点とする他のヘルパーとは異なり、パス文字列をそのままlstat()に渡す
+     * そのため、セキュリティ判断の後に同じ経路へ書き込む用途には使わず、
+     * 信頼済みの親ディレクトリ配下や表示用メタデータの取得に限定して使う
+     *
+     * @param path 対象の絶対パス
+     * @param out statの出力先
+     * @return 取得に成功した場合true(失敗時はerrno設定)
      */
     bool safeLstat(const QString &path, struct stat *out);
 
     /**
-     * @brief 指定dirfd相対で leafをsymlink非追従のfstatat()によりstatする
+     * @brief 指定dirfd相対でleafをsymlink非追従のfstatat()によりstatする
      *
-     * pin済みのsnapshot dirfd等、寿命と同一性が呼び出し側で保証されたdirfdを基点にメタデータを取得する
-     * relativePathは絶対パス・"." / ".." 成分・制御文字を含んではならない
-     * (絶対パスはopenat系と同じくdirfdを無視してしまうため入力段階で拒否する)
+     * 開いたまま保持したsnapshotのdirfdなど、寿命と同一性が呼び出し側で保証されたdirfdを基点にメタデータを取得する
+     * relativePathは絶対パス、[.]/[..]成分、制御文字を含んではならない
+     * 絶対パスを渡すとopenat系がdirfdを無視するため、入力段階で拒否する
      *
-     * 中間成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) で解決する
-     * (カーネル5.6未満は同等のin-root解決をfdスタックで再現するフォールバックを使用する)
-     * snapshot dirfdは"/"のbtrfs snapshotであるため、"var/run -> /run" のような絶対symlinkは
-     * snapshot内で正当な存在であり、chrootと同じくroot内解決を採用する
-     * これにより中間symlinkがdirfdの外 (live filesystem) へ解決されることは構造的にない
+     * 中間成分はopenat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)で解決する
+     * openat2が無いカーネル5.6未満では代替実装を持たず、ENOSYSで失敗する
+     * snapshot dirfdは「/」のbtrfs snapshotであるため、「var/run -> /run」のような絶対symlinkも
+     * snapshot内では正当な存在であり、chrootと同じくroot内解決を採用する
+     * これにより中間symlinkがdirfdの外(live filesystem)へ解決されることは構造的にない
      *
-     * isConfirmedAbsentAt()と中間symlinkの方針が異なるのは意図的である:
+     * isConfirmedAbsentAt()と中間symlinkの方針が異なるのは意図的である
      * isConfirmedAbsentAt()は破壊的削除の直前の不在確認であり、中間symlinkの追跡結果がlive filesystemへ依存するためfail-closedで拒否する
      * 一方、本関数群は読み取り専用であり、root内解決で閉じ込めた上でsnapshot自身の内容を取得することが目的である
      *
      * leaf自体はAT_SYMLINK_NOFOLLOWのままのため、leafがsymlinkならsymlinkとして報告する
      *
-     * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+     * @param dirFd 基点ディレクトリfd(O_DIRECTORYで開いたfd)
      * @param relativePath dirFdからの相対パス
      * @param out stat構造体の出力先
-     * @return 成功時: true
+     * @return 取得に成功した場合true(失敗時はerrno設定)
      */
     bool safeLstatAt(int dirFd, const QString &relativePath, struct stat *out);
 
     /**
      * @brief 指定dirfd相対で、対象が存在しないことを確定的に確認する
      *
-     * 復元の"created"エントリは「復元元snapshotに存在しない」ことを前提に、live側の削除として実行される
-     * その前提を破壊の直前に確認するための述語である
+     * 復元計画の[created]エントリは「復元元のsnapshotに存在しない」ことを前提に、live側の削除として実行される
+     * 本関数は、その前提を破壊の直前に確かめるための述語である
      *
-     * safeLstatAt()は失敗理由を返さないため、「存在しない」と「statできなかった」を区別できない
-     * 本関数は、errnoを見て前者だけをtrueとする:
-     *   - lstatが成功した (= 存在する) 場合はfalse
-     *   - ENOENT (不在) と、親成分が非ディレクトリであることを示すENOTDIR (この場合も対象は確定的に存在し得ない) の場合のみtrue
-     *   - それ以外 (EACCES / ELOOP / EINVAL等) は「不在を確認できなかった」であって「不在である」ではないため、falseを返す (fail-closed)
+     * safeLstatAt()の真偽値だけでは、「存在しない」と「statできなかった」を区別できない
+     * 本関数はerrnoを見て、不在を確定できる場合だけtrueを返す
+     * 対象のstatに成功した(=存在する)場合はfalse
+     * 成分のstatがENOENT(不在)で失敗した場合はtrue
+     * symlink以外の中間成分が非ディレクトリの場合も、その配下は存在し得ないためtrue
+     * それ以外(EACCES / ELOOP / EINVALなど)は「不在を確認できなかった」であって「不在である」ではないため、falseを返す(fail-closed)
      *
-     * 中間成分は fstatat(..., AT_SYMLINK_NOFOLLOW) でsymlinkを明示的に検出しながら、openat(..., O_DIRECTORY | O_NOFOLLOW) で辿る
-     * O_DIRECTORY | O_NOFOLLOW は中間symlinkに対してENOTDIRを返し、「親が実ファイル」の場合と区別できないため、
-     * symlinkの検出をfstatat側で行い、symlink成分では「不在を確認できなかった」(ELOOP相当) として扱う
+     * 中間成分はfstatat(..., AT_SYMLINK_NOFOLLOW)でsymlinkを明示的に検出しながら、
+     * openat(..., O_DIRECTORY | O_NOFOLLOW)で辿る
+     * O_DIRECTORY | O_NOFOLLOWは中間symlinkに対してENOTDIRを返し、「親が実ファイル」の場合と区別できない
+     * そのためsymlinkの検出をfstatat側で行い、symlink成分では「不在を確認できなかった」(ELOOP相当)として扱う
      *
      * @note 呼び出し側は、検証したrelativePathと実際に操作する対象が同一の入力から導出されていることを保証すること
      *       検証後に値を取り直してはならない
      *
-     * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd、read-onlyなsnapshotを想定)
+     * @param dirFd 基点ディレクトリfd(O_DIRECTORYで開いたfd、read-onlyなsnapshotを想定)
      * @param relativePath dirFdからの相対パス
-     * @return 不在を確定できた場合: true、存在するか確認できなかった場合: false
+     * @return 不在を確定できた場合true、存在するか確認できなかった場合false
      */
     bool isConfirmedAbsentAt(int dirFd, const QString &relativePath);
 
@@ -136,50 +159,52 @@ namespace qsnapper::security {
      * 復元計画の検証で、復元元と比較相手の木にパスが含まれるかを、libsnapperの比較と同じ意味で判定するために使う
      * libsnapperの比較はsymlinkを辿らないため、次の場合はAbsentとする
      *   - 成分のどれかがENOENT
-     *   - 中間成分が非ディレクトリ (symlinkを含む)
-     * 中間成分がマウントポイントや別のサブボリューム (st_devが根と異なる、またはmountのroot) の場合は、EXDEVでUnknownとする
+     *   - 中間成分が非ディレクトリ(symlinkを含む)
+     * 中間成分がマウントポイントや別のsubvolume(st_devが根と異なる、またはmountのroot)の場合は、EXDEVでUnknownとする
      * 境界の下を「存在しない」と扱うと、境界の先に実在するファイルが偽のdeletedとして検証を通り、
      * 復元が別のファイルシステムへ書き込んでしまうため
      * leafはAT_SYMLINK_NOFOLLOWでstatし、leafがsymlinkならsymlinkとして報告する
      *
      * 中間成分は、fstatat()で確認したinodeとopenat(O_NOFOLLOW)で開いたinodeを照合しながら辿る
-     * 確認の後に書き込み可能な親の下で差し替えられた場合はESTALEでUnknownとする
+     * 確認の後に書き込み可能な親の下で差し替えられた場合は、ESTALEでUnknownとする
      *
-     * @param dirFd 根とするディレクトリfd (O_DIRECTORYで開いたfd)
-     * @param relativePath dirFdからの相対パス (絶対パス・"." / ".."成分・制御文字は不可)
-     * @param out Presentの場合にleafのstatを書き込む先 (Present以外では変更しない)
-     * @return 観測結果の種類 (Unknownの場合はerrnoに理由が入る)
+     * @param dirFd 根とするディレクトリfd(O_DIRECTORYで開いたfd)
+     * @param relativePath dirFdからの相対パス(絶対パス、[.]/[..]成分、制御文字は不可)
+     * @param out Presentの場合にleafのstatを書き込む先(Present以外では変更しない)
+     * @return 観測結果の種類(Unknownの場合はerrnoに理由が入る)
      */
     PathPresenceAt observePathNoFollowAt(int dirFd, const QString &relativePath, struct stat *out);
 
     /**
      * @brief 指定dirfd相対で通常ファイルを安全に読み取りオープンする
      *
-     * 親成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) でin-root解決し
-     * (カーネル5.6未満は同等のフォールバックを使用)、leafがregular fileであることをfstatat()で確認してから
-     * openat(..., O_NOFOLLOW | O_NONBLOCK | O_NOCTTY) で開き、fstat()でregular fileであることを再確認する
+     * 親成分はopenat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)でroot内解決する
+     * openat2が無いカーネル5.6未満では代替実装を持たず、ENOSYSで失敗する
+     * leafがregular fileであることをfstatat()で確認してから
+     * openat(..., O_NOFOLLOW | O_NONBLOCK | O_NOCTTY)で開き、fstat()でregular fileであることを再確認する
      * 中間成分が絶対symlinkでもdirfdの外へ解決されることはなく、snapshot内の同一位置へ収まる
      * leaf自体はsymlink非追従のため、leafがsymlinkならELOOPで拒否される
-     * 相対パス検証は、safeLstatAtと共通
+     * 相対パスの検証はsafeLstatAtと共通である
      *
-     * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+     * @param dirFd 基点ディレクトリfd(O_DIRECTORYで開いたfd)
      * @param relativePath dirFdからの相対パス
-     * @return 成功時: file descriptor、失敗時: -1
+     * @return 成功時はfile descriptor(fd)、失敗時は-1(errno設定)
      */
     int safeOpenRegularFileReadAt(int dirFd, const QString &relativePath);
 
     /**
-     * @brief 指定dirfd相対でreadlinkat()によりsymlink targetを取得する
+     * @brief 指定dirfd相対でreadlinkat()によりsymlinkのtargetを取得する
      *
-     * 親成分は openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS) でin-root解決し
-     * (カーネル5.6未満は同等のフォールバックを使用)、leaf自体はsymlink非追従で読み出す
+     * 親成分はopenat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)でroot内解決する
+     * openat2が無いカーネル5.6未満では代替実装を持たず、ENOSYSで失敗する
+     * leaf自体はsymlink非追従で読み出す
      * 中間成分が絶対symlinkでもdirfdの外へ解決されることはなく、snapshot内の同一位置へ収まる
-     * 相対パス検証は、safeLstatAtと共通
+     * 相対パスの検証はsafeLstatAtと共通である
      *
-     * @param dirFd 基点ディレクトリfd (O_DIRECTORYで開いたfd)
+     * @param dirFd 基点ディレクトリfd(O_DIRECTORYで開いたfd)
      * @param relativePath dirFdからの相対パス
      * @param targetOut 読み出したtargetの格納先
-     * @return 成功時: true (targetOutにsymlink targetの生バイト列を格納する)
+     * @return 成功した場合true(targetOutにsymlink targetの生バイト列を格納する)
      */
     bool safeReadLinkNoFollowAt(int dirFd, const QString &relativePath,
                                 QByteArray *targetOut);
@@ -193,7 +218,7 @@ namespace qsnapper::security {
         /**
          * @brief replaceRegularFileAt / replaceSymlinkAtが一時objectをrenameする直前に呼ぶフックを設定する
          *
-         * 一時名や親ディレクトリの差し替え (TOCTOU) を決定的に再現するためのテスト専用入口
+         * 一時名や親ディレクトリの差し替え(TOCTOU)を決定的に再現するためのテスト専用入口
          * 空のstd::functionを渡すと解除する
          *
          * @param hook 親dirfdと一時leaf名を受け取るフック
@@ -203,80 +228,85 @@ namespace qsnapper::security {
     }
 
     /**
-     * @brief 宛先絶対パスがrootPath配下であることを検証し、rootからの相対表現を取り出す
+     * @brief 宛先絶対パスがrootPath配下であることを検証し、rootPathからの相対表現を取り出す
      *
-     * 仕様:
-     *   - rootPath / absolutePath はともに絶対パス ('/' 開始) でなければ拒否
-     *   - 制御文字 (C0: U+0000..U+001F / DEL: U+007F / C1: U+0080..U+009F) を含む場合は拒否
-     *     (埋め込みNULによるsyscall引数切り詰め対策)
-     *   - absolutePath の各成分に "." / ".." を含む場合は拒否
-     *   - absolutePath が rootPath 自身と一致する場合 (相対成分が空) は拒否
-     *   - rootPath の成分列が真のプレフィックスでない場合 (兄弟ディレクトリtrick含む) は拒否
-     *   - 連続する '/' や末尾 '/' は空成分として正規化して扱う
-     *   - ファイルシステムには一切アクセスしない
+     * 受け付ける条件は次のとおりである
+     *   - rootPathとabsolutePathはともに絶対パス(「/」で始まる)であること
+     *   - 制御文字(C0: U+0000..U+001F、DEL: U+007F、C1: U+0080..U+009F)を含まないこと
+     *     埋め込みNULはsyscallの引数を途中で切り詰めるため、パスには一切許容しない
+     *   - absolutePathの各成分に[.]/[..]を含まないこと
+     *   - absolutePathがrootPath自身と一致しないこと(相対成分が空になるため)
+     *   - rootPathの成分列がabsolutePathの真のプレフィックスであること(兄弟ディレクトリへのすり替えを防ぐ)
+     *   - 連続する「/」や末尾の「/」は空成分として正規化して扱う
+     * ファイルシステムには一切アクセスしない
      *
-     * @note 本関数は入力解析 (境界の一部) でありセキュリティ境界そのものではない
-     *       実際の保証は、safeOpenDirectoryBeneathRoot以降のdirfdベース走査が担う
-     *       文字列比較 (startsWith等) を唯一の根拠とした宛先書き込みを行ってはならない
+     * @note 本関数は入力解析(境界の一部)であり、セキュリティ境界そのものではない
+     *       実際の保証は、safeOpenDirectoryBeneathRoot以降のdirfdベースの走査が担う
+     *       startsWith()などの文字列比較だけを根拠に宛先へ書き込んではならない
      *
-     * @param rootPath 基点ルートディレクトリ (絶対パス)
+     * @param rootPath 基点ルートディレクトリ(絶対パス)
      * @param absolutePath 検証対象の宛先絶対パス
-     * @param relativeOut rootPathからの相対表現の格納先 (非null、成功時のみ内容を更新する)
-     * @return rootPath配下と確定した場合: true、拒否した場合: false (errno設定)
+     * @param relativeOut rootPathからの相対表現の格納先(非null、成功時のみ内容を更新する)
+     * @return rootPath配下と確定した場合true、拒否した場合false(errno=EINVAL)
      */
     bool splitDestinationBeneathRoot(const QString &rootPath, const QString &absolutePath,
                                      QString *relativeOut);
 
     /**
-     * @brief rootPathを基点に相対パスをO_NOFOLLOWで辿り、末端ディレクトリのfdを返す
+     * @brief rootPathを基点に相対パスをsymlink非追従で辿り、末端ディレクトリのfdを返す
      *
-     * 各成分をopenat(fd, comp, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)で1段ずつ開く
-     * createMissing = trueの場合は、存在しない中間成分を mkdirat() で作成してから開き直す
+     * 各成分をopenat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)で1段ずつ開く
+     * createMissingがtrueの場合は、存在しない中間成分をmkdirat()で作成してから開き直す
      * rootPath自身がsymlinkの場合はELOOPで拒否する
      *
-     * @param rootPath 基点ルートディレクトリ (絶対パス、実ディレクトリであること)
-     * @param relativePath rootPathからの相対パス ('/'開始や"." ".."成分、制御文字は拒否)
+     * @param rootPath 基点ルートディレクトリ(絶対パス、実ディレクトリであること)
+     * @param relativePath rootPathからの相対パス(「/」で始まるパス、[.]/[..]成分、制御文字は拒否)
      * @param createMissing 存在しない成分を作成するか
-     * @param mode createMissing = true時の作成モード
-     * @return 成功時: 末端ディレクトリのfd (呼び出し側でclose)、失敗時: -1 (errno設定)
+     * @param mode createMissingがtrueのときの作成モード
+     * @return 成功時は末端ディレクトリのfd(呼び出し側でclose)、失敗時は-1(errno設定)
      *
-     * @note ディレクトリfdは認可(凍結)時点から実行時点へ跨いで保持してはならない
-     *       fdが有効な間でも指先のディレクトリは差し替えられ得るため、本関数による新鮮な解決を変異のたびにやり直すこと
+     * @note 認可で対象を凍結した時点から実行時点まで、同じディレクトリfdを持ち越してはならない
+     *       fdが有効な間でも、そのfdが指すディレクトリは親から差し替えられ得るため、変異のたびに本関数で解決し直すこと
      */
     int safeOpenDirectoryBeneathRoot(const QString &rootPath, const QString &relativePath,
                                      bool createMissing, mode_t mode);
 
     /**
-     * @brief rootPath配下に宛先ディレクトリを作成する (中間成分も必要に応じて作成)
+     * @brief rootPath配下に宛先ディレクトリを作成する(中間成分も必要に応じて作成する)
      *
-     * componentwiseなO_NOFOLLOW走査で親まで辿り、leafはmkdirat()で作成する
-     * leafが既存の場合はディレクトリ以外 (symlink含む) ならば拒否する
+     * 各成分をsymlink非追従で辿って親まで開き、leafはmkdirat()で作成する
+     * leafが既に存在する場合は、ディレクトリ以外(symlinkを含む)ならEEXISTで拒否する
+     * 既存のsymlinkをディレクトリと誤認して、その先を変更しないようにするためである
      *
      * @param rootPath 基点ルートディレクトリ
-     * @param destinationPath 作成先の絶対パス (rootPath配下であること)
+     * @param destinationPath 作成先の絶対パス(rootPath配下であること)
      * @param mode 作成するディレクトリのモード
-     * @return 成功時: true、失敗時: false (errno設定)
+     * @return 作成できた場合true、失敗した場合false(errno設定)
      */
     bool safeCreateDirectoryBeneathRoot(const QString &rootPath, const QString &destinationPath,
                                         mode_t mode = 0755);
 
     /**
-     * @brief rootPath配下に、復元先の欠けている親ディレクトリを作成する
+     * @brief rootPath配下に、復元先で欠けている親ディレクトリを作成する
      *
-     * 既存の成分はO_NOFOLLOWで辿るだけで、所有者やmodeを変更しない
-     * 欠けている成分は0700・作成者所有で作成し、snapshot側の同じ相対パスにディレクトリがあれば、その所有者・mode・ACL・xattrを適用する
-     * root所有かつgroup/other書き込み不可の祖先だけを信頼し、信頼できない祖先が現れた時点の所有者をprincipalとして、そこから下はprincipal所有の成分だけを変更する
-     * 非信頼チェーンで作成する場合は、復元元の所有者がprincipalと一致する場合だけ、principalのfilesystem identityで0700から作成し、開き直したinodeの所有者を確認してmetadataを適用する
-     * 復元元の所有者がprincipalと一致しない場合や、非信頼点より下に別の所有者の成分が混在する場合は、権限の境界を越えるためEPERMで失敗する
-     * snapshot側に無い場合 (存在しない・ディレクトリ以外) は、信頼チェーンでは0700・作成者所有のままにし、非信頼チェーンでは作成しない
-     * 既存の成分が別のファイルシステム (mount境界) にある場合は、rootPathの外へ書き込まないようEXDEVで失敗する
+     * 既存の成分はsymlink非追従で辿るだけで、所有者やmodeを変更しない
+     * 欠けている成分は0700・作成者所有で作成し、snapshot側の同じ相対パスにディレクトリがあれば、
+     * その所有者・mode・ACL・xattrを適用する
+     * root所有かつgroupとotherが書き込み不可の祖先だけを信頼する
+     * 信頼できない祖先が現れた時点の所有者をprincipal(変更を委ねる唯一の所有者)として、そこから下はprincipal所有の成分だけを変更する
+     * 非信頼チェーンで作成する場合は、復元元の所有者がprincipalと一致するときだけ、
+     * principalのfilesystem identity(fsuid/fsgid)で0700から作成し、開き直したinodeの所有者を確認してmetadataを適用する
+     * 復元元の所有者がprincipalと一致しない場合や、非信頼点より下に別の所有者の成分が混在する場合は、
+     * 権限の境界を越えるためEPERMで失敗する
+     * snapshot側に無い場合(存在しない、またはディレクトリ以外)は、信頼チェーンでは0700・作成者所有のままにし、非信頼チェーンでは作成しない
+     * 既存の成分が別のファイルシステム(mount境界)にある場合は、rootPathの外へ書き込まないようEXDEVで失敗する
      * snapshot側の状態を判定できない場合は、その成分を作成せずに失敗する
      *
-     * @param rootPath 基点ルートディレクトリ (snapshot dirfdと同じ相対パスで対応付く)
-     * @param parentPath 作成する親ディレクトリの絶対パス (rootPath配下であること)
-     * @param sourceDirFd pin済みのsnapshot dirfd
-     * @param mustPreserveMetadata 必須metadata (所有者、mode、ACL) を適用できない場合に失敗させる場合true
-     * @return 成功時: true、失敗時: false (errno設定)
+     * @param rootPath 基点ルートディレクトリ(snapshot dirfdと同じ相対パスで対応付く)
+     * @param parentPath 作成する親ディレクトリの絶対パス(rootPath配下であること)
+     * @param sourceDirFd 開いたまま保持したsnapshotのdirfd
+     * @param mustPreserveMetadata 必須metadata(所有者、mode、ACL)を適用できない場合に失敗させるならtrue
+     * @return 作成できた場合true、失敗した場合false(errno設定)
      */
     bool safeCreateParentDirectoriesFromSourceBeneathRoot(const QString &rootPath,
                                                           const QString &parentPath,
@@ -286,12 +316,12 @@ namespace qsnapper::security {
     /**
      * @brief 作成したディレクトリへsnapshotのmetadataを安全に適用できる親ディレクトリかを判定する
      *
-     * root所有かつgroup/other書き込み不可だけを信頼する
-     * sticky bitがあっても他ユーザーがrootより先に名前を作れるため信頼しない
-     * 非root所有者は0555からでもmodeを変更して差し替えられるため信頼しない
+     * 信頼できるのは、root所有かつgroupとotherが書き込み不可のディレクトリだけである
+     * sticky bitがあっても、他の利用者がrootより先に名前を作れてしまうため信頼しない
+     * root以外が所有するディレクトリは、modeが0555でも所有者がmodeを変えて差し替えられるため信頼しない
      *
      * @param parentStat 親ディレクトリのstat
-     * @return 安全に適用できる場合: true
+     * @return 安全に適用できる場合true
      */
     bool parentDirectoryIsSafeForMetadata(const struct stat &parentStat);
 
@@ -299,15 +329,17 @@ namespace qsnapper::security {
      * @brief テスト専用としてrootPath配下の通常ファイルを上書きオープンする
      *
      * 本番コードからは呼び出さない
-     * O_EXCLを付けずにO_TRUNCで開くため、実際の復元先で使うと、ハードリンクで共有された既存ファイルの中身まで消してしまう
+     * O_EXCLを付けずにO_TRUNCで開くため、実際の復元先で使うと、
+     * ハードリンクで共有された既存ファイルの中身まで消してしまう
      * この危険を呼び出し側が見落とさないよう、名前にForTestingを付けている
-     * componentwiseなO_NOFOLLOW走査で親まで辿り、leafをopenat(..., O_NOFOLLOW)で開いた後、fstat()でregular fileであることを再確認する
+     * 各成分をsymlink非追従で辿って親まで開き、leafをopenat(..., O_NOFOLLOW)で開いた後、
+     * fstat()でregular fileであることを再確認する
      * leafがsymlinkの場合はELOOPで拒否する
      *
      * @param rootPath 基点ルートディレクトリ
-     * @param destinationPath 対象ファイルの絶対パス (rootPath配下であること)
+     * @param destinationPath 対象ファイルの絶対パス(rootPath配下であること)
      * @param mode 作成時モード
-     * @return 成功時: file descriptor (呼び出し側でclose)、失敗時: -1 (errno設定)
+     * @return 成功時はfile descriptor(fd、呼び出し側でclose)、失敗時は-1(errno設定)
      */
     int safeOpenRegularFileWriteBeneathRootForTesting(const QString &rootPath,
                                                       const QString &destinationPath,
@@ -518,6 +550,26 @@ namespace qsnapper::security {
          * @param errorNumber 失敗時に設定するerrno (0を渡すと失敗させる設定を解除する)
          */
         void setAclSyncFailureForTesting(const char *xattrName, int errorNumber);
+
+        /**
+         * @brief ディレクトリのグループが所有者専用のグループかどうかの判定を置き換える関数の型
+         *
+         * 所有者専用のグループとは、所有者の主グループで、名前が所有者と同じで、所有者だけが属するグループである
+         * 判定はディレクトリの所有権の集計の途中で同じスレッドから呼び出される
+         * 引数はディレクトリの所有者のuidとgidで、所有者専用のグループとして扱う場合はtrueを返す
+         */
+        using UserPrivateGroupCheck = bool (*)(uid_t owner, gid_t group);
+
+        /**
+         * @brief 所有者専用のグループかどうかを、NSSの問い合わせと/etc/passwd、/etc/groupの走査の代わりに指定した関数で判定させる
+         *
+         * テストの結果が、テストを実行するホストの利用者とグループの登録に左右されないようにするために使う
+         * 置き換わるのはこの判定だけで、otherの書き込み、groupの書き込み、拡張ACLの判定は置き換わらない
+         * nullptrを渡すと本来の判定へ戻す
+         *
+         * @param check 所有者専用のグループかどうかを判定する関数
+         */
+        void setUserPrivateGroupCheckForTesting(UserPrivateGroupCheck check);
 
         /**
          * @brief metadata適用のテスト用フックを全て解除する

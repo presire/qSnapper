@@ -8,6 +8,25 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "qSnapper is only supported on Linux. Current platform: ${CMAKE_SYSTEM_NAME}")
 endif()
 
+# D-Busサービスはopenat2 (RESOLVE_BENEATH、RESOLVE_IN_ROOT) でシンボリックリンク経由の逸脱を防いでおり、代替実装を持たない
+# そのため、openat2が存在するLinuxカーネル 5.6以降のカーネルヘッダを要求する (5.6未満の場合は、実行時にENOSYSで失敗してエラーを表示)
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles([=[
+#include <sys/syscall.h>
+#include <linux/openat2.h>
+int main()
+{
+    struct open_how how = {};
+    how.resolve = RESOLVE_BENEATH | RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS
+                | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV;
+    return static_cast<int>(SYS_openat2 + how.resolve);
+}
+]=] QSNAPPER_HAVE_OPENAT2)
+if(NOT QSNAPPER_HAVE_OPENAT2)
+    message(FATAL_ERROR "qSnapper requires openat2() (Linux kernel headers 5.6 or later). "
+                        "Install newer kernel headers (e.g. linux-glibc-devel).")
+endif()
+
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Install path prefix" FORCE)
 endif()

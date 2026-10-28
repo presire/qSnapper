@@ -1,14 +1,20 @@
 /**
  * @file tst_filesystemhelpers_basic.cpp
- * @brief 基本パス操作と削除の検証
+ * @brief 絶対パス起点の安全なオープン・mkpath・再帰削除とmount境界の検証
  *
- * 絶対パス起点の安全オープン・mkpath・再帰削除とmount境界の検証を集める
+ * safeMkpath、safeOpenRegularFileRead、safeOpenDirectory、safeLstat、safeRemoveAllBeneathRootを
+ * 正規のパスとsymlink攻撃の両方で呼び、拒否と受付の境界を確認する
+ *
+ * 再帰削除はmount境界を越えてはならないため、ユーザ名前空間とmount名前空間を作る子プロセスで
+ * bind mountとmount pointを用意し、削除が境界を越えずに止まることを確認する
+ *
+ * 利用する側 : tst_filesystemhelpers.hで宣言し、QTEST_APPLESS_MAINを持つtst_filesystemhelpers.cppから実行する
+ * 依存 : filesystemhelpers.h(qsnapper::security)、Qt Test、Linuxのmountとbtrfs ioctl、実ファイルシステム
  */
 #include <QtTest/QtTest>
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
-
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -22,12 +28,16 @@
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
 #include "filesystemhelpers.h"
-
 #include "tst_filesystemhelpers.h"
 
 using namespace qsnapper::security;
+
+/**
+ * @brief 存在しない親ディレクトリを再帰的に作成できることを確認する
+ *
+ * 1回の呼び出しでa/b/cまで作り、呼び出し側が階層ごとに作成しなくてよいことを見る
+ */
 void TestFilesystemHelpers::safeMkpathCreatesNestedDirectories()
 {
     QTemporaryDir tempDir;
@@ -38,6 +48,11 @@ void TestFilesystemHelpers::safeMkpathCreatesNestedDirectories()
     QVERIFY(QDir(nestedPath).exists());
 }
 
+/**
+ * @brief 途中のsymlink成分を辿らず、その先へディレクトリを作らないことを確認する
+ *
+ * symlinkを辿ると、攻撃者が用意した復元先の外へディレクトリを作らされる
+ */
 void TestFilesystemHelpers::safeMkpathRejectsSymlinkComponents()
 {
     QTemporaryDir tempDir;
@@ -55,6 +70,9 @@ void TestFilesystemHelpers::safeMkpathRejectsSymlinkComponents()
     QVERIFY(!QDir(realDir + QStringLiteral("/child")).exists());
 }
 
+/**
+ * @brief 作成先そのものがsymlinkの場合に拒否し、リンク先をディレクトリとして扱わないことを確認する
+ */
 void TestFilesystemHelpers::safeMkpathRejectsTargetSymlink()
 {
     QTemporaryDir tempDir;
@@ -69,6 +87,11 @@ void TestFilesystemHelpers::safeMkpathRejectsTargetSymlink()
     QVERIFY(!safeMkpath(symlinkPath));
 }
 
+/**
+ * @brief symlinkの通常ファイルを開かず、リンク先の内容を読ませないことを確認する
+ *
+ * 正規の通常ファイルは開けることも同時に確認し、拒否がsymlinkだけによるものだと示す
+ */
 void TestFilesystemHelpers::safeOpenRegularFileReadRejectsSymlink()
 {
     QTemporaryDir tempDir;
@@ -91,6 +114,11 @@ void TestFilesystemHelpers::safeOpenRegularFileReadRejectsSymlink()
     QVERIFY(symlinkFd < 0);
 }
 
+/**
+ * @brief symlinkを含むディレクトリパスを開かないことを確認する
+ *
+ * 復元先のwalkは開いたディレクトリを起点に進むため、symlinkで外へ誘導されると以降の操作が全て外部へ向く
+ */
 void TestFilesystemHelpers::safeOpenDirectoryRejectsSymlinkPath()
 {
     QTemporaryDir tempDir;
@@ -106,6 +134,11 @@ void TestFilesystemHelpers::safeOpenDirectoryRejectsSymlinkPath()
     QVERIFY(fd < 0);
 }
 
+/**
+ * @brief 2048バイトの長いリンク先も切り詰めずに取得することを確認する
+ *
+ * 固定長のbufferでreadlinkの結果を受ける実装では、長いリンク先が途中で切れて比較を誤る
+ */
 void TestFilesystemHelpers::safeReadLinkNoFollowHandlesLargeTarget()
 {
     QTemporaryDir tempDir;
@@ -123,6 +156,11 @@ void TestFilesystemHelpers::safeReadLinkNoFollowHandlesLargeTarget()
     QCOMPARE(observedTarget, largeTarget);
 }
 
+/**
+ * @brief symlinkを辿らず、リンク自体の属性を返すことを確認する
+ *
+ * リンク先の属性を返すと、種別の判定と所有者の確認が別のファイルを指してしまう
+ */
 void TestFilesystemHelpers::safeLstatReportsSymlinkItself()
 {
     QTemporaryDir tempDir;
@@ -144,7 +182,7 @@ void TestFilesystemHelpers::safeLstatReportsSymlinkItself()
 }
 
 /**
- * @brief symlinkを含む木を、linkの先を辿らずに削除できることを確認する
+ * @brief symlinkを含む木を、symlinkを辿らずに削除できることを確認する
  *
  * 木の中のsymlinkを追従すると、復元先の外にあるファイルを削除してしまう
  */
@@ -234,13 +272,16 @@ void TestFilesystemHelpers::safeRemoveAllRejectsSymlinkIntermediateComponent()
 
 namespace {
 
-    constexpr int kNamespaceUnavailable = 77;
+    constexpr int kNamespaceUnavailable = 77;   // ユーザー名前空間やmountを作れない環境
+    constexpr int kAncestorsNotRootOwned = 78;  // 祖先がroot所有でなく、mount境界の判定まで届かない環境
 
     /**
-     * @brief 文字列をファイルへ書き込む (子プロセス内でも使えるよう、Qtを使わない)
+     * @brief 文字列をファイルへ書き込む(子プロセス内でも使えるよう、Qtを使わない)
      * @param path 書き込み先
      * @param text 書き込む内容
      * @return 書き込めた場合true
+     *
+     * @note 既存ファイルだけを対象とし、新規作成はしない
      */
     bool writeTextFile(const char *path, const char *text)
     {
@@ -255,12 +296,13 @@ namespace {
     }
 
     /**
-     * @brief 非特権のuser + mount namespaceを持つ子プロセスでbodyを実行する
+     * @brief 非特権のユーザー名前空間とmount名前空間を持つ子プロセスでbodyを実行する
      *
-     * root権限なしでmountを作るため、子プロセスでunshare(CLONE_NEWUSER | CLONE_NEWNS)し、自uid/gidをnamespace内のrootへ対応付ける
+     * root権限なしでmountを作るため、子プロセスでunshare(CLONE_NEWUSER | CLONE_NEWNS)し
+     * 自分のuidとgidをnamespace内のrootへ対応付ける
      * 子プロセスの終了とともにmountも消えるため、テスト後の後片付けが不要になる
      *
-     * @param body 子プロセスで実行する検証処理 (0: 成功、それ以外: 失敗箇所を示すコード)
+     * @param body 子プロセスで実行する検証処理(0は成功、それ以外は失敗箇所を示すコード)
      * @return bodyの戻り値、namespaceを作れない環境ではkNamespaceUnavailable、異常終了時は-1
      */
     int runInPrivateMountNamespace(const std::function<int()> &body)
@@ -294,6 +336,35 @@ namespace {
     }
 
     /**
+     * @brief パスの祖先が全てrootの所有で、他者が書き込めないディレクトリかを調べる
+     *
+     * rootとして行う削除は、ルートから削除の基点までの祖先に、他者が名前を変更できるディレクトリがあるとEPERMで拒否される
+     * ユーザー名前空間の中では、ホストのrootが所有する/や/tmpがoverflowuidの所有に見えるため、この前提を満たさない
+     * 前提を満たさない環境では、mount境界の判定より前に拒否されるため、境界の挙動を検証できない
+     *
+     * @param path 削除の基点(基点自身は調べない)
+     * @return 全ての祖先がuid 0の所有で、グループと他者に書き込み権限を与えていない場合true
+     */
+    bool ancestorsAreRootOwned(const QString &path)
+    {
+        const QStringList components = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        QString ancestor = QStringLiteral("/");
+        for (qsizetype index = 0; index < components.size(); ++index) {
+            struct stat info;
+            if (::lstat(QFile::encodeName(ancestor).constData(), &info) != 0
+                    || info.st_uid != 0
+                    || (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+                return false;
+            }
+            if (!ancestor.endsWith(QLatin1Char('/'))) {
+                ancestor += QLatin1Char('/');
+            }
+            ancestor += components.at(index);
+        }
+        return true;
+    }
+
+    /**
      * @brief 子プロセスで空ファイルを作成する
      * @param path 作成先
      * @return 作成できた場合true
@@ -309,7 +380,7 @@ namespace {
     }
 
     /**
-     * @brief symlink非追従でパスの存在を確認する
+     * @brief symlinkを辿らずにパスの存在を確認する
      * @param path 確認対象
      * @return 存在する場合true
      */
@@ -322,7 +393,7 @@ namespace {
 }
 
 /**
- * @brief 木の中のmountポイントで再帰削除を止め、境界の内側を消さないことを確認する
+ * @brief 木の中のmount pointで再帰削除を止め、境界の内側を消さないことを確認する
  *
  * 別ファイルシステムの内容はスナップショットに含まれず復元もできないため、削除すると取り返しがつかない
  * mountの作成には特権が必要なためprivate mount namespaceで再現し、使えない環境ではQSKIPする
@@ -339,6 +410,10 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
     QVERIFY(createEmptyFile(tree + QStringLiteral("/plain/file")));
 
     const int result = runInPrivateMountNamespace([&]() {
+        // 祖先の検査で先にEPERMとなる環境では、mount境界の判定まで届かない
+        if (!ancestorsAreRootOwned(tempDir.path())) {
+            return kAncestorsNotRootOwned;
+        }
         if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
             return kNamespaceUnavailable;
         }
@@ -360,7 +435,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
                 || !existsNoFollow(mountPoint + QStringLiteral("/top"))) {
             return 4;
         }
-        // 境界の外側にある親ディレクトリは残る (中身を失ったmount pointの上位を消さない)
+        // 境界の外側にある親ディレクトリは残る(中身を失ったmount pointの上位を消さない)
         if (!existsNoFollow(tree)) {
             return 5;
         }
@@ -370,11 +445,14 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtMountBoundary()
     if (result == kNamespaceUnavailable) {
         QSKIP("Unprivileged user/mount namespaces are not available");
     }
+    if (result == kAncestorsNotRootOwned) {
+        QSKIP("Ancestors of the temporary directory are not root-owned inside the user namespace");
+    }
     QCOMPARE(result, 0);
 }
 
 /**
- * @brief 削除対象そのものがmountポイントの場合も、中身を消さずに拒否することを確認する
+ * @brief 削除対象そのものがmount pointの場合も、中身を消さずに拒否することを確認する
  *
  * 削除対象がmount pointなら、配下はスナップショットに含まれない別ファイルシステムである
  */
@@ -387,6 +465,10 @@ void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
     QVERIFY(QDir().mkpath(mountPoint));
 
     const int result = runInPrivateMountNamespace([&]() {
+        // 祖先の検査で先にEPERMとなる環境では、mount境界の判定まで届かない
+        if (!ancestorsAreRootOwned(tempDir.path())) {
+            return kAncestorsNotRootOwned;
+        }
         if (::mount("tmpfs", mountPoint.toUtf8().constData(), "tmpfs", 0, "size=1m") < 0) {
             return kNamespaceUnavailable;
         }
@@ -408,13 +490,17 @@ void TestFilesystemHelpers::safeRemoveAllRefusesMountPointTarget()
     if (result == kNamespaceUnavailable) {
         QSKIP("Unprivileged user/mount namespaces are not available");
     }
+    if (result == kAncestorsNotRootOwned) {
+        QSKIP("Ancestors of the temporary directory are not root-owned inside the user namespace");
+    }
     QCOMPARE(result, 0);
 }
 
 /**
- * @brief 同じファイルシステムのbind mountでも、st_devが同じという理由で越えないことを確認する
+ * @brief 同じファイルシステムのbind mountでも、st_devが同じでも越えないことを確認する
  *
  * bind mountはst_devが親と一致するため、st_devの比較だけでは境界を検出できない
+ * そのためSTATX_ATTR_MOUNT_ROOTでmountのrootを判定できることを見る
  */
 void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
 {
@@ -430,6 +516,10 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
     QVERIFY(createEmptyFile(source + QStringLiteral("/keep")));
 
     const int result = runInPrivateMountNamespace([&]() {
+        // 祖先の検査で先にEPERMとなる環境では、mount境界の判定まで届かない
+        if (!ancestorsAreRootOwned(tempDir.path())) {
+            return kAncestorsNotRootOwned;
+        }
         if (::mount(source.toUtf8().constData(), bindPoint.toUtf8().constData(),
                     nullptr, MS_BIND, nullptr) < 0) {
             return kNamespaceUnavailable;
@@ -458,6 +548,9 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
     if (result == kNamespaceUnavailable) {
         QSKIP("Unprivileged bind mounts or STATX_ATTR_MOUNT_ROOT are not available");
     }
+    if (result == kAncestorsNotRootOwned) {
+        QSKIP("Ancestors of the temporary directory are not root-owned inside the user namespace");
+    }
     QCOMPARE(result, 0);
     QVERIFY(QFile::exists(source + QStringLiteral("/keep")));
 }
@@ -471,7 +564,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtSameFilesystemBindMount()
 void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
 {
     // ネストしたsubvolumeはmountではないが、st_devが親と異なる
-    // /tmpはtmpfsであることが多いため、HOME配下にbtrfsの作業ディレクトリを作る
+    // /tmpはtmpfsであることが多いため、btrfsの作業ディレクトリをHOME配下に作る
     const QString base = QDir::homePath();
     struct statfs fsInfo;
     if (::statfs(base.toUtf8().constData(), &fsInfo) < 0
@@ -505,7 +598,7 @@ void TestFilesystemHelpers::safeRemoveAllStopsAtNestedBtrfsSubvolume()
     QCOMPARE(errno, EXDEV);
     QVERIFY(existsNoFollow(inside));
 
-    // 後片付け: 空のsubvolumeは所有者がrmdirできる (kernel 4.18以降)
+    // 後片付け: 空のsubvolumeは所有者がrmdirできる(kernel 4.18以降)
     QVERIFY(::unlink(inside.toUtf8().constData()) == 0);
     if (::rmdir(subvolume.toUtf8().constData()) < 0) {
         qWarning("Could not remove test subvolume: %s", std::strerror(errno));

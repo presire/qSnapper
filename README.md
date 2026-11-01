@@ -103,6 +103,36 @@ and load the subvolume list on demand.
 
 <p align="center"><img src="ScreenShot/08_snapper_filesystem_dialog.png" width="600" alt="Filesystem Tab"></p>
 
+## Installing the RPM Package
+
+Pre-built RPM packages for openSUSE Leap 16, openSUSE Tumbleweed, and Fedora are available on the [Releases page](https://github.com/presire/qSnapper/releases).  
+The RPM packages are signed with GPG. Import the public key once, and zypper / dnf will verify the signature automatically on installation.  
+
+| File | Contents |
+|:---|:---|
+| `RPM-GPG-KEY-qSnapper` | Public key for verifying the RPM signatures (also available as `gpg/RPM-GPG-KEY-qSnapper` in this repository) |
+
+Key fingerprint: `BC34 94F8 777E 8112 A6AB  743F DC75 82F0 5A85 E5E1`  
+
+```sh
+# 1. Import the public key (first time only)
+sudo rpm --import https://raw.githubusercontent.com/presire/qSnapper/master/gpg/RPM-GPG-KEY-qSnapper
+# or, using the file downloaded from the Releases page
+sudo rpm --import RPM-GPG-KEY-qSnapper
+
+# 2. Confirm that the key has been imported
+rpm -qi gpg-pubkey-5a85e5e1
+
+# 3. Verify the package signature (optional) - "digests signatures OK" means success
+rpm -K ./qsnapper-*.rpm
+
+# 4. Install the package
+sudo zypper install ./qsnapper-*.rpm   # openSUSE
+sudo dnf install ./qsnapper-*.rpm      # Fedora
+```
+
+To remove the public key: `sudo rpm -e gpg-pubkey-5a85e5e1`  
+
 ## Documentation
 
 | Document | Contents |

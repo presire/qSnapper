@@ -101,6 +101,37 @@ Btrfsやその他のサポートされているファイルシステム上でフ
 
 <p align="center"><img src="ScreenShot/08_snapper_filesystem_dialog_jp.png" width="600" alt="ファイルシステムタブ"></p>
 
+## RPMパッケージのインストール
+
+openSUSE Leap 16 / openSUSE Tumbleweed / Fedora向けのビルド済みRPMパッケージは、[Releasesページ](https://github.com/presire/qSnapper/releases)から取得できます。  
+RPMパッケージにはGPG署名が付いています。  
+公開鍵を一度登録すれば、以降はzypper / dnfがインストール時に署名を自動で検証します。(署名警告も表示されなくなります)  
+
+| ファイル | 内容 |
+|:---|:---|
+| `RPM-GPG-KEY-qSnapper` | RPM署名検証用の公開鍵 (本リポジトリの`gpg/RPM-GPG-KEY-qSnapper`にも同梱) |
+
+鍵のフィンガープリント: `BC34 94F8 777E 8112 A6AB  743F DC75 82F0 5A85 E5E1`  
+
+```sh
+# 1. 公開鍵の登録 (初回のみ)
+sudo rpm --import https://raw.githubusercontent.com/presire/qSnapper/master/gpg/RPM-GPG-KEY-qSnapper
+# または、Releasesページからダウンロードしたファイルを使用
+sudo rpm --import RPM-GPG-KEY-qSnapper
+
+# 2. 公開鍵が登録されたことの確認
+rpm -qi gpg-pubkey-5a85e5e1
+
+# 3. 署名の確認 (任意) - "digests signatures OK" と表示されれば成功
+rpm -K ./qsnapper-*.rpm
+
+# 4. インストール
+sudo zypper install ./qsnapper-*.rpm   # openSUSE
+sudo dnf install ./qsnapper-*.rpm      # Fedora
+```
+
+公開鍵を削除する場合: `sudo rpm -e gpg-pubkey-5a85e5e1`  
+
 ## ドキュメント
 
 | ドキュメント | 内容 |

@@ -113,3 +113,7 @@ selinux/*.pp
 **/libyui/
 **/selinux/qsnapper-architecture.drawio
 .opencode/
+
+# RPM署名用の秘密鍵などは除外し、公開鍵 (gpg/RPM-GPG-KEY-qSnapper) のみ管理する
+/gpg/*
+!/gpg/RPM-GPG-KEY-qSnapper

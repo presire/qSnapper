@@ -63,7 +63,7 @@ jobs:
           install -d -m 0755 /var/lib/qsnapper-test-tmp
           TMPDIR=/var/lib/qsnapper-test-tmp ctest --test-dir build --output-on-failure
 
-  build-rpm-opensuse:
+  build-rpm-leap160:
     needs: validate
     runs-on: ubuntu-latest
     container:
@@ -98,12 +98,55 @@ jobs:
         run: |
           cd build
           for f in *.rpm; do
-            mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-leap16.x86_64.rpm"
+            mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-leap16.0.x86_64.rpm"
           done
 
       - uses: actions/upload-artifact@v7
         with:
-          name: qsnapper-${{ needs.validate.outputs.version }}-leap16.x86_64.rpm
+          name: qsnapper-${{ needs.validate.outputs.version }}-leap16.0.x86_64.rpm
+          path: build/*.rpm
+
+  build-rpm-leap161:
+    needs: validate
+    runs-on: ubuntu-latest
+    container:
+      image: opensuse/leap:16.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          zypper --non-interactive refresh
+          zypper --non-interactive install -y \
+            cmake gcc-c++ rpm-build \
+            qt6-base-devel qt6-declarative-devel \
+            qt6-quickcontrols2-devel qt6-linguist-devel \
+            polkit-devel libpolkit-qt6-1-devel libsnapper-devel \
+            libbtrfsutil-devel selinux-policy-devel scdoc
+
+      - name: Build
+        run: |
+          cmake -B build \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_SELINUX=ON
+          cmake --build build --parallel $(nproc)
+
+      - name: Package RPM
+        run: |
+          cd build
+          cpack -G RPM
+
+      - name: Rename artifact
+        run: |
+          cd build
+          for f in *.rpm; do
+            mv "$f" "qsnapper-${{ needs.validate.outputs.version }}-leap16.1.x86_64.rpm"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qsnapper-${{ needs.validate.outputs.version }}-leap16.1.x86_64.rpm
           path: build/*.rpm
 
   build-rpm-tumbleweed:
@@ -231,7 +274,7 @@ jobs:
           path: build/*.deb
 
   release:
-    needs: [validate, test, build-rpm-opensuse, build-rpm-tumbleweed, build-rpm-fedora, build-deb]
+    needs: [validate, test, build-rpm-leap160, build-rpm-leap161, build-rpm-tumbleweed, build-rpm-fedora, build-deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -269,12 +312,18 @@ jobs:
           printf '%s\n' "$RPM_GPG_PRIVATE_KEY" | gpg --batch --import
           KEYID="$(gpg --batch --list-keys --with-colons | awk -F: '/^pub:/ { getline; print $10; exit }')"
           test -n "$KEYID"
+          # 署名コマンド全体(__gpg_sign_cmd)は上書きしない
+          # RPM 6.0で書式が変わり、旧書式で上書きするとgpgへ引数が正しく渡らず署名に失敗したためである
+          # RPM 4.xと6.0の両方で使える_gpg_sign_cmd_extra_argsで、非対話の署名に必要な引数だけを追加する
+          # パスフレーズは、mktempで作成した本人だけが読めるGNUPGHOMEの中のファイルで渡し、終了時に削除する
+          PASSFILE="$GNUPGHOME/passphrase"
+          (umask 077; printf '%s' "${RPM_GPG_PASSPHRASE:-}" > "$PASSFILE")
           {
             printf '%%_gpg_name %s\n' "$KEYID"
-            printf '%%_gpgbin %s\n' /usr/bin/gpg
-            printf '%%__gpg_sign_cmd %s\n' '%{__gpg} gpg --force-mdc --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-fd 3 --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}'
+            printf '%%__gpg %s\n' /usr/bin/gpg
+            printf '%%_gpg_sign_cmd_extra_args %s\n' "--batch --pinentry-mode loopback --passphrase-file $PASSFILE"
           } > ~/.rpmmacros
-          rpmsign --addsign artifacts/*.rpm 3<<< "${RPM_GPG_PASSPHRASE:-}"
+          rpmsign --addsign artifacts/*.rpm
           gpg --armor --export "$KEYID" > artifacts/RPM-GPG-KEY-qSnapper
 
           # リポジトリ内の公開鍵と、署名に使用した鍵が一致することを確認する

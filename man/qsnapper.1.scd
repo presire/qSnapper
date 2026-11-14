@@ -1,4 +1,4 @@
-qsnapper(1) "October 2026" "qSnapper 1.4.2"
+qsnapper(1) "November 2026" "qSnapper 1.4.3"
 
 # NAME
 

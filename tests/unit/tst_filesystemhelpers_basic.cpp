@@ -88,6 +88,37 @@ void TestFilesystemHelpers::safeMkpathRejectsTargetSymlink()
 }
 
 /**
+ * @brief 作成を要求しながらmode 0を渡すと、何も作成せずに拒否することを確認する
+ *
+ * mode 0のディレクトリは誰にも読み書きできないため、途中まで作られた階層が残ると片付けられない
+ * 既存の成分がある場合も、新規作成の可能性がある時点で拒否する
+ */
+void TestFilesystemHelpers::safeMkpathRejectsZeroMode()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // 何も存在しない場合
+    errno = 0;
+    QVERIFY(!safeMkpath(tempDir.path() + QStringLiteral("/a/b"), 0));
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/a")).exists());
+
+    // 一部の成分が既に存在する場合
+    QVERIFY(QDir().mkpath(tempDir.path() + QStringLiteral("/full")));
+    errno = 0;
+    QVERIFY(!safeMkpath(tempDir.path() + QStringLiteral("/full/path"), 0));
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/full/path")).exists());
+
+    // 全ての成分が既に存在する場合も、作成の可能性がある呼び出しとして拒否する
+    QVERIFY(QDir().mkpath(tempDir.path() + QStringLiteral("/full2/path")));
+    errno = 0;
+    QVERIFY(!safeMkpath(tempDir.path() + QStringLiteral("/full2/path"), 0));
+    QCOMPARE(errno, EINVAL);
+}
+
+/**
  * @brief symlinkの通常ファイルを開かず、リンク先の内容を読ませないことを確認する
  *
  * 正規の通常ファイルは開けることも同時に確認し、拒否がsymlinkだけによるものだと示す
@@ -130,8 +161,115 @@ void TestFilesystemHelpers::safeOpenDirectoryRejectsSymlinkPath()
     const QString symlinkPath = tempDir.path() + QStringLiteral("/dir-link");
     QVERIFY(::symlink(realDir.toUtf8().constData(), symlinkPath.toUtf8().constData()) == 0);
 
-    const int fd = safeOpenDirectory(symlinkPath);
+    // 既定では信頼できる連鎖を要求するため、/tmp配下の利用者所有の木はEPERMで拒否される
+    // symlinkの拒否そのものを検証するため、ここでは明示的にfalseを渡す
+    // openat2のsymlink拒否errnoは環境によりELOOPとENOTDIRが揺れるため、既存のテストと同じ判定を使う
+    errno = 0;
+    const int fd = safeOpenDirectory(symlinkPath, false);
+    const int leafErr = errno;
     QVERIFY(fd < 0);
+    QWARN(qPrintable(QStringLiteral("leaf errno=%1 (%2)").arg(leafErr).arg(strerror(leafErr))));
+    QVERIFY(isAttackRejectionErrno(leafErr));
+
+    // leafだけでなく中間成分のsymlinkも、その先を開かずに拒否する
+    errno = 0;
+    const int middleFd = safeOpenDirectory(symlinkPath + QStringLiteral("/sub"), false);
+    const int middleErr = errno;
+    QVERIFY(middleFd < 0);
+    QWARN(qPrintable(QStringLiteral("middle errno=%1 (%2)").arg(middleErr).arg(strerror(middleErr))));
+    QVERIFY(isAttackRejectionErrno(middleErr));
+}
+
+/**
+ * @brief 既定ではroot所有で書き込み不可の連鎖を要求することを確認する
+ *
+ * /tmp配下の利用者所有の木は祖先に信頼できないディレクトリを含むため、既定の呼び出しはEPERMで拒否する
+ * 明示的にfalseを渡した場合だけ開ける
+ */
+void TestFilesystemHelpers::safeOpenDirectoryRequiresTrustedChainByDefault()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // 一時ディレクトリのmodeは環境により異なるため、攻撃者に名前を変更できる状態へ揃える
+    QCOMPARE(::chmod(tempDir.path().toUtf8().constData(), 0777), 0);
+
+    errno = 0;
+    const int defaultFd = safeOpenDirectory(tempDir.path());
+    QVERIFY(defaultFd < 0);
+    QCOMPARE(errno, EPERM);
+
+    const int explicitFd = safeOpenDirectory(tempDir.path(), false);
+    QVERIFY(explicitFd >= 0);
+    ::close(explicitFd);
+}
+
+/**
+ * @brief root所有で書き込み不可の連鎖の下のディレクトリを、既定の引数で開けることを確認する
+ *
+ * 「/」から対象までの全ディレクトリがroot所有でgroupとotherに書き込みを許さない標準的な場所を使う
+ */
+void TestFilesystemHelpers::safeOpenDirectoryAcceptsTrustedRootOwnedChain()
+{
+    QString trustedPath;
+    // 「/」だけでは成分を1つも辿らないため、複数の成分を辿る場所を優先する
+    for (const QString &candidate : {QStringLiteral("/usr/share"), QStringLiteral("/usr"),
+                                     QStringLiteral("/etc")}) {
+        struct stat st;
+        if (::stat(candidate.toUtf8().constData(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            trustedPath = candidate;
+            break;
+        }
+    }
+    if (trustedPath.isEmpty()) {
+        QSKIP("No standard root-owned directory is present");
+    }
+
+    const int fd = safeOpenDirectory(trustedPath);
+    QVERIFY(fd >= 0);
+    ::close(fd);
+}
+
+/**
+ * @brief 対象自身が安全でも、途中の祖先が書き込み可能なら既定の呼び出しが拒否することを確認する
+ *
+ * 対象だけを検査する実装では、祖先の名前を入れ替えられて別の木を開かされることを見落とす
+ * 祖先のmodeだけを変えた対照を置き、拒否の理由が途中の祖先にあることを示す
+ * @note root所有のディレクトリはrootでしか作れないため、root以外ではスキップする
+ */
+void TestFilesystemHelpers::safeOpenDirectoryRejectsUntrustedIntermediateAncestor()
+{
+    if (::geteuid() != 0) {
+        QSKIP("Creating root-owned directories requires root");
+    }
+
+    // /tmpは全員が書き込めるため、信頼できる連鎖の下に置ける/runを基点にする
+    const int runFd = safeOpenDirectory(QStringLiteral("/run"));
+    if (runFd < 0) {
+        QSKIP("/run is not on a trusted root-owned chain");
+    }
+    ::close(runFd);
+
+    QTemporaryDir baseDir(QStringLiteral("/run/qsnapper-tst-XXXXXX"));
+    QVERIFY(baseDir.isValid());
+    QCOMPARE(::chmod(baseDir.path().toUtf8().constData(), 0755), 0);
+
+    const QString middlePath = baseDir.path() + QStringLiteral("/middle");
+    const QString leafPath = middlePath + QStringLiteral("/leaf");
+    QCOMPARE(::mkdir(middlePath.toUtf8().constData(), 0755), 0);
+    QCOMPARE(::mkdir(leafPath.toUtf8().constData(), 0700), 0);
+
+    // umaskの影響を受けないよう、作成後にchmodで祖先だけを全員書き込み可能にする
+    QCOMPARE(::chmod(middlePath.toUtf8().constData(), 0777), 0);
+    errno = 0;
+    const int untrustedFd = safeOpenDirectory(leafPath);
+    QVERIFY(untrustedFd < 0);
+    QCOMPARE(errno, EPERM);
+
+    QCOMPARE(::chmod(middlePath.toUtf8().constData(), 0755), 0);
+    const int trustedFd = safeOpenDirectory(leafPath);
+    QVERIFY(trustedFd >= 0);
+    ::close(trustedFd);
 }
 
 /**

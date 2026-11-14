@@ -891,7 +891,11 @@ namespace qsnapper::security {
     {
         // .snapshotsやその祖先がsymlinkへ差し替えられた場合に別の木の指紋を作らないよう、
         // 成分ごとにsymlinkを辿らずに開く
-        const int dirFd = safeOpenDirectory(snapshotsDirPath);
+        // 指紋は一覧の再利用可否の判定にだけ使い、特権操作の判断には使わないため、
+        // root所有の連鎖は要求しない
+        // 利用者所有のBtrfs設定では.snapshotsの祖先がroot所有にならず、
+        // 要求すると毎回指紋の取得に失敗してSnapperを作り直し続けることになる
+        const int dirFd = safeOpenDirectory(snapshotsDirPath, false);
         if (dirFd < 0) {
             return {};
         }

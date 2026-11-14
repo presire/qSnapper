@@ -51,6 +51,7 @@ RESTORE_IN_PROGRESS_TEXT = "A restore is in progress"             # ゲートが
 RESTORING_CONFIG = "qsnapper-gate-test-restoring"                 # 復元中として記録する実在しないconfig名
 OTHER_CONFIG = "qsnapper-gate-test-other"                         # 復元対象とは別の実在しないconfig名
 CALL_TIMEOUT_S = 10.0                                             # 1回の非同期呼び出しを待つ上限 (秒)
+AUTHORIZATION_GRANTED = "authorizationGranted"                    # 認可確定を呼び出し元だけへ知らせるシグナル名
 
 
 def proof(label: str, value: object) -> None:
@@ -190,7 +191,8 @@ def call(obj, method_name: str, args: list) -> tuple[str, str]:
 
 
 def call_deferred(obj, control: ServiceControl, method_name: str, args: list,
-                  while_pending: list[str], resolution: str) -> tuple[str, str]:
+                  while_pending: list[str], resolution: str,
+                  events: list | None = None) -> tuple[str, str]:
     """
     @brief 認可待ちの間に状態を変えてから認可を確定し、その呼び出しの結果を返す
 
@@ -201,6 +203,7 @@ def call_deferred(obj, control: ServiceControl, method_name: str, args: list,
         args: メソッドへ渡す引数
         while_pending: 認可待ちの間に送る制御コマンド
         resolution: 認可の確定方法 (grant / deny)
+        events: 認可確定通知と応答を到着順に記録するリスト (Noneなら記録しない)
 
     Returns:
         成功した場合は ("OK", 戻り値の文字列)、失敗した場合は (エラー名, エラー本文)
@@ -219,6 +222,8 @@ def call_deferred(obj, control: ServiceControl, method_name: str, args: list,
             values: メソッドの戻り値
         """
         outcome.append(("OK", repr(values)))
+        if events is not None:
+            events.append(("reply", "OK"))
         loop.quit()
 
     def on_error(exc):
@@ -229,6 +234,8 @@ def call_deferred(obj, control: ServiceControl, method_name: str, args: list,
             exc: D-Busのエラー
         """
         outcome.append((exc.get_dbus_name() or "", exc.get_dbus_message() or ""))
+        if events is not None:
+            events.append(("reply", outcome[-1][0]))
         loop.quit()
 
     control.expect_ok("auth defer")
@@ -294,6 +301,55 @@ def expect_reached_body(result: tuple[str, str], baseline: tuple[str, str], tag:
         fail(f"{tag}: result {result} differs from the pre-restore baseline {baseline}")
 
 
+def reset_signal_events(events: list) -> None:
+    """
+    @brief 保留中のイベントを処理してから記録を空にする
+
+    直前の呼び出しの通知が遅れて処理され、次の検査へ混ざらないようにする
+    待ち時間ではなく、処理待ちのイベントが尽きるまでメインコンテキストを回す
+
+    Args:
+        events: 記録先のリスト (本関数で空にする)
+    """
+    context = GLib.MainContext.default()
+    while context.pending():
+        context.iteration(False)
+    events.clear()
+
+
+def expect_authorization_granted(events: list, expected_method: str) -> None:
+    """
+    @brief 認可確定通知がメソッド応答より先に届いたことを必須とする
+
+    Args:
+        events: 到着順に並んだ (種類, 値) のリスト
+        expected_method: 通知に載るべきメソッド名
+    """
+    proof("AUTHORIZATION_GRANTED_EVENTS", events)
+    signal_indexes = [index for index, event in enumerate(events) if event[0] == "signal"]
+    reply_indexes = [index for index, event in enumerate(events) if event[0] == "reply"]
+    received = [events[index][1] for index in signal_indexes]
+    if received != [expected_method]:
+        fail(f"expected one {AUTHORIZATION_GRANTED}({expected_method}), got {events}")
+    if len(reply_indexes) != 1 or reply_indexes[0] < signal_indexes[0]:
+        fail(f"expected the method reply after {AUTHORIZATION_GRANTED}, got {events}")
+
+
+def expect_no_authorization_granted(events: list, tag: str) -> None:
+    """
+    @brief 認可確定通知が届かず、メソッド応答だけが届いたことを必須とする
+
+    Args:
+        events: 到着順に並んだ (種類, 値) のリスト
+        tag: PROOFラベルに使う識別子
+    """
+    proof(f"{tag}_EVENTS", events)
+    if any(kind == "signal" for kind, _ in events):
+        fail(f"{tag}: unexpected {AUTHORIZATION_GRANTED}: {events}")
+    if not any(kind == "reply" for kind, _ in events):
+        fail(f"{tag}: the method reply did not arrive: {events}")
+
+
 def main() -> int:
     """
     @brief 共通ゲートの検査シナリオを実行する
@@ -324,6 +380,23 @@ def main() -> int:
 
         bus = dbus.SystemBus(private=True)
         obj = bus.get_object(IFACE, PATH)
+
+        # authorizationGrantedは呼び出し元だけへ届く
+        # 送信元をサービス名で絞り、隔離バス上の別の接続が送る同名シグナルと区別する
+        signal_events: list[tuple[str, str]] = []  # 認可確定通知とメソッド応答を到着順に記録する
+
+        def on_authorization_granted(method):
+            """
+            @brief 認可確定通知を到着順に記録する
+
+            Args:
+                method: 認可されたメソッド名
+            """
+            signal_events.append(("signal", str(method)))
+
+        bus.add_signal_receiver(on_authorization_granted,
+                                signal_name=AUTHORIZATION_GRANTED,
+                                dbus_interface=IFACE, bus_name=IFACE, path=PATH)
 
         # ゲートの対象となる操作 (実在しないconfig名で、本体まで到達しても実システムに触れない)
         gated_calls = {
@@ -377,6 +450,31 @@ def main() -> int:
         # --- 手順5: 復元の完了後は、各操作が再び本体まで到達する ---
         for tag, (method, args) in gated_calls.items():
             expect_reached_body(call(obj, method, args), baselines[tag], f"AFTER_{tag}")
+
+        # --- 手順6: 認可確定通知は、ゲート通過後に呼び出し元だけへ、応答より先に届く ---
+        reset_signal_events(signal_events)
+        method, args = gated_calls["SETUP_QUOTA"]
+        expect_reached_body(call_deferred(obj, control, method, args, [], "grant", signal_events),
+                            baselines["SETUP_QUOTA"], "DEFERRED_SIGNAL_GRANT")
+        expect_authorization_granted(signal_events, method)
+
+        # 拒否された認可では通知しない (表示を処理中へ切り替える根拠が無いため)
+        reset_signal_events(signal_events)
+        denied = call_deferred(obj, control, "SetupQuota", [RESTORING_CONFIG], [], "deny",
+                               signal_events)
+        if denied[0] == "OK":
+            fail(f"DEFERRED_SIGNAL_DENY: the call unexpectedly succeeded: {denied}")
+        proof("DEFERRED_SIGNAL_DENY_RESULT", denied)
+        expect_no_authorization_granted(signal_events, "DEFERRED_SIGNAL_DENY")
+
+        # 認可後にゲートが拒否する場合も通知しない
+        reset_signal_events(signal_events)
+        method, args = gated_calls["DELETE"]
+        rejected = call_deferred(obj, control, method, args,
+                                 [f"restore begin {RESTORING_CONFIG}"], "grant", signal_events)
+        expect_restore_in_progress(rejected, "DEFERRED_SIGNAL_GATE_REJECT")
+        control.expect_ok("restore end")
+        expect_no_authorization_granted(signal_events, "DEFERRED_SIGNAL_GATE_REJECT")
 
         print("RESTORE_GATE: ALL_OK")
         return 0

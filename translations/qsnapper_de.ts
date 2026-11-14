@@ -1819,6 +1819,12 @@ reason=manual-test</translation>
         <source>Error</source>
         <translation>Fehler</translation>
     </message>
+    <message>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="850"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="900"/>
+        <source>Waiting for authentication...</source>
+        <translation>Warte auf Authentifizierung...</translation>
+    </message>
 </context>
 <context>
     <name>SnapshotTableHeader</name>

@@ -37,6 +37,8 @@
 #include "restoremanifestregistry.h"
 #include "snapshotoperations_internal.h"
 
+#include "tst_temprootguard.h"
+
 /**
  * @class TestSnapshotOperations
  * @brief SnapshotOperationsの復元計画とエントリ適用の特権境界を検証するテスト
@@ -47,12 +49,17 @@
  *
  * m_readOnlyProbeCalls : rootの読み取り専用状態を確認した回数
  * m_readWriteRestoreCalls : rootをrwへ戻した回数
+ * m_tempRootGuard : スイート実行中のTMPDIRの切り替えを管理する
  */
 class TestSnapshotOperations : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief スイート開始前に、root実行時は一時ディレクトリの基点を信頼済みの/runへ切り替える */
+    void initTestCase();
+    /** @brief スイート終了時に、TMPDIRをスイート開始前の状態へ戻す */
+    void cleanupTestCase();
     /** @brief 各テストの前に、root操作の観測回数を0へ戻す */
     void init();
     /** @brief 各テストの終了時に、metadata適用のテスト用フックを解除する */
@@ -149,6 +156,35 @@ private slots:
     void unexpectedExceptionsDoNotEscapeAuthorizedBody();
     /** @brief 未知のcleanupアルゴリズムを認可の前に拒否することを検証する */
     void modifySnapshotRejectsUnknownCleanupBeforeAuthorization();
+    /** @brief CreateSnapshotも未知のcleanupアルゴリズムを認可の前だけで拒否することを検証する */
+    void createSnapshotRejectsUnknownCleanupBeforeAuthorization();
+    /** @brief 先頭が「-」の設定名を、設定名を受け取る全てのD-Busメソッドが認可の前に拒否することを検証する */
+    void dashPrefixedConfigNameIsRejectedBeforeAuthorization();
+
+    /** @brief 実時間に依存せず通信と期限処理の契約を検証する */
+    void idleLifetimeTracksCallsAndExpiry();
+    /** @brief 認可の許可と拒否と例外を対比する */
+    void pendingAuthorizationStopsIdleTimer_data();
+    /** @brief 本番の認可予算を保持する間は終了せず継続の終了後に待機へ戻る */
+    void pendingAuthorizationStopsIdleTimer();
+    /** @brief 認可枠の上限と複数要求の個別完了でも最後まで待つことを検証する */
+    void idleWaitsForLastPendingAuthorization();
+    /** @brief 認可から非同期操作へbusyを途切れさせず引き渡す */
+    void authorizationHandsOffBusyToOperation();
+    /** @brief サービスの破棄後に認可の継続を呼ばない */
+    void destroyedServiceIgnoresAuthorizationCallback();
+    /** @brief 復元の終端とowner切断のケースを提供する */
+    void restoreCleanupStopsIdleTimer_data();
+    /** @brief 復元後処理が終わるまでbusyを保持しStaging計画だけでは常駐しない */
+    void restoreCleanupStopsIdleTimer();
+    /** @brief timerの変更枠と照会枠を対比する */
+    void timerOperationStopsIdleTimer_data();
+    /** @brief timerの通常完了とQObject破棄でbusyを解放する */
+    void timerOperationStopsIdleTimer();
+    /** @brief 復元とsnapperdの終了順にかかわらず最後のbusy解除を待つ */
+    void overlappingOperationsStopIdleTimer_data();
+    /** @brief 重複するbusy状態を個別に解放して終了可能時点を検証する */
+    void overlappingOperationsStopIdleTimer();
 
 private:
     /**
@@ -159,6 +195,7 @@ private:
 
     int m_readOnlyProbeCalls = 0;      // rootの読み取り専用状態を確認した回数
     int m_readWriteRestoreCalls = 0;   // rootをrwへ戻した回数
+    qsnapper::test::TempRootGuard m_tempRootGuard;   // root実行時の一時ディレクトリの基点を/runへ切り替える
 };
 
 namespace {
@@ -651,6 +688,26 @@ void TestSnapshotOperations::typechangedGuardsForeignDirectories()
     QCOMPARE(after.st_mode, before.st_mode);
     QCOMPARE(readFile(preserved + QStringLiteral("/file")), QByteArray("preserved content"));
     operations.finishRestorePlanForTesting(manifestId, qsnapper::restore::ManifestState::Failed);
+}
+
+/**
+ * @brief スイート開始前に、root実行時は一時ディレクトリの基点を信頼済みの/runへ切り替える
+ *
+ * rootで既定の/tmpを使うと、製品の安全判定が正規の経路もEPERMで拒否してしまう
+ * /runを製品と同じ判定で開けない場合は、テストの前提が崩れているためスキップせず失敗として報告する
+ */
+void TestSnapshotOperations::initTestCase()
+{
+    QString errorMessage;
+    QVERIFY2(m_tempRootGuard.prepare(&errorMessage), qPrintable(errorMessage));
+}
+
+/**
+ * @brief スイート終了時に、TMPDIRをスイート開始前の状態へ戻す
+ */
+void TestSnapshotOperations::cleanupTestCase()
+{
+    m_tempRootGuard.restore();
 }
 
 /**
@@ -1930,6 +1987,89 @@ void TestSnapshotOperations::modifySnapshotRejectsUnknownCleanupBeforeAuthorizat
 }
 
 /**
+ * @brief CreateSnapshotが未知のcleanupアルゴリズムを認可の前に拒否することを確認する
+ *
+ * 認可後の再照合を取り除いたため、認可前の照合だけで未知の名前を止められることを確かめる
+ * 許可する名前は、説明文に制御文字を含めて本体の作成前の検査で失敗させ、スナップショットを作らずに認可だけが要求されることを確かめる
+ * Single作成のpreNumberは-1のまま渡し、既存のD-Bus契約の呼び出し方で検証する
+ */
+void TestSnapshotOperations::createSnapshotRejectsUnknownCleanupBeforeAuthorization()
+{
+    SnapshotOperations operations;
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+
+    const int before = operations.testAuthorizationRequestCount();
+    const QStringList rejected = {
+        QStringLiteral("bogus"),
+        QStringLiteral("Number"),
+        QStringLiteral("number "),
+        QStringLiteral("timeline,number"),
+    };
+    for (const QString &cleanup : rejected) {
+        QVERIFY(operations.CreateSnapshot(QStringLiteral("root"), QStringLiteral("single"),
+                                          QStringLiteral("description"), -1, cleanup, {}, false)
+                        .isEmpty());
+    }
+    QCOMPARE(operations.testAuthorizationRequestCount(), before);
+
+    const QStringList allowed = {
+        QString(),
+        QStringLiteral("number"),
+        QStringLiteral("timeline"),
+        QStringLiteral("empty-pre-post"),
+    };
+    for (const QString &cleanup : allowed) {
+        QVERIFY(operations.CreateSnapshot(QStringLiteral("root"), QStringLiteral("single"),
+                                          QStringLiteral("line\nbreak"), -1, cleanup, {}, false)
+                        .isEmpty());
+    }
+    QCOMPARE(operations.testAuthorizationRequestCount(), before + static_cast<int>(allowed.size()));
+}
+
+/**
+ * @brief 先頭が「-」の設定名を、設定名を受け取る全てのD-Busメソッドが認可の前に拒否することを確認する
+ *
+ * 設定名はsnapperの外部コマンドやlibsnapperへ渡るため、オプションと解釈される名前を入口で止める必要がある
+ * 判定そのものはtst_confignameで検証済みのため、ここでは全ての入口が認可を要求せずに拒否することだけを確かめる
+ * 認可を要求しないことで、通らない値のために利用者へプロンプトを出さないことも保証する
+ */
+void TestSnapshotOperations::dashPrefixedConfigNameIsRejectedBeforeAuthorization()
+{
+    SnapshotOperations operations;
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+
+    const QStringList names = {
+        QStringLiteral("-"),
+        QStringLiteral("-root"),
+        QStringLiteral("--help"),
+    };
+    const int before = operations.testAuthorizationRequestCount();
+    for (const QString &name : names) {
+        QVERIFY(operations.ListSnapshots(name).isEmpty());
+        QVERIFY(operations.CreateSnapshot(name, QStringLiteral("single"), QStringLiteral("description"), -1,
+                                          QString(), {}, false)
+                        .isEmpty());
+        QVERIFY(!operations.ModifySnapshot(name, 1, QStringLiteral("description"), QString(), {}));
+        QVERIFY(!operations.DeleteSnapshot(name, 1));
+        QVERIFY(operations.DeleteSnapshots(name, {1u}).isEmpty());
+        QVERIFY(!operations.RollbackSnapshot(name, 1));
+        QVERIFY(operations.GetFileChanges(name, 1).isEmpty());
+        QVERIFY(operations.GetFileChangesBetween(name, 1, 2).isEmpty());
+        QVERIFY(operations.GetFileDiffAndDetails(name, 1, QStringLiteral("/etc/fstab")).isEmpty());
+        QVERIFY(operations.GetFileDiffBetween(name, 1, 2, QStringLiteral("/etc/fstab")).isEmpty());
+        QVERIFY(operations.BeginRestorePlan(name, 1, 0, QStringLiteral("files")).isEmpty());
+        QVERIFY(!operations.WriteSnapperConfig(name, {}));
+        QVERIFY(!operations.SetupQuota(name));
+        QVERIFY(operations.GetConfig(name).isEmpty());
+        QVERIFY(!operations.CreateConfig(name, QStringLiteral("/home")));
+        QVERIFY(!operations.DeleteConfig(name));
+        QVERIFY(operations.GetFilesystemUsage(name).isEmpty());
+        QVERIFY(operations.ListSubvolumes(name).isEmpty());
+    }
+    QCOMPARE(operations.testAuthorizationRequestCount(), before);
+}
+
+/**
  * @brief 認可済みのconfig操作の直前に、対象configのStaging計画をownerを問わず取り消すことを検証する
  *
  * 取り消した計画は作成者へcancelledで通知し、別のconfigの計画や番号の異なる計画は残す
@@ -2391,6 +2531,280 @@ void TestSnapshotOperations::refusedReattachKeepsDetachedEntry()
     const QString detachedPath = liveTeam + QLatin1Char('/') + names.first();
     QCOMPARE(inodeOf(detachedPath), entryInode);
     QCOMPARE(readFile(detachedPath), QByteArray("LIVE-ENTRY"));
+}
+
+/**
+ * @brief 内部イベントでは期限を延長せず、呼び出しと期限処理だけを反映する
+ * @note 設定期間を直接変更し、実際の時間経過を待たず全期間への復帰を検証する
+ */
+void TestSnapshotOperations::idleLifetimeTracksCallsAndExpiry()
+{
+    SnapshotOperations operations;
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    const int fullPeriod = operations.idleTimerIntervalForTesting();
+    QCOMPARE(fullPeriod, 5 * 60 * 1000);
+    QSignalSpy expired(&operations, &SnapshotOperations::idleTimeoutForTesting);
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+    bool callbackRan = false;
+    QVERIFY(QMetaObject::invokeMethod(&operations, [&callbackRan]() { callbackRan = true; },
+                                      Qt::QueuedConnection));
+    QCoreApplication::sendPostedEvents(&operations, QEvent::MetaCall);
+    QVERIFY(callbackRan);
+    QCOMPARE(operations.idleTimerIntervalForTesting(), 10000);
+
+    QVERIFY(operations.GetRestorePlanStatus(QStringLiteral("absent")).isEmpty());
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+    QVERIFY(operations.authorizeThrowingBodyForTesting([&operations]() {
+        operations.setIdleTimerRemainingTimeForTesting(10000);
+        return true;
+    }));
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 1);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+}
+
+/** @brief 本番の認可枠を返す全ての結果を提供する */
+void TestSnapshotOperations::pendingAuthorizationStopsIdleTimer_data()
+{
+    QTest::addColumn<bool>("granted");
+    QTest::addColumn<bool>("throws");
+    QTest::newRow("grant") << true << false;
+    QTest::newRow("deny") << false << false;
+    QTest::newRow("body-exception") << true << true;
+}
+
+/**
+ * @brief polkitだけを置き換えた本番の認可予算経路でbusyを検証する
+ * @note 継続が終了するまで枠を返さず、例外でも全アイドル期間へ復帰する
+ */
+void TestSnapshotOperations::pendingAuthorizationStopsIdleTimer()
+{
+    QFETCH(bool, granted);
+    QFETCH(bool, throws);
+    SnapshotOperations operations;
+    const int fullPeriod = operations.idleTimerIntervalForTesting();
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::DeferWithBudget);
+    QSignalSpy expired(&operations, &SnapshotOperations::idleTimeoutForTesting);
+    bool bodyRan = false;
+    bool busyInBody = false;
+    QVERIFY(!operations.authorizeThrowingBodyForTesting([&]() -> bool {
+        bodyRan = true;
+        busyInBody = !operations.isIdleTimerActiveForTesting()
+            && operations.pendingAuthorizationCountForTesting() == 1;
+        if (throws) {
+            throw std::runtime_error("test authorization continuation");
+        }
+        return true;
+    }));
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 1);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 0);
+    operations.resolveTestAuthorizations(granted);
+    QCOMPARE(bodyRan, granted);
+    QCOMPARE(busyInBody, granted);
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 0);
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 1);
+}
+
+/** @brief 上限で拒否した要求でも残る認可のbusyを失わず最後の完了を待つ */
+void TestSnapshotOperations::idleWaitsForLastPendingAuthorization()
+{
+    SnapshotOperations operations;
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::DeferWithBudget);
+    int bodies = 0;
+    for (int index = 0; index < 5; ++index) {
+        QVERIFY(!operations.authorizeThrowingBodyForTesting([&bodies]() { ++bodies; return true; }));
+    }
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 4);
+    auto first = operations.takeTestAuthorizationCompletionForTesting();
+    first(true);
+    QCOMPARE(bodies, 1);
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 3);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    operations.resolveTestAuthorizations(false);
+    QCOMPARE(bodies, 1);
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 0);
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+}
+
+/** @brief 認可の継続が始めたsnapperd処理までbusyを保持する */
+void TestSnapshotOperations::authorizationHandsOffBusyToOperation()
+{
+    SnapshotOperations operations;
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::DeferWithBudget);
+    QVERIFY(!operations.authorizeThrowingBodyForTesting([&operations]() {
+        operations.beginSnapperdOperationForTesting();
+        return true;
+    }));
+    operations.resolveTestAuthorizations(true);
+    QCOMPARE(operations.pendingAuthorizationCountForTesting(), 0);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    operations.endSnapperdOperationForTesting();
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+}
+
+/** @brief 破棄済みQObjectへpolkitの応答が届いても継続を呼ばない */
+void TestSnapshotOperations::destroyedServiceIgnoresAuthorizationCallback()
+{
+    auto operations = std::make_unique<SnapshotOperations>();
+    operations->setAuthorizationForTesting(SnapshotOperations::TestAuthorization::DeferWithBudget);
+    bool bodyRan = false;
+    QVERIFY(!operations->authorizeThrowingBodyForTesting([&bodyRan]() { bodyRan = true; return true; }));
+    auto complete = operations->takeTestAuthorizationCompletionForTesting();
+    operations.reset();
+    complete(true);
+    QVERIFY(!bodyRan);
+}
+
+/** @brief 復元の正常終了と取消と失敗とowner切断を提供する */
+void TestSnapshotOperations::restoreCleanupStopsIdleTimer_data()
+{
+    QTest::addColumn<int>("terminalState");
+    QTest::addColumn<bool>("ownerGone");
+    using qsnapper::restore::ManifestState;
+    QTest::newRow("completed") << int(ManifestState::Completed) << false;
+    QTest::newRow("cancelled") << int(ManifestState::Cancelled) << false;
+    QTest::newRow("failed") << int(ManifestState::Failed) << false;
+    QTest::newRow("owner-disconnected") << int(ManifestState::Cancelled) << true;
+}
+
+/**
+ * @brief Staging計画のTTLと実行の常駐期間を分離し後処理の間もbusyを保持する
+ * @note root安全網は観測用関数に置き換え、実ファイルシステムを変更しない
+ */
+void TestSnapshotOperations::restoreCleanupStopsIdleTimer()
+{
+    QFETCH(int, terminalState);
+    QFETCH(bool, ownerGone);
+    SnapshotOperations operations;
+    operations.setAuthorizationForTesting(SnapshotOperations::TestAuthorization::Grant);
+    const int fullPeriod = operations.idleTimerIntervalForTesting();
+    const QString id = operations.BeginRestorePlan(QStringLiteral("root"), 1, 0, QStringLiteral("direct"));
+    QVERIFY(!id.isEmpty());
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    QSignalSpy expired(&operations, &SnapshotOperations::idleTimeoutForTesting);
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 1);
+    QVERIFY(operations.GetRestorePlanStatus(id).contains(QStringLiteral(",staging,")));
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+
+    bool cleanupRan = false;
+    bool busyDuringCleanup = false;
+    operations.setRootSubvolumeAccessForTesting(
+        [](bool *readOnly) { *readOnly = true; return true; },
+        [&]() {
+            cleanupRan = true;
+            busyDuringCleanup = !operations.isIdleTimerActiveForTesting();
+            operations.triggerIdleTimeoutForTesting();
+            return true;
+        });
+    qsnapper::restore::RootReadWriteSafetyNetState state;
+    state.executionStarted = true;
+    state.targetsRootSubvolume = true;
+    state.preRestoreStateKnown = true;
+    state.preRestoreReadOnly = false;
+    operations.beginRestoreApplyForTesting(id, {}, -1, {}, false, state);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 1);
+    if (ownerGone) {
+        operations.handleRestoreOwnerUnregisteredForTesting({});
+    }
+    else {
+        operations.finishRestorePlanForTesting(id, qsnapper::restore::ManifestState(terminalState));
+    }
+    QVERIFY(cleanupRan);
+    QVERIFY(busyDuringCleanup);
+    QCOMPARE(expired.count(), 1);
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+}
+
+/** @brief timerの2種類の枠と正常完了か破棄かを組み合わせる */
+void TestSnapshotOperations::timerOperationStopsIdleTimer_data()
+{
+    QTest::addColumn<bool>("query");
+    QTest::addColumn<bool>("destroyed");
+    QTest::newRow("change-finished") << false << false;
+    QTest::newRow("query-finished") << true << false;
+    QTest::newRow("change-destroyed") << false << true;
+    QTest::newRow("query-destroyed") << true << true;
+}
+
+/** @brief 操作中は終了せず破棄された操作のcallbackも実行しない */
+void TestSnapshotOperations::timerOperationStopsIdleTimer()
+{
+    QFETCH(bool, query);
+    QFETCH(bool, destroyed);
+    SnapshotOperations operations;
+    const int fullPeriod = operations.idleTimerIntervalForTesting();
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+    auto *operation = operations.beginTimerOperationForTesting(query);
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    QSignalSpy expired(&operations, &SnapshotOperations::idleTimeoutForTesting);
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 0);
+    bool callbackRan = false;
+    if (destroyed) {
+        operation->start([&callbackRan](auto, const SnapperTimerStateMap &) { callbackRan = true; });
+        delete operation;
+    }
+    else {
+        operations.endTimerOperationForTesting(query);
+    }
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    QVERIFY(!callbackRan);
+}
+
+/** @brief 重複する2種類の処理の完了順を入れ替える */
+void TestSnapshotOperations::overlappingOperationsStopIdleTimer_data()
+{
+    QTest::addColumn<bool>("restoreFirst");
+    QTest::newRow("restore-first") << true;
+    QTest::newRow("snapperd-first") << false;
+}
+
+/** @brief 片方の完了ではidleへ戻らず最後の完了時に全期間を設定する */
+void TestSnapshotOperations::overlappingOperationsStopIdleTimer()
+{
+    QFETCH(bool, restoreFirst);
+    SnapshotOperations operations;
+    const int fullPeriod = operations.idleTimerIntervalForTesting();
+    operations.setIdleTimerRemainingTimeForTesting(10000);
+    operations.beginRestoreExecutionForTesting(QStringLiteral("root"));
+    operations.beginSnapperdOperationForTesting();
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    QSignalSpy expired(&operations, &SnapshotOperations::idleTimeoutForTesting);
+    if (restoreFirst) {
+        operations.endRestoreExecutionForTesting();
+    }
+    else {
+        operations.endSnapperdOperationForTesting();
+    }
+    QVERIFY(!operations.isIdleTimerActiveForTesting());
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 0);
+    if (restoreFirst) {
+        operations.endSnapperdOperationForTesting();
+    }
+    else {
+        operations.endRestoreExecutionForTesting();
+    }
+    QVERIFY(operations.isIdleTimerActiveForTesting());
+    QCOMPARE(operations.idleTimerIntervalForTesting(), fullPeriod);
+    operations.triggerIdleTimeoutForTesting();
+    QCOMPARE(expired.count(), 1);
 }
 
 QTEST_GUILESS_MAIN(TestSnapshotOperations)

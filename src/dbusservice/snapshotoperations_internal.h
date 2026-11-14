@@ -12,6 +12,7 @@
 #include <QString>
 #include <QLatin1Char>
 #include <QRandomGenerator>
+#include <snapper/File.h>
 #include <pwd.h>
 #include <grp.h>
 #include <sys/types.h>
@@ -97,6 +98,34 @@ namespace qsnapper::internal {
     inline QString permsToOctal(mode_t mode)
     {
         return QString("%1").arg(static_cast<unsigned int>(mode & 07777), 4, 8, QChar('0'));
+    }
+
+    /**
+     * @brief snapperの変更フラグを、一覧と詳細で共通の状態文字列へ変換する
+     *
+     * 一覧と詳細の取得で別々に組み立てると、表記の順序や桁埋めが食い違うおそれがあるため、ここへまとめる
+     * 文字の順序は「+ - t c p u g x a」で固定し、クライアントは先頭の文字と各文字の有無で変更内容を判定する
+     * 5文字に満たない場合は末尾を「.」で埋めるが、6文字以上になっても切り詰めない
+     * 切り詰めると、後ろにある変更フラグが表示から消えてしまうためである
+     * 未知のビットは表記に含めない
+     *
+     * @param status snapper::File::getPreToPostStatus()の戻り値
+     * @return 変更フラグの状態文字列 (変更フラグが無い場合は「.....」)
+     */
+    inline QString formatFileStatus(unsigned int status)
+    {
+        QString statusText;
+        if (status & snapper::CREATED) statusText += QLatin1Char('+');
+        if (status & snapper::DELETED) statusText += QLatin1Char('-');
+        if (status & snapper::TYPE) statusText += QLatin1Char('t');
+        if (status & snapper::CONTENT) statusText += QLatin1Char('c');
+        if (status & snapper::PERMISSIONS) statusText += QLatin1Char('p');
+        if (status & snapper::OWNER) statusText += QLatin1Char('u');
+        if (status & snapper::GROUP) statusText += QLatin1Char('g');
+        if (status & snapper::XATTRS) statusText += QLatin1Char('x');
+        if (status & snapper::ACL) statusText += QLatin1Char('a');
+
+        return statusText.leftJustified(5, QLatin1Char('.'));
     }
 
 } // namespace qsnapper::internal

@@ -241,5 +241,14 @@
       <arg name="terminalState" type="s"/>
       <arg name="message" type="s"/>
     </signal>
+    <!--
+      認可が確定して、復元の実行中かどうかの確認も通過した直後に、呼び出した接続へ送信する
+      引数は呼び出されたメソッド名のみであり、GUIが認証待ちの表示を処理中の表示へ切り替えるために使用する
+      表示専用の通知であり、認可や処理の成否の判断には使用しない
+      システムバス全体へのブロードキャストはせず、呼び出し元のunique name宛てにのみ送信する
+    -->
+    <signal name="authorizationGranted">
+      <arg name="method" type="s"/>
+    </signal>
   </interface>
 </node>

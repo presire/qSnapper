@@ -25,6 +25,7 @@
 #include <QDBusServiceWatcher>
 #include <QPointer>
 #include <QTimer>
+#include <QScopeGuard>
 #include <sys/stat.h>
 #include <exception>
 #include <functional>
@@ -95,9 +96,32 @@ private:
     QPointer<qsnapper::dbusservice::SnapperdOperation> m_snapperdOperation;    // snapperdへ転送した実行中の変更 (同時に1件だけ、完了まで他の操作を拒否する)
 
 private:
-    /** @brief アイドルタイマをリセットする
+    /** @brief 応答や後片付けを残して終了できない状態を判定する
+     * @return 認可待ちまたは実行中の操作がある場合true
+     * @note Staging計画のTTLは常駐期間から独立しているため判定に含めない
      */
-    void resetIdleTimer();
+    bool isBusy() const;
+
+    /** @brief busy状態の遷移後にアイドル期間を開始または停止する
+     * @note 最後の処理が終わった時点から常に5分を確保し、既にidleなら期限を延ばさない
+     */
+    void reevaluateIdleState();
+
+    /** @brief 呼び出しによって新しいアイドル期間を開始する
+     * @note busy中の通信ではタイマを開始せず、処理完了後の再評価に任せる
+     */
+    void recordCallActivity();
+
+    /** @brief QObject破棄によるbusy解除も開始時に登録して取りこぼさない
+     * @param operation 実行中のQPointerに設定済みの操作
+     * @note QPointerはdestroyed通知の前にクリアされるため、その時点で再評価できる
+     */
+    void observeOperationLifetime(QObject *operation);
+
+    /** @brief busyでない場合だけサービスをアイドル終了させる
+     * @note テストでは同じ判定を通し、プロセス終了を通知に置き換える
+     */
+    void handleIdleTimeout();
 
     /** @brief 現在のD-Bus呼び出しの応答コンテキストをキャプチャする
      * @return キャプチャ済み応答コンテキスト (D-Bus経由でなければfromDBus=false)
@@ -147,6 +171,17 @@ private:
      */
     AuthorizationOutcome beginAuthorization(const QString &actionId, std::function<void(const CallReply &, bool)> continuation);
 
+    /** @brief 本番の認可予算を確保し、継続の終了時に解放するcallbackを作る
+     * @param reply 認可要求の応答先
+     * @param callerUid 認可待ちを数えるUID
+     * @param continuation 認可結果を受け取る継続
+     * @return 枠を確保できた場合はcallback、上限到達時は空の関数
+     * @note 引き渡し中のidle終了を防ぐため、継続による操作開始の後で予算を返す
+     */
+    std::function<void(bool)> beginPendingAuthorization(
+        const CallReply &reply, uint callerUid,
+        std::function<void(const CallReply &, bool)> continuation);
+
     /** @brief 認可待ち1件の終了を記録し、必要ならアイドルタイマを再開する
      * @param callerUid 認可待ちを開始したときの呼び出し元UID
      */
@@ -166,6 +201,7 @@ private:
     template <typename T, typename Body>
     T invokeAuthorizedBody(const Body &body)
     {
+        const auto activity = qScopeGuard([this]() { recordCallActivity(); });
         try {
             return body();
         }
@@ -189,6 +225,9 @@ private:
      * @param gatePolicy 復元の実行中に拒否するかどうか
      * @note polkitプロンプトを待つ間に復元が始まり得るため、認可前の確認だけでは足りない
      *       本体を実行する直前に、復元の実行中でないことを再確認する
+     *       両方の確認を通過した後、本体の実行前に認可確定を呼び出し元だけへ通知する
+     *       ゲートで拒否する呼び出し元の表示を処理中の文言へ切り替えないため、通知はゲートの後に行う
+     *       本体の途中で失敗する可能性は残るため、最終的な成否はD-Bus応答で判断させる
      */
     template <typename T, typename Body>
     void completeDeferredCall(const CallReply &reply, const Body &body, bool granted,
@@ -199,6 +238,9 @@ private:
         if (granted) {
             if (gatePolicy == RestoreGatePolicy::AllowWhileRestoring
                     || !rejectWhileRestoreRunning()) {
+                // ゲートを通過した直後に認可確定を呼び出し元だけへ通知する
+                // ゲートで拒否する呼び出しでもGUIが処理中の表示へ切り替わらないよう、ゲートの後に行う
+                notifyAuthorizationGranted(reply);
                 result = invokeAuthorizedBody<T>(body);
             }
         }
@@ -209,7 +251,7 @@ private:
 
         const bool alreadyReplied = m_deferredReply->replied;
         m_deferredReply.reset();
-        if (!alreadyReplied) {
+        if (!alreadyReplied && reply.fromDBus) {
             reply.connection.send(
                 reply.message.createReply(QVariant::fromValue(result)));
         }
@@ -224,6 +266,9 @@ private:
      *    - polkitへの問い合わせ前 (実行できない操作のためにプロンプトを出さない)
      *    - 即時許可の経路で、本体を実行する直前
      *    - 遅延許可の経路で、本体を実行する直前 (completeDeferredCall)
+     *  両方の確認を通過した後、本体の実行前に認可確定を呼び出し元だけへ通知する
+     *  ゲートで拒否する呼び出し元の表示を処理中の文言へ切り替えないため、通知はゲートの後に行う
+     *  本体の途中で失敗する可能性は残るため、最終的な成否はD-Bus応答で判断させる
      *  BeginRestorePlan以外の復元計画のメソッドはbeginAuthorizationを直接使うため、本ゲートの対象外であり、既存の排他に任せる
      *  @tparam T 対象D-Busメソッドの戻り値型
      * @param actionId PolkitアクションID
@@ -250,6 +295,9 @@ private:
             if (gated && rejectWhileRestoreRunning()) {
                 return T{};
             }
+            // 即時許可の経路でも、ゲートを通過した直後に認可確定を呼び出し元だけへ通知する
+            // まだD-Busスロットの中なのでcaptureCallReply()で宛先を取得できる
+            notifyAuthorizationGranted(captureCallReply());
             return invokeAuthorizedBody<T>(body);
         }
         return T{};
@@ -330,11 +378,11 @@ private:
 
     /** @brief 認可済みのSetTimerEnabled本体
      *  応答はsystemdの操作と状態の読み直しを終えた後に非同期で送るため、戻り値は使われない
-     * @param unit 呼び出し元が指定したunit名 (本体で許可リストと照合し直す)
+     * @param canonicalUnit canonicalSnapperTimerUnitが返した許可リストの定数 (照合はSetTimerEnabledが認可前に済ませる)
      * @param enabled trueで有効化と起動、falseで停止と無効化
      * @return 常にfalse
      */
-    bool setTimerEnabledAuthorized(const QString &unit, bool enabled);
+    bool setTimerEnabledAuthorized(const QString &canonicalUnit, bool enabled);
 
     /** @brief 現在の呼び出しの応答を、本体から戻った後に非同期で送るために確保する
      *  即時許可の経路ではQDBusContextの遅延応答に切り替え、遅延許可の経路ではcompleteDeferredCallに応答を送らせない
@@ -570,6 +618,17 @@ private:
     bool sendRestorePlanSignalToOwner(const QString &owner, const QString &member,
                                       const QVariantList &arguments);
 
+    /** @brief 認可が確定したことを呼び出し元だけへ通知する
+     *
+     * GUIは認証待ちの表示を処理中の文言へ切り替えるために使う
+     * システムバスへブロードキャストすると他の利用者が特権操作の開始を観測できるため、呼び出し元のunique name宛てにだけ送る
+     * 単体テストの直接呼び出しには宛先のunique nameが無いため何もしない (全体へのemitで代用しない)
+     *
+     * @param reply 認可要求の応答コンテキスト (宛先と送信接続を兼ねる)
+     * @note 表示専用の通知であり、認可や処理の成否の判断に使ってはならない
+     */
+    void notifyAuthorizationGranted(const CallReply &reply);
+
     /** @brief マニフェスト状態をD-Bus contractの小文字表現へ変換する
      * @param state 変換対象状態
      * @return staging/frozen/running/completed/failed/cancelledのいずれか
@@ -672,7 +731,8 @@ public:
     enum class TestAuthorization {
         Polkit,     // 本番と同じくpolkitへ問い合わせる
         Grant,      // 即時に許可する (即時許可の経路を通す)
-        Defer       // 応答を保留し、resolveTestAuthorizationsで確定する (遅延許可の経路を通す)
+        Defer,      // 応答を保留し、resolveTestAuthorizationsで確定する (遅延許可の経路を通す)
+        DeferWithBudget // polkitだけを置き換え、本番の認可予算を確保して保留する
     };
 
     /** @brief 認可の結果をテスト用に固定する
@@ -695,6 +755,57 @@ public:
      * @param granted 許可する場合はtrue
      */
     void resolveTestAuthorizations(bool granted);
+
+    /** @brief サービス破棄後の認可応答を検証するため保留callbackを取り出す
+     * @return 最初の認可要求を確定するcallback
+     * @note callbackのQPointerによる寿命検査は本番と共有する
+     */
+    std::function<void(bool)> takeTestAuthorizationCompletionForTesting();
+
+    /** @brief 本番の認可予算に残る件数を返す
+     * @return 本番と共有する予算の保持件数
+     */
+    int pendingAuthorizationCountForTesting() const;
+
+    /** @brief アイドル終了までの待機が有効かを返す
+     * @return アイドルタイマが動作中ならtrue
+     */
+    bool isIdleTimerActiveForTesting() const;
+
+    /** @brief アイドル期限を待たず本番と同じ期限処理を呼ぶ
+     * @note プロセスを終了せずidleTimeoutForTestingで観測する
+     */
+    void triggerIdleTimeoutForTesting();
+
+    /** @brief 経過済みのアイドル期間を実時間を待たず再現する
+     * @param remainingMs 次の期限までの残り時間
+     * @note busy中には呼ばず、再開時に全期間が設定されることを検証する
+     */
+    void setIdleTimerRemainingTimeForTesting(int remainingMs);
+
+    /** @brief 次の期限までに設定された期間を返す
+     * @return QTimerに設定されたミリ秒単位の期間
+     * @note 経過時間を読まないため実行速度に依存せず検証できる
+     */
+    int idleTimerIntervalForTesting() const;
+
+    /** @brief テストで受け取るアイドル終了通知
+     * @note 本番のD-Busインタフェースには公開しない
+     */
+    Q_SIGNAL void idleTimeoutForTesting();
+
+    /** @brief timer操作を送信せず本番と同じ寿命監視を開始する
+     * @param query 照会枠を使う場合true、変更枠ならfalse
+     * @return 開始した操作
+     * @note 呼び出し側は操作の破棄によるbusy解除も検証できる
+     */
+    qsnapper::dbusservice::SystemdTimerOperation *beginTimerOperationForTesting(bool query);
+
+    /** @brief timer操作の通常完了と同じく枠を解放する
+     * @param query 照会枠を使う場合true、変更枠ならfalse
+     * @note 操作のdeleteLaterを待たずにidleへ戻ることを検証する
+     */
+    void endTimerOperationForTesting(bool query);
 
     /** @brief 復元の実行中の状態を、mountせずに作る
      *  共通ゲートとgetSnapperの多重防御を、実際の復元を伴わずに検証するために使う

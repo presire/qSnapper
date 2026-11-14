@@ -108,8 +108,29 @@ SnapperService::SnapperService(QObject *parent)
     qDBusRegisterMetaType<SnapperTimerState>();
     qDBusRegisterMetaType<SnapperTimerStateMap>();
 
+    // 所有者が一致するヘルパの認可通知だけを受け取り、表示用シグナルへ転送する
+    if (!QDBusConnection::systemBus().connect(
+            "com.presire.qsnapper.Operations",
+            "/com/presire/qsnapper/Operations",
+            "com.presire.qsnapper.Operations",
+            "authorizationGranted",
+            this,
+            SLOT(onAuthorizationGranted(QString)))) {
+        qWarning() << "Failed to subscribe to authorizationGranted";
+    }
+
     // QDBusInterfaceはコンストラクタでリモートオブジェクトを同期的に問い合わせてGUIを止めるため、生成しない
     // すべての呼び出しは非同期の固定宛先で行い、特権サービスの起動はバスのD-Bus activationに任せる
+}
+
+/**
+ * @brief ヘルパの認可通知を表示用シグナルへ転送する
+ * @param method 認可されたD-Busメソッド名
+ * @note 表示専用であり、認可や操作の成功の判定に使ってはならない
+ */
+void SnapperService::onAuthorizationGranted(const QString &method)
+{
+    emit operationAuthorized(method);
 }
 
 /**

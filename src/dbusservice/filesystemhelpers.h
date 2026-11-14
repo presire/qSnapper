@@ -43,6 +43,7 @@ namespace qsnapper::security {
      *
      * @param path 作成対象の絶対パス
      * @param mode 新規作成するディレクトリのmode(umaskの影響を受ける)
+     *        0を渡すと何も作成せずerrno=EINVALで失敗する
      * @return 全ての成分を用意できた場合true(失敗時はerrno設定)
      */
     bool safeMkpath(const QString &path, mode_t mode = 0755);
@@ -52,16 +53,18 @@ namespace qsnapper::security {
      *
      * 各パス成分をopenat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)で1段ずつ開き、最終ディレクトリのfdを返す
      *
-     * requireTrustedChainがtrueの場合は、「/」から対象までの全ディレクトリがroot所有で、
-     * groupとotherに書き込みを許さないことも要求する
+     * 既定では、「/」から対象までの全ディレクトリがroot所有で、groupとotherに書き込みを許さないことも要求する
      * libsnapperのmountのようにパス文字列だけを受け取る外部ライブラリへ渡す前に、
      * 一般ユーザが名前を差し替えられないことを確かめるために使う
+     * 利用者所有のBtrfsサブボリュームの根など、root所有にならない木を開く場合は、
+     * 呼び出し側がfalseを明示して渡し、代わりの安全策(dirfd相対のsymlink非追従の走査など)を併記すること
      *
      * @param path 対象ディレクトリの絶対パス
      * @param requireTrustedChain 信頼できるディレクトリだけを辿ることを要求する場合true
+     *        既定値はtrueであり、利用者所有の木を開ける場合はfalseを明示する
      * @return 成功時はfile descriptor(fd)、失敗時は-1(信頼できないディレクトリを含む場合はEPERM)
      */
-    int safeOpenDirectory(const QString &path, bool requireTrustedChain = false);
+    int safeOpenDirectory(const QString &path, bool requireTrustedChain = true);
 
     /**
      * @brief 通常ファイルを安全に読み取りオープンする
@@ -263,6 +266,7 @@ namespace qsnapper::security {
      * @param relativePath rootPathからの相対パス(「/」で始まるパス、[.]/[..]成分、制御文字は拒否)
      * @param createMissing 存在しない成分を作成するか
      * @param mode createMissingがtrueのときの作成モード
+     *        0を渡すと何も作成せずerrno=EINVALで失敗する
      * @return 成功時は末端ディレクトリのfd(呼び出し側でclose)、失敗時は-1(errno設定)
      *
      * @note 認可で対象を凍結した時点から実行時点まで、同じディレクトリfdを持ち越してはならない
@@ -281,6 +285,7 @@ namespace qsnapper::security {
      * @param rootPath 基点ルートディレクトリ
      * @param destinationPath 作成先の絶対パス(rootPath配下であること)
      * @param mode 作成するディレクトリのモード
+     *        0を渡すと何も作成せずerrno=EINVALで失敗する
      * @return 作成できた場合true、失敗した場合false(errno設定)
      */
     bool safeCreateDirectoryBeneathRoot(const QString &rootPath, const QString &destinationPath,

@@ -22,7 +22,7 @@
 
 ### Build Dependencies
 
-- CMake (>= 3.16)
+- CMake (>= 3.19)
 - C++17 compatible compiler (GCC, Clang)
 - Qt6 development packages
 - PolicyKit-Qt6 development files

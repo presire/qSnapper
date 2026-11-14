@@ -18,6 +18,27 @@
 #include "tst_filesystemhelpers.h"
 
 using namespace qsnapper::security;
+
+/**
+ * @brief スイート開始前に、root実行時は一時ディレクトリの基点を信頼済みの/runへ切り替える
+ *
+ * rootで既定の/tmpを使うと、製品の安全判定が正規の経路もEPERMで拒否してしまう
+ * /runを製品と同じ判定で開けない場合は、テストの前提が崩れているためスキップせず失敗として報告する
+ */
+void TestFilesystemHelpers::initTestCase()
+{
+    QString errorMessage;
+    QVERIFY2(m_tempRootGuard.prepare(&errorMessage), qPrintable(errorMessage));
+}
+
+/**
+ * @brief スイート終了時に、TMPDIRをスイート開始前の状態へ戻す
+ */
+void TestFilesystemHelpers::cleanupTestCase()
+{
+    m_tempRootGuard.restore();
+}
+
 // ============================================================================
 // beneath-root 宛先解決ハードニング (Todo 2)
 // ============================================================================

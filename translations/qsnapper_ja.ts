@@ -1823,6 +1823,12 @@ reason=manual-test</translation>
         <source>Deleting snapshots, please wait...</source>
         <translation>スナップショットを削除しています。しばらくお待ちください...</translation>
     </message>
+    <message>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="850"/>
+        <location filename="../qml/pages/SnapshotListPage.qml" line="900"/>
+        <source>Waiting for authentication...</source>
+        <translation>認証を待っています...</translation>
+    </message>
 </context>
 <context>
     <name>SnapshotTableHeader</name>

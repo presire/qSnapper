@@ -88,24 +88,8 @@ QString SnapshotOperations::getFileChangesAuthorized(const QString &configName,
         QString output;
         for (auto it = files.begin(); it != files.end(); ++it) {
             const snapper::File &file = *it;
-            unsigned int status = file.getPreToPostStatus();
-
-            // ステータスフラグを文字列に変換
-            QString statusStr;
-            if (status & snapper::CREATED) statusStr += "+";
-            if (status & snapper::DELETED) statusStr += "-";
-            if (status & snapper::TYPE) statusStr += "t";
-            if (status & snapper::CONTENT) statusStr += "c";
-            if (status & snapper::PERMISSIONS) statusStr += "p";
-            if (status & snapper::OWNER) statusStr += "u";
-            if (status & snapper::GROUP) statusStr += "g";
-            if (status & snapper::XATTRS) statusStr += "x";
-            if (status & snapper::ACL) statusStr += "a";
-
-            if (statusStr.isEmpty()) statusStr = ".....";
-
-            // パディングして出力フォーマットを整える
-            statusStr = statusStr.leftJustified(5, '.');
+            // 状態文字列の表記は一覧と詳細で揃える必要があるため、共通の変換関数を使う
+            const QString statusStr = qsnapper::internal::formatFileStatus(file.getPreToPostStatus());
 
             // 本出力は「1行 = 1エントリ」の行指向テキストである
             // パスに改行を混入できると1エントリが複数行に割れ、2行目以降が攻撃者の選んだstatusとパスを持つ独立エントリとしてクライアントに解釈される
@@ -202,20 +186,7 @@ QString SnapshotOperations::getFileChangesBetweenAuthorized(
         QString output;
         for (auto it = files.begin(); it != files.end(); ++it) {
             const snapper::File &file = *it;
-            unsigned int status = file.getPreToPostStatus();
-
-            QString statusStr;
-            if (status & snapper::CREATED) statusStr += "+";
-            if (status & snapper::DELETED) statusStr += "-";
-            if (status & snapper::TYPE) statusStr += "t";
-            if (status & snapper::CONTENT) statusStr += "c";
-            if (status & snapper::PERMISSIONS) statusStr += "p";
-            if (status & snapper::OWNER) statusStr += "u";
-            if (status & snapper::GROUP) statusStr += "g";
-            if (status & snapper::XATTRS) statusStr += "x";
-            if (status & snapper::ACL) statusStr += "a";
-            if (statusStr.isEmpty()) statusStr = ".....";
-            statusStr = statusStr.leftJustified(5, '.');
+            const QString statusStr = qsnapper::internal::formatFileStatus(file.getPreToPostStatus());
 
             // fail-closeする理由と、検証した文字列をそのまま連結する理由は
             // getFileChangesAuthorized()側の注記を参照すること
@@ -319,19 +290,7 @@ QString SnapshotOperations::getFileDiffBetweenAuthorized(
             return QString();
         }
 
-        unsigned int status = fileIt->getPreToPostStatus();
-        QString statusStr;
-        if (status & snapper::CREATED) statusStr += "+";
-        if (status & snapper::DELETED) statusStr += "-";
-        if (status & snapper::TYPE) statusStr += "t";
-        if (status & snapper::CONTENT) statusStr += "c";
-        if (status & snapper::PERMISSIONS) statusStr += "p";
-        if (status & snapper::OWNER) statusStr += "u";
-        if (status & snapper::GROUP) statusStr += "g";
-        if (status & snapper::XATTRS) statusStr += "x";
-        if (status & snapper::ACL) statusStr += "a";
-        if (statusStr.isEmpty()) statusStr = ".....";
-        statusStr = statusStr.leftJustified(5, '.');
+        const QString statusStr = qsnapper::internal::formatFileStatus(fileIt->getPreToPostStatus());
 
         QString detailsPart;
         detailsPart += "status=" + statusStr + "\n";
@@ -457,19 +416,7 @@ QString SnapshotOperations::getFileDiffAndDetailsAuthorized(
         }
 
         // Details部の構築
-        unsigned int status = fileIt->getPreToPostStatus();
-        QString statusStr;
-        if (status & snapper::CREATED) statusStr += "+";
-        if (status & snapper::DELETED) statusStr += "-";
-        if (status & snapper::TYPE) statusStr += "t";
-        if (status & snapper::CONTENT) statusStr += "c";
-        if (status & snapper::PERMISSIONS) statusStr += "p";
-        if (status & snapper::OWNER) statusStr += "u";
-        if (status & snapper::GROUP) statusStr += "g";
-        if (status & snapper::XATTRS) statusStr += "x";
-        if (status & snapper::ACL) statusStr += "a";
-        if (statusStr.isEmpty()) statusStr = ".....";
-        statusStr = statusStr.leftJustified(5, '.');
+        const QString statusStr = qsnapper::internal::formatFileStatus(fileIt->getPreToPostStatus());
 
         QString detailsPart;
         detailsPart += "status=" + statusStr + "\n";

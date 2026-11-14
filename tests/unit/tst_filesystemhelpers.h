@@ -18,6 +18,8 @@
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
+#include "tst_temprootguard.h"
+
 /**
  * @class TestFilesystemHelpers
  * @brief qsnapper::securityの安全なファイル操作群を検証するテストクラス
@@ -32,12 +34,17 @@
  * buildAttackFixture : rootとoutsideからなる攻撃再現用の一時構成を作る
  * swapComponentToSymlink : 解決済みの成分をoutsideへのsymlinkへ差し替える
  * verifyOutsideUntouched : outside側が削除も改変もされていないことを検証する
+ * m_tempRootGuard : スイート実行中のTMPDIRの切り替えを管理する
  */
 class TestFilesystemHelpers : public QObject
 {
     Q_OBJECT
 
 private slots:
+    /** @brief スイート開始前に、root実行時は一時ディレクトリの基点を信頼済みの/runへ切り替える */
+    void initTestCase();
+    /** @brief スイート終了時に、TMPDIRをスイート開始前の状態へ戻す */
+    void cleanupTestCase();
     /** @brief 各テストの終了時にmetadata適用のテスト用フックを解除し、後続のテストへ状態を持ち越さない */
     void cleanup();
 
@@ -47,10 +54,18 @@ private slots:
     void safeMkpathRejectsSymlinkComponents();
     /** @brief 作成先そのものがsymlinkの場合に拒否し、リンク先へディレクトリを作らないことを確認する */
     void safeMkpathRejectsTargetSymlink();
+    /** @brief 作成を要求しながらmode 0を渡すと、何も作成せずに拒否することを確認する */
+    void safeMkpathRejectsZeroMode();
     /** @brief symlinkの通常ファイルを開かず、リンク先の内容を読ませないことを確認する */
     void safeOpenRegularFileReadRejectsSymlink();
     /** @brief symlinkを含むディレクトリパスを開かないことを確認する */
     void safeOpenDirectoryRejectsSymlinkPath();
+    /** @brief 既定ではroot所有で書き込み不可の連鎖を要求し、/tmp配下の利用者所有の木を拒否することを確認する */
+    void safeOpenDirectoryRequiresTrustedChainByDefault();
+    /** @brief root所有で書き込み不可の連鎖の下のディレクトリを、既定の引数で開けることを確認する */
+    void safeOpenDirectoryAcceptsTrustedRootOwnedChain();
+    /** @brief 途中の祖先だけが書き込み可能な連鎖を、既定の呼び出しが拒否することを確認する (root専用) */
+    void safeOpenDirectoryRejectsUntrustedIntermediateAncestor();
     /** @brief 2048バイトの長いリンク先も切り詰めずに取得することを確認する */
     void safeReadLinkNoFollowHandlesLargeTarget();
     /** @brief symlinkを辿らず、リンク自体の属性を返すことを確認する */
@@ -123,6 +138,10 @@ private slots:
     void safeOpenDirectoryBeneathRootWalksNestedPath();
     /** @brief 不足するディレクトリを、指定したmodeで作成することを確認する */
     void safeOpenDirectoryBeneathRootCreatesMissing();
+    /** @brief 作成を要求しながらmode 0を渡すと、root配下でも何も作成せずに拒否することを確認する */
+    void safeOpenDirectoryBeneathRootRejectsZeroMode();
+    /** @brief 葉の作成でもmode 0を渡すと、親ごと作らずに拒否することを確認する */
+    void safeCreateDirectoryBeneathRootRejectsZeroMode();
     /** @brief 途中のsymlink成分を辿らず、rootの外のディレクトリを開かないことを確認する */
     void safeOpenDirectoryBeneathRootRejectsSymlinkComponent();
     /** @brief 親ディレクトリをsymlinkへ差し替える攻撃があっても、書き込みを拒否することを確認する */
@@ -313,6 +332,8 @@ private:
      */
     void verifyOutsideUntouched(const QTemporaryDir &outsideDir, const QByteArray &sentinel,
                                 const QStringList &fingerprintBefore) const;
+
+    qsnapper::test::TempRootGuard m_tempRootGuard;   // root実行時の一時ディレクトリの基点を/runへ切り替える
 };
 
 #endif // TST_FILESYSTEMHELPERS_H

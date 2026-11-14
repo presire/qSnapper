@@ -186,7 +186,7 @@ bool RestoreManifest::isExpired(qint64 nowMs) const
 {
     // 実行中の計画はTTLで回収しない
     // TTLは「認可前に放置されたStaging / Frozen計画」を回収するための仕組みである
-    // 既に認可されて実行中の計画へ適用すると、別クライアントのPolkitプロンプトが単一スレッドのイベントループを長時間ブロックしただけでchunkの進行が止まり、
+    // 既に認可されて実行中の計画へ適用すると、別クライアントの同期処理 (snapperの比較や削除など) が単一スレッドのイベントループを長時間ブロックしただけでchunkの進行が止まり、
     // keepAliveも呼ばれずTTLが満了して、進行中の復元が黙って破棄される
     // その結果live filesystemが中途半端な状態のまま残るため、Runningは対象外とする
     // (owner消失時はQDBusServiceWatcher経由のremoveByOwnerが確実に回収するため、TTLで回収しなくても実行中計画が滞留することはない)

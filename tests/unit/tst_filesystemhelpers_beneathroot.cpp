@@ -161,6 +161,68 @@ void TestFilesystemHelpers::safeOpenDirectoryBeneathRootCreatesMissing()
     QVERIFY(QDir(tempDir.path() + QStringLiteral("/p/q/r")).exists());
 }
 
+void TestFilesystemHelpers::safeOpenDirectoryBeneathRootRejectsZeroMode()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // 何も存在しない場合
+    errno = 0;
+    const int missingFd = safeOpenDirectoryBeneathRoot(tempDir.path(), QStringLiteral("a/b"), true,
+                                                       0);
+    QVERIFY(missingFd < 0);
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/a")).exists());
+
+    // 一部の成分が既に存在する場合
+    QVERIFY(QDir().mkpath(tempDir.path() + QStringLiteral("/exists")));
+    errno = 0;
+    const int partialFd = safeOpenDirectoryBeneathRoot(tempDir.path(), QStringLiteral("exists/new"),
+                                                       true, 0);
+    QVERIFY(partialFd < 0);
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/exists/new")).exists());
+
+    // 全ての成分が既に存在する場合も、作成の可能性がある呼び出しとして拒否する
+    QVERIFY(QDir().mkpath(tempDir.path() + QStringLiteral("/full/leaf")));
+    errno = 0;
+    const int fullFd = safeOpenDirectoryBeneathRoot(tempDir.path(), QStringLiteral("full/leaf"),
+                                                    true, 0);
+    QVERIFY(fullFd < 0);
+    QCOMPARE(errno, EINVAL);
+
+    // createMissing = falseのmode 0は既存ディレクトリを開くだけなので許可する
+    const int fd = safeOpenDirectoryBeneathRoot(tempDir.path(), QStringLiteral("full/leaf"), false,
+                                                0);
+    QVERIFY(fd >= 0);
+    ::close(fd);
+}
+
+void TestFilesystemHelpers::safeCreateDirectoryBeneathRootRejectsZeroMode()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // 作成前にmode 0を拒否するため、親も葉も作られない
+    errno = 0;
+    QVERIFY(!safeCreateDirectoryBeneathRoot(tempDir.path(),
+                                            tempDir.path() + QStringLiteral("/nested/leaf"), 0));
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/nested")).exists());
+
+    // 親が既に揃っていて葉だけを作る場合も、mode 0の葉を作らない
+    errno = 0;
+    QVERIFY(!safeCreateDirectoryBeneathRoot(tempDir.path(),
+                                            tempDir.path() + QStringLiteral("/leaf"), 0));
+    QCOMPARE(errno, EINVAL);
+    QVERIFY(!QDir(tempDir.path() + QStringLiteral("/leaf")).exists());
+
+    // 正しいmodeでは同じ位置に作成でき、拒否がmode 0だけによるものだと示す
+    QVERIFY(safeCreateDirectoryBeneathRoot(tempDir.path(),
+                                           tempDir.path() + QStringLiteral("/leaf"), 0755));
+    QVERIFY(QDir(tempDir.path() + QStringLiteral("/leaf")).exists());
+}
+
 void TestFilesystemHelpers::safeOpenDirectoryBeneathRootRejectsSymlinkComponent()
 {
     QTemporaryDir tempDir;

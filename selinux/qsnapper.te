@@ -783,6 +783,21 @@ allow qsnapper_dbus_t var_run_t:lnk_file { getattr read };
 allow qsnapper_dbus_t var_run_t:sock_file { getattr open read write };
 allow qsnapper_dbus_t shell_exec_t:file { getattr open read execute execute_no_trans map };
 
+# ユーザ名とグループ名の解決 (NSS) によるsystemd-userdbへの接続
+# スナップショットの所有者名を表示するため、D-Busサービスがgetpwuidとgetgrgidで名前を解決する
+# /etc/nsswitch.confがsystemdを使う場合、NSSは/run/systemd/userdb配下のソケットへ接続する
+# connecttoはソケットファイルのパスやラベルではなく、接続先のソケットのピアSIDで検査される
+# そのため、パスではなくピアのドメインを対象に許可する
+# kernel_tは名前付きのソケットより広い範囲を指し、この許可はkernel_tの任意のUNIXストリームソケットへの接続を許す
+allow qsnapper_dbus_t kernel_t:unix_stream_socket connectto;
+
+# systemd-machinedのソケットはディストリビューションによって型が異なるため、型が存在する場合だけ許可する
+# 実環境では/run/systemd/userdb/io.systemd.Machineへの接続がsystemd_machined_tとのconnecttoで拒否された
+optional {
+    require { type systemd_machined_t; } # systemd-machinedのドメイン
+    allow qsnapper_dbus_t systemd_machined_t:unix_stream_socket connectto;
+}
+
 # 一時ファイルとログ
 # サービスのQtのログは、専用のハンドラで/var/log配下のログファイルへ追記する
 # syslogへの送信も許可するが、この許可だけでは実際の送信の経路を意味しない

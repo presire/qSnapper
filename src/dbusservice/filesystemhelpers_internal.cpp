@@ -515,7 +515,10 @@ namespace qsnapper::security {
             }
 
             if (::geteuid() != 0) {
-                return safeOpenDirectory(rootPath);
+                // 非rootではカーネルが利用者自身の権限で各成分の検索を検査するため、
+                // root所有の連鎖を要求しない
+                // 要求すると、利用者所有のBtrfsサブボリュームや/tmp配下の木を基点にできなくなる
+                return safeOpenDirectory(rootPath, false);
             }
 
             QStringList components;
@@ -593,6 +596,7 @@ namespace qsnapper::security {
          * @param componentCount 辿る成分数
          * @param createMissing 存在しない成分をmkdirat()で作成するか
          * @param mode createMissing = true時の作成モード
+         *        0は作成前にEINVALで拒否する (createMissing = false時のmode 0は既存ディレクトリを開くだけなので許可する)
          * @param sameMountOnly mount境界 (別mountのroot、または親と異なるデバイス) を越える成分をEXDEVで拒否する場合true
          * @param ownershipOut 基点と各成分の所有権状態の返却先 (再走査を避けるため同時に集積する)
          * @param initialOwnership baseFdまで検査済みの所有権 (渡した場合はbaseFdを再集計しない)
@@ -604,6 +608,14 @@ namespace qsnapper::security {
                                  const DirectoryChainOwnership *initialOwnership)
         {
             if (baseFd < 0 || componentCount < 0 || componentCount > components.size()) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            // 作成を要求しながらmode 0を渡すのは、呼び出し側のmode指定漏れである
+            // 誰にも読み書きできないディレクトリを途中まで作ると、失敗時に片付けられない階層が残るため、
+            // 1つも作成する前に拒否する
+            if (createMissing && mode == 0) {
                 errno = EINVAL;
                 return -1;
             }
@@ -730,6 +742,7 @@ namespace qsnapper::security {
          * @param componentCount 辿る成分数
          * @param createMissing 存在しない成分をmkdirat()で作成するか
          * @param mode createMissing = true時の作成モード
+         *        0はopenDirectoryChainAtの入口でEINVALで拒否される
          * @return 成功時: 最終ディレクトリのfd (呼び出し側でclose)、失敗時: -1 (errno設定)
          */
         int openDirectoryChainNoFollow(const QStringList &components, int componentCount,
@@ -787,6 +800,7 @@ namespace qsnapper::security {
          * @param relativeComponents splitDestinationComponents由来の相対成分列 (非空)
          * @param createMissing 中間成分を作成するか
          * @param mode createMissing = true時の作成モード
+         *        0はopenDirectoryChainAtの入口でEINVALで拒否される
          * @param leafName 最終成分名の返却先
          * @param ownershipOut 同じ走査で集積する所有権状態 (rootが変更主体を確定できなければEPERM)
          * @return 成功時: 親dirfd (呼び出し側でclose)、失敗時: -1 (errno設定)
@@ -833,6 +847,7 @@ namespace qsnapper::security {
          * @param path 対象パス
          * @param createMissing 親ディレクトリが無い場合に作成するか
          * @param mode createMissing = true時の作成モード
+         *        0はopenDirectoryChainAtの入口でEINVALで拒否される
          * @param leafName 最終要素の返却先
          * @return 成功時: 親ディレクトリfd、失敗時: -1
          */

@@ -53,6 +53,37 @@ static void logPluginReport(const snapper::Plugins::Report& report)
 }
 #endif
 
+namespace {
+
+/**
+ * @brief スナップショットに保存するmetadataに、レコード境界を破壊する文字が無いかを確かめる
+ *
+ * 作成と編集で同じ基準を使うため、ここへまとめる
+ * 判定の時機 (認可の後、snapperへ渡す前) は呼び出し側が決め、本関数は値だけを判定する
+ *
+ * @param description 説明文
+ * @param cleanup cleanupアルゴリズム名
+ * @param userdata userdataのマップ
+ * @return 全てのキーと値がisRecordSafeTextを満たす場合true
+ */
+bool isRecordSafeSnapshotMetadata(const QString &description, const QString &cleanup,
+                                  const QMap<QString, QString> &userdata)
+{
+    if (!qsnapper::security::isRecordSafeText(description)
+            || !qsnapper::security::isRecordSafeText(cleanup)) {
+        return false;
+    }
+    for (auto it = userdata.constBegin(); it != userdata.constEnd(); ++it) {
+        if (!qsnapper::security::isRecordSafeText(it.key())
+                || !qsnapper::security::isRecordSafeText(it.value())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 /**
  * @brief Snapperが設定されているか確認
  *
@@ -344,7 +375,8 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
         return QString();
     }
 
-    // 不正な値のために認可のプロンプトを出さないよう、認可の前にも判定する
+    // 不正な値のために認可のプロンプトを出さないよう、認可の前に判定する
+    // 許可リストとの照合は値だけで決まり、cleanupは値で本体へ渡すため、認可後に照合し直さない
     if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
         replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
         return QString();
@@ -363,19 +395,15 @@ QString SnapshotOperations::CreateSnapshot(const QString &configName, const QStr
  * @brief 認可済みのCreateSnapshot本体
  *
  * @param configName 検証済みSnapper設定名
+ * @param cleanup CreateSnapshotが認可前に許可リストと照合したcleanupアルゴリズム名
  * @return 作成されたスナップショットのCSV情報、失敗時は空文字列
+ * @note 本体ではcleanupを許可リストと照合し直さないため、未検証の値で呼び出してはならない
  */
 QString SnapshotOperations::createSnapshotAuthorized(
     const QString &configName, const QString &type, const QString &description,
     int preNumber, const QString &cleanup,
     const QMap<QString, QString> &userdata, bool important)
 {
-    // 即時許可と遅延許可のどちらの経路から本体へ入っても、検証を通らない値を保存しないよう、本体の先頭でも判定する
-    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
-        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
-        return QString();
-    }
-
     try {
         // 認可後に読み直すのは、snapperdやCLIが作成・削除したスナップショットをlibsnapperが取り込まず、古いインスタンスが再利用された番号を操作し得るため
         snapper::Snapper *snapper = getSnapper(configName, /*forceReload=*/true);
@@ -385,19 +413,10 @@ QString SnapshotOperations::createSnapshotAuthorized(
         }
 
         // 格納前にレコード境界を破壊する値を拒否する理由はmodifySnapshotAuthorized()側の注記を参照すること
-        if (!qsnapper::security::isRecordSafeText(description)
-                || !qsnapper::security::isRecordSafeText(cleanup)) {
+        if (!isRecordSafeSnapshotMetadata(description, cleanup, userdata)) {
             replyError(QDBusError::InvalidArgs,
                        QStringLiteral("Snapshot metadata must not contain control characters"));
             return QString();
-        }
-        for (auto it = userdata.constBegin(); it != userdata.constEnd(); ++it) {
-            if (!qsnapper::security::isRecordSafeText(it.key())
-                    || !qsnapper::security::isRecordSafeText(it.value())) {
-                replyError(QDBusError::InvalidArgs,
-                           QStringLiteral("Snapshot metadata must not contain control characters"));
-                return QString();
-            }
         }
 
         // スナップショット作成 (スナップショット一覧の変化) 前にComparisonキャッシュと一覧の指紋を無効化
@@ -538,8 +557,9 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
         return false;
     }
 
-    // 不正な値のために認可のプロンプトを出さないよう、認可の前にも判定する
+    // 不正な値のために認可のプロンプトを出さないよう、認可の前に判定する
     // 未知の名前を保存すると、そのスナップショットがcleanupの対象から黙って外れるため、作成と同じ許可リストで拒否する
+    // 許可リストとの照合は値だけで決まり、cleanupは値で本体へ渡すため、認可後に照合し直さない
     if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
         replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
         return false;
@@ -557,30 +577,20 @@ bool SnapshotOperations::ModifySnapshot(const QString &configName, int number,
  * @brief 認可済みのModifySnapshot本体
  *
  * @param configName 検証済みSnapper設定名
+ * @param cleanup ModifySnapshotが認可前に許可リストと照合したcleanupアルゴリズム名
  * @return 成功時true、失敗時false
+ * @note 本体ではcleanupを許可リストと照合し直さないため、未検証の値で呼び出してはならない
  */
 bool SnapshotOperations::modifySnapshotAuthorized(
     const QString &configName, int number, const QString &description,
     const QString &cleanup, const QMap<QString, QString> &userdata)
 {
-    // 即時許可と遅延許可のどちらの経路から本体へ入っても、検証を通らない値を保存しないよう、本体の先頭でも判定する
-    if (!qsnapper::security::isAllowedCreateCleanupAlgorithm(cleanup)) {
-        replyError(QDBusError::InvalidArgs, QStringLiteral("Invalid cleanup algorithm"));
-        return false;
-    }
-
     // 格納前にレコード境界を破壊する値を拒否する
     // ここを通過したmetadataはListSnapshots等でそのまま連結されるため、qSnapper自身が一覧取得を不能にする値を保存しない
     // カンマは列をずらすだけでレコード境界を壊さないため対象外とする
-    if (!qsnapper::security::isRecordSafeText(description) || !qsnapper::security::isRecordSafeText(cleanup)) {
+    if (!isRecordSafeSnapshotMetadata(description, cleanup, userdata)) {
         replyError(QDBusError::InvalidArgs, QStringLiteral("Snapshot metadata must not contain control characters"));
         return false;
-    }
-    for (auto it = userdata.constBegin(); it != userdata.constEnd(); ++it) {
-        if (!qsnapper::security::isRecordSafeText(it.key()) || !qsnapper::security::isRecordSafeText(it.value())) {
-            replyError(QDBusError::InvalidArgs, QStringLiteral("Snapshot metadata must not contain control characters"));
-            return false;
-        }
     }
 
     try {
@@ -666,7 +676,6 @@ bool SnapshotOperations::DeleteSnapshot(const QString &configName, int number)
 bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
                                                   int number)
 {
-    resetIdleTimer();
 
     // 実行中の復元計画が復元元として参照しているスナップショットは削除しない
     // pin済みdirfdがソース読み取りの同一性を保証するが、復元中の削除は「認可時に存在した復元元」の消失につながるため、ここで明示的に拒否する
@@ -715,7 +724,6 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
 #else
         snapper->deleteSnapshot(snapshot);
 #endif
-        resetIdleTimer();   // 長時間削除後もタイマリセット
         return true;
 
     }
@@ -723,14 +731,12 @@ bool SnapshotOperations::deleteSnapshotAuthorized(const QString &configName,
         // e.what()には設定名やpathが含まれ得るため、ログにもD-Busのエラー本文にも載せない
         qWarning() << "Failed to delete snapshot";
         replyError(QDBusError::Failed, QStringLiteral("Snapper reported an error"));
-        resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
     catch (const std::exception &) {
         // bad_allocなどsnapper以外の例外もスロットの外へ出すとサービスが異常終了するため、固定の文言で応答する
         qWarning() << "Failed to delete snapshot: unexpected exception";
         replyError(QDBusError::Failed, QStringLiteral("Internal error"));
-        resetIdleTimer();   // 例外時もタイマリセット
         return false;
     }
 }

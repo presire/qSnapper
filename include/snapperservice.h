@@ -317,6 +317,13 @@ signals:
     void operationBusyChanged();
 
     /**
+     * @brief 認証後の処理中表示へ切り替えるために通知する
+     * @param method 認可されたD-Busメソッド名
+     * @note 表示専用であり、認可や操作の成功の判定に使ってはならない
+     */
+    void operationAuthorized(const QString &method);
+
+    /**
      * @brief スナップショット作成成功時に発行する
      * @param snapshot 作成されたスナップショット (所有者はSnapperService、発行中のみ有効)
      */
@@ -364,6 +371,14 @@ signals:
      * @param error 失敗理由
      */
     void snapshotModificationFailed(int number, const QString &error);
+
+private slots:
+    /**
+     * @brief ヘルパの認可通知を表示用シグナルへ転送する
+     * @param method 認可されたD-Busメソッド名
+     * @note 表示専用であり、認可や操作の成功の判定に使ってはならない
+     */
+    void onAuthorizationGranted(const QString &method);
 
 private:
     // 内部作成ヘルパー

@@ -40,7 +40,7 @@ QString SnapshotOperations::BeginRestorePlan(const QString &configName,
                                              int counterpartSnapshotNumber,
                                              const QString &restoreMode)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {
@@ -193,7 +193,7 @@ bool SnapshotOperations::StageRestoreEntries(
     const QStringList &filePaths,
     const QStringList &changeTypes)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {
@@ -261,7 +261,7 @@ bool SnapshotOperations::StageRestoreEntries(
  */
 bool SnapshotOperations::CommitRestorePlan(const QString &manifestId)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {
@@ -574,6 +574,7 @@ bool SnapshotOperations::commitRestorePlanAuthorized(const QString &manifestId,
         const QString snapshotDir =
             QString::fromStdString(source->snapshotDir());
         m_restoreExecutions.insert(manifestId, execution);
+        reevaluateIdleState();
         m_restoreExecutions[manifestId].snapshotDir = snapshotDir;
 
         // ソースsnapshotをdirfdでpinする
@@ -721,7 +722,11 @@ public:
         : m_snapshot(snapshot)
     {
         if (counterpartIsCurrent) {
-            m_fd = qsnapper::security::safeOpenDirectory(liveRootPath);
+            // 現在のシステムの根は利用者所有のBtrfsサブボリュームであり得るため、
+            // root所有の連鎖は要求しない
+            // このfdは比較の観測にだけ使い、配下の経路はmakeTreeObserverが
+            // dirfd相対でsymlinkを辿らずに解決するため、名前の差し替えで比較対象を別の木へ向けられない
+            m_fd = qsnapper::security::safeOpenDirectory(liveRootPath, false);
             return;
         }
 
@@ -914,7 +919,7 @@ void SnapshotOperations::failRestorePlanPreflight(
  */
 bool SnapshotOperations::ContinueRestorePlan(const QString &manifestId)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {
@@ -938,7 +943,7 @@ bool SnapshotOperations::ContinueRestorePlan(const QString &manifestId)
  */
 QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {
@@ -993,7 +998,7 @@ QString SnapshotOperations::GetRestorePlanStatus(const QString &manifestId)
  */
 bool SnapshotOperations::CancelRestorePlan(const QString &manifestId)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
     const QString owner = callerOwner();
     if (calledFromDBus() && owner.isEmpty()) {

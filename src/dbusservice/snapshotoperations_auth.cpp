@@ -289,6 +289,86 @@ void SnapshotOperations::resolveTestAuthorizations(bool granted)
 }
 
 /**
+ * @brief 破棄済みサービスへの認可応答を再現できるようcallbackを移す
+ * @return 最初の保留認可の完了callback
+ * @note 本番のQPointer保護を通し、テスト側でサービスの寿命を延長しない
+ */
+std::function<void(bool)> SnapshotOperations::takeTestAuthorizationCompletionForTesting()
+{
+    auto pending = m_testPendingAuthorizations.takeFirst();
+    return [pending = std::move(pending)](bool granted) {
+        pending.second(pending.first, granted);
+    };
+}
+
+/** @brief 本番と共有する認可待ちの件数を返す
+ * @return 確保済みの認可枠数
+ */
+int SnapshotOperations::pendingAuthorizationCountForTesting() const
+{
+    return m_pendingAuthorizations.total();
+}
+
+/** @brief idleの待機状態を観測する
+ * @return タイマが有効ならtrue
+ */
+bool SnapshotOperations::isIdleTimerActiveForTesting() const
+{
+    return m_idleTimer.isActive();
+}
+
+/** @brief 実時間を待たず本番の期限判定を実行する
+ * @note single-shotの発火後と同じくタイマを停止してから呼ぶ
+ */
+void SnapshotOperations::triggerIdleTimeoutForTesting()
+{
+    m_idleTimer.stop();
+    handleIdleTimeout();
+}
+
+/** @brief アイドル期間の一部が経過した状態を作る
+ * @param remainingMs 次の期限までの期間
+ */
+void SnapshotOperations::setIdleTimerRemainingTimeForTesting(int remainingMs)
+{
+    m_idleTimer.start(remainingMs);
+}
+
+/** @brief 次の期限までに設定された期間を返す
+ * @return ミリ秒単位の設定値
+ */
+int SnapshotOperations::idleTimerIntervalForTesting() const
+{
+    return m_idleTimer.interval();
+}
+
+/** @brief timer操作の開始を外部への送信なしで再現する
+ * @param query 照会ならtrue、変更ならfalse
+ * @return 本番と同じ破棄監視を持つ操作
+ */
+qsnapper::dbusservice::SystemdTimerOperation *SnapshotOperations::beginTimerOperationForTesting(bool query)
+{
+    auto *operation = new qsnapper::dbusservice::SystemdTimerOperation(
+        QDBusConnection::systemBus(), qsnapper::dbusservice::SystemdTimerOperation::Kind::Query,
+        {}, {}, this);
+    (query ? m_timerQueryOperation : m_timerOperation) = operation;
+    observeOperationLifetime(operation);
+    return operation;
+}
+
+/** @brief 通常完了と同じくtimerの枠を解放する
+ * @param query 照会ならtrue、変更ならfalse
+ * @note QObjectの遅延破棄はbusy解除とは独立して検証する
+ */
+void SnapshotOperations::endTimerOperationForTesting(bool query)
+{
+    auto &operation = query ? m_timerQueryOperation : m_timerOperation;
+    operation->deleteLater();
+    operation.clear();
+    reevaluateIdleState();
+}
+
+/**
  * @brief 復元の実行中の状態を、mountせずに作る
  *
  * mountedとsnapshotDirFdを未使用の値にしておくため、
@@ -301,6 +381,7 @@ void SnapshotOperations::beginRestoreExecutionForTesting(const QString &configNa
     RestoreExecution execution;
     execution.configName = configName;
     m_restoreExecutions.insert(QStringLiteral("test-restore-execution"), execution);
+    reevaluateIdleState();
 }
 
 /**
@@ -324,7 +405,7 @@ void SnapshotOperations::beginSnapperdOperationForTesting()
     m_snapperdOperation = new qsnapper::dbusservice::SnapperdOperation(
         QDBusConnection::systemBus(), QString(), QDBusMessage(), QString(), {},
         []() { return false; }, this);
-    resetIdleTimer();
+    observeOperationLifetime(m_snapperdOperation);
 }
 
 /**
@@ -333,8 +414,6 @@ void SnapshotOperations::beginSnapperdOperationForTesting()
 void SnapshotOperations::endSnapperdOperationForTesting()
 {
     delete m_snapperdOperation.data();
-    m_snapperdOperation.clear();
-    resetIdleTimer();
 }
 
 /**
@@ -413,6 +492,7 @@ void SnapshotOperations::beginRestoreApplyForTesting(
     execution.useReflink = useReflink;
     execution.rootReadWriteState = rootReadWriteState;
     m_restoreExecutions.insert(manifestId, execution);
+    reevaluateIdleState();
 }
 
 /**
@@ -457,7 +537,39 @@ bool SnapshotOperations::authorizeThrowingBodyForTesting(const std::function<boo
 void SnapshotOperations::endPendingAuthorization(uint callerUid)
 {
     m_pendingAuthorizations.release(callerUid);
-    resetIdleTimer();
+    reevaluateIdleState();
+}
+
+/**
+ * @brief 認可枠と継続の寿命を本番とテストで同じ経路に束ねる
+ * @param reply 認可要求の応答先
+ * @param callerUid 認可枠を数えるUID
+ * @param continuation 認可結果を処理する継続
+ * @return 上限内なら寿命保護されたcallback、上限に達した場合は空の関数
+ * @note 継続が操作を開始する前にidleへ戻らず、例外時にも枠を必ず解放する
+ */
+std::function<void(bool)> SnapshotOperations::beginPendingAuthorization(
+    const CallReply &reply, uint callerUid,
+    std::function<void(const CallReply &, bool)> continuation)
+{
+    if (!m_pendingAuthorizations.tryAcquire(callerUid)) {
+        replyError(QDBusError::LimitsExceeded,
+                   QStringLiteral("Too many pending authorization requests"));
+        return {};
+    }
+    reevaluateIdleState();
+    return [service = QPointer<SnapshotOperations>(this), reply,
+            continuation = std::move(continuation), callerUid](bool granted) {
+        if (!service) {
+            return;
+        }
+        const auto pending = qScopeGuard([service, callerUid]() {
+            if (service) {
+                service->endPendingAuthorization(callerUid);
+            }
+        });
+        continuation(reply, granted);
+    };
 }
 
 /**
@@ -480,7 +592,7 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     const QString &actionId,
     std::function<void(const CallReply &, bool)> continuation)
 {
-    resetIdleTimer();
+    recordCallActivity();
 
 #ifdef QSNAPPER_ENABLE_TEST_HOOKS
     // 隔離環境にはpolkitdが無いため、テスト用サービスでは認可の結果だけを差し替える
@@ -490,6 +602,21 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     ++m_testAuthorizationRequests;
     if (m_testAuthorization == TestAuthorization::Grant) {
         return AuthorizationOutcome::Granted;
+    }
+    if (m_testAuthorization == TestAuthorization::DeferWithBudget) {
+        const CallReply testReply = captureCallReply();
+        auto completion = beginPendingAuthorization(testReply, 0, std::move(continuation));
+        if (!completion) {
+            return AuthorizationOutcome::Denied;
+        }
+        m_testPendingAuthorizations.append({testReply,
+            [completion = std::move(completion)](const CallReply &, bool granted) {
+                completion(granted);
+            }});
+        if (testReply.fromDBus) {
+            setDelayedReply(true);
+        }
+        return AuthorizationOutcome::Deferred;
     }
 #endif
 
@@ -565,10 +692,9 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     }
     const uint callerUid = uidReply.value();
 
-    if (!m_pendingAuthorizations.tryAcquire(callerUid)) {
+    auto completion = beginPendingAuthorization(reply, callerUid, std::move(continuation));
+    if (!completion) {
         g_object_unref(subject);
-        replyError(QDBusError::LimitsExceeded,
-                   QStringLiteral("Too many pending authorization requests"));
         return AuthorizationOutcome::Denied;
     }
 
@@ -576,10 +702,7 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     // 一意に紐づくようにする
     auto *request = new AsyncAuthorization;
     request->service = this;
-    request->continuation = [this, reply, continuation, callerUid](bool granted) {
-        endPendingAuthorization(callerUid);
-        continuation(reply, granted);
-    };
+    request->continuation = std::move(completion);
 
     polkit_authority_check_authorization(
         authority, subject, actionId.toUtf8().constData(), nullptr,
@@ -590,8 +713,6 @@ SnapshotOperations::AuthorizationOutcome SnapshotOperations::beginAuthorization(
     g_object_unref(subject);
 
     setDelayedReply(true);
-    // プロンプト応答待ちの間にアイドル終了しないようタイマを止める
-    m_idleTimer.stop();
     return AuthorizationOutcome::Deferred;
 }
 

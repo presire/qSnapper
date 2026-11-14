@@ -84,6 +84,7 @@ add_test(NAME tst_recordsafety COMMAND tst_recordsafety)
 add_executable(tst_filesystemhelpers
     tst_filesystemhelpers.cpp
     tst_filesystemhelpers.h
+    tst_temprootguard.h
     tst_filesystemhelpers_basic.cpp
     tst_filesystemhelpers_replace.cpp
     tst_filesystemhelpers_beneathroot.cpp
@@ -233,6 +234,7 @@ add_test(NAME tst_csvrecord COMMAND tst_csvrecord)
 find_package(Qt6 REQUIRED COMPONENTS DBus)
 add_executable(tst_snapshotoperations
     tst_snapshotoperations.cpp
+    tst_temprootguard.h
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_auth.cpp
     ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_snapshots.cpp
@@ -438,6 +440,24 @@ target_link_libraries(tst_displaytext PRIVATE
 set_target_properties(tst_displaytext PROPERTIES AUTOMOC ON)
 add_test(NAME tst_displaytext COMMAND tst_displaytext)
 
+# --- tst_filestatus ---
+# ファイル変更の一覧と詳細で共有する状態文字列の変換 (src/dbusservice/snapshotoperations_internal.h) を確認する
+# 共通化前の表記と全てのフラグの組み合わせで一致することを確認し、一覧と詳細の表記が食い違わないようにする
+# 変換関数はinline定義で、snapperのフラグの定義だけを使うため、libsnapperはリンクしない
+add_executable(tst_filestatus
+    tst_filestatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/dbusservice/snapshotoperations_internal.h
+)
+target_include_directories(tst_filestatus PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/dbusservice
+)
+target_link_libraries(tst_filestatus PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+set_target_properties(tst_filestatus PROPERTIES AUTOMOC ON)
+add_test(NAME tst_filestatus COMMAND tst_filestatus)
+
 # tst_filechangemodelと同じ実装ソースをリンクし、tst_filechangemodel.hのモック (転送層の差し替えなど) を共有する
 add_executable(tst_filechangemodel_gui
     tst_filechangemodel_gui.cpp
@@ -465,7 +485,7 @@ add_test(NAME tst_filechangemodel_gui COMMAND tst_filechangemodel_gui)
 # Debugビルドで"-DQSNAPPER_TEST_SANITIZE=ON"を指定した場合だけ有効になる
 # テストを追加した場合は、下記のターゲット一覧にも追加すること
 if(QSNAPPER_TEST_SANITIZE)
-    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation tst_restoreplanstatus tst_userdataparser tst_displaytext tst_filechangemodel_gui)
+    foreach(tgt tst_configname tst_filepaths tst_recordsafety tst_filesystemhelpers tst_filechangemodel tst_comparisoncache tst_restoremanifest tst_restorevalidation tst_restoreplanexecutor tst_csvrecord tst_snapshotoperations tst_singleinstanceguard tst_snapshotdelete tst_externalurlopener tst_btrfsinfo tst_configpathvalidation tst_restoreplanstatus tst_userdataparser tst_displaytext tst_filechangemodel_gui tst_filestatus)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${tgt} PRIVATE

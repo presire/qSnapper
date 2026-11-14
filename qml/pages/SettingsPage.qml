@@ -175,7 +175,8 @@ Page {
         modal: true
         standardButtons: Dialog.Ok | Dialog.Cancel
         anchors.centerIn: Overlay.overlay
-        width: Math.min(460, root.width - 40)
+        // ページの幅は起動直後に変化するため、ウィンドウの幅を基準にする
+        width: Math.min(460, ApplicationWindow.window ? ApplicationWindow.window.width - 40 : 460)
 
         Label {
             width: parent.width
@@ -376,6 +377,7 @@ Page {
 
     ScrollView {
         id: scrollView
+        implicitWidth: 0    // 表示幅をページの推奨幅へ反映させない (実際の幅はanchors.fillで決まる)
         anchors.fill: parent
         contentWidth: availableWidth
         clip: true

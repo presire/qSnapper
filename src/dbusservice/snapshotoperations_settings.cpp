@@ -157,13 +157,13 @@ SnapperTimerStateMap SnapshotOperations::getTimerStatesAuthorized()
     auto *operation = new SystemdTimerOperation(reply->connection, SystemdTimerOperation::Kind::Query,
                                                 qsnapper::security::snapperTimerUnits(), {}, this);
     m_timerQueryOperation = operation;
-    resetIdleTimer();
+    observeOperationLifetime(operation);
 
     operation->start([this, operation, reply = *reply](SystemdTimerOperation::Outcome outcome,
                                                        const SnapperTimerStateMap &states) {
         operation->deleteLater();
         m_timerQueryOperation.clear();
-        resetIdleTimer();
+        reevaluateIdleState();
 
         if (outcome != SystemdTimerOperation::Outcome::Succeeded) {
             sendAsyncError(reply, QDBusError::errorString(QDBusError::Failed), TimerQueryFailedText);
@@ -177,7 +177,8 @@ SnapperTimerStateMap SnapshotOperations::getTimerStatesAuthorized()
 /**
  * @brief snapperのsystemd timerを有効化して起動する、または停止して無効化する
  *
- * unit名は、認可の前と本体の直前の両方で、固定の許可リストとの完全一致で確かめる
+ * unit名は、認可の前に固定の許可リストとの完全一致で確かめ、許可リストの定数へ置き換える
+ * 認可後の本体へは置き換えた定数を値で渡すため、認可を待つ間に呼び出し元が値を変えることはできない
  * systemdへ渡すのは許可リストの定数であり、呼び出し元の文字列は渡さない
  *
  * @param unit unit名
@@ -186,7 +187,8 @@ SnapperTimerStateMap SnapshotOperations::getTimerStatesAuthorized()
  */
 bool SnapshotOperations::SetTimerEnabled(const QString &unit, bool enabled)
 {
-    if (!qsnapper::security::canonicalSnapperTimerUnit(unit)) {
+    const auto canonical = qsnapper::security::canonicalSnapperTimerUnit(unit);
+    if (!canonical) {
         replyError(QDBusError::InvalidArgs, InvalidTimerUnitText);
         return false;
     }
@@ -194,10 +196,12 @@ bool SnapshotOperations::SetTimerEnabled(const QString &unit, bool enabled)
         return false;
     }
 
+    // unit名の正規化は値だけで決まる静的な処理のため、認可後に照合し直さず、認可前の結果を値で渡す
+    // timer操作の排他は時間の経過で変わり得るため、本体でも確かめ直す
     return authorizeThen<bool>(
         QStringLiteral("com.presire.qsnapper.manage-timers"),
-        [this, unit, enabled]() {
-            return setTimerEnabledAuthorized(unit, enabled);
+        [this, canonicalUnit = *canonical, enabled]() {
+            return setTimerEnabledAuthorized(canonicalUnit, enabled);
         });
 }
 
@@ -209,17 +213,14 @@ bool SnapshotOperations::SetTimerEnabled(const QString &unit, bool enabled)
  *   - 呼び出し元がバスに接続している (結果を受け取れない呼び出し元のために、変更を続けない)
  * 満たさなくなった時点で新たな変更を止め、実際の状態を読み直してから失敗を返す
  *
- * @param unit 呼び出し元が指定したunit名
+ * @param canonicalUnit canonicalSnapperTimerUnitが返した許可リストの定数
  * @param enabled trueで有効化と起動、falseで停止と無効化
  * @return 常にfalse (応答は操作の完了時に送る)
+ * @note 呼び出し元の文字列をそのまま渡してはならない
+ *       unit名の照合はSetTimerEnabledが認可前に済ませており、本体では照合し直さないためである
  */
-bool SnapshotOperations::setTimerEnabledAuthorized(const QString &unit, bool enabled)
+bool SnapshotOperations::setTimerEnabledAuthorized(const QString &canonicalUnit, bool enabled)
 {
-    const auto canonical = qsnapper::security::canonicalSnapperTimerUnit(unit);
-    if (!canonical) {
-        replyError(QDBusError::InvalidArgs, InvalidTimerUnitText);
-        return false;
-    }
     if (rejectWhileTimerOperationRunning()) {
         return false;
     }
@@ -254,17 +255,17 @@ bool SnapshotOperations::setTimerEnabledAuthorized(const QString &unit, bool ena
     };
 
     const auto kind = enabled ? SystemdTimerOperation::Kind::Enable : SystemdTimerOperation::Kind::Disable;
-    auto *operation = new SystemdTimerOperation(reply->connection, kind, QStringList{*canonical},
+    auto *operation = new SystemdTimerOperation(reply->connection, kind, QStringList{canonicalUnit},
                                                 mutationGuard, this);
     m_timerOperation = operation;
-    resetIdleTimer();
+    observeOperationLifetime(operation);
 
     operation->start([this, operation, callerWatcher, stoppedByRestore,
                       reply = *reply](SystemdTimerOperation::Outcome outcome, const SnapperTimerStateMap &) {
         operation->deleteLater();
         callerWatcher->deleteLater();
         m_timerOperation.clear();
-        resetIdleTimer();
+        reevaluateIdleState();
 
         if (outcome == SystemdTimerOperation::Outcome::Succeeded) {
             reply.connection.send(reply.message.createReply(QVariant::fromValue(true)));

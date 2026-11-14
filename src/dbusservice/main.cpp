@@ -50,6 +50,26 @@ namespace {
  */
 int openLogFileOnce()
 {
+    // safeMkpathは信頼検査をせずにmkdiratするため、作成より先に
+    // 既存の最も近い祖先までがroot所有でgroupとotherから書き込めないことを確かめる
+    // 怠ると/var/logが差し替えられていた場合に、その下へroot所有のログディレクトリを作らされる
+    // 検査後に祖先が差し替えられる余地は残るが、作成後にもsafeOpenDirectory(logDir(), true)で
+    // 鎖全体を確かめ、開けない場合はログファイルを作らない
+    QString ancestor = QDir::cleanPath(logDir());
+    while (true) {
+        const int slash = ancestor.lastIndexOf(QLatin1Char('/'));
+        ancestor = slash > 0 ? ancestor.left(slash) : QStringLiteral("/");
+        const int ancestorFd = qsnapper::security::safeOpenDirectory(ancestor, true);
+        if (ancestorFd >= 0) {
+            ::close(ancestorFd);
+            break;
+        }
+        // 祖先がまだ無い場合はさらに上へ辿る (作成はsafeMkpathが行う)
+        if (errno != ENOENT || ancestor == QStringLiteral("/")) {
+            return -1;
+        }
+    }
+
     // root:rootで起動されるため、作成されるディレクトリの所有者はrootになる
     // 恒久的なmode設定はsystemd-tmpfiles (tmpfiles.d/qsnapper.conf) 側で担保するが、
     // パッケージ導入前の初回起動でも安全側に倒すため本関数でも0700で作成する
@@ -57,7 +77,8 @@ int openLogFileOnce()
         return -1;
     }
 
-    const int dirFd = qsnapper::security::safeOpenDirectory(logDir());
+    // ログディレクトリはroot所有の連鎖の下に置くため、既定の信頼要求を明示的に使う
+    const int dirFd = qsnapper::security::safeOpenDirectory(logDir(), true);
     if (dirFd < 0) {
         return -1;
     }

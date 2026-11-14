@@ -114,11 +114,8 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
 {
     m_idleTimer.setSingleShot(true);
     m_idleTimer.setInterval(IdleTimeoutMs);
-    connect(&m_idleTimer, &QTimer::timeout, this, []() {
-        qInfo() << "Idle timeout reached, shutting down...";
-        QCoreApplication::quit();
-    });
-    m_idleTimer.start();
+    connect(&m_idleTimer, &QTimer::timeout, this, &SnapshotOperations::handleIdleTimeout);
+    reevaluateIdleState();
 
     m_restoreExecutor.setEntryApplier(
         [this](const QString &manifestId,
@@ -129,7 +126,6 @@ SnapshotOperations::SnapshotOperations(QObject *parent)
         [this](const QString &manifestId, int current, int total,
                const QString &path) {
             Q_UNUSED(path);
-            resetIdleTimer();
             const QString owner = m_restorePlanOwners.value(manifestId);
             if (sendRestorePlanSignalToOwner(owner, QStringLiteral("restorePlanProgress"),
                                              QVariantList{manifestId, current, total})) {
@@ -187,22 +183,67 @@ SnapshotOperations::~SnapshotOperations()
 }
 
 /**
- * @brief アイドルタイマをリセット
- *
- * D-Busメソッド呼び出し時にタイマをリセットし、アイドルタイムアウトを延長する
- *
- * polkitプロンプトの応答待ちが1件でも残っている間はタイマを止めたままにする
- * (プロンプトはタイムアウトを持たないため、認証中にアイドル終了してしまうと、ユーザがパスワードを入力した直後に呼び出しが失われる)
+ * @brief 応答と復元後処理を残しているか判定する
+ * @return 処理が残る場合true
+ * @note 計画が存在するだけでは常駐させず、実行contextが残る期間だけ復元をbusyとする
  */
-void SnapshotOperations::resetIdleTimer()
+bool SnapshotOperations::isBusy() const
 {
-    // timerの操作 (変更と照会) の途中で終了すると、systemdへの変更が途中で止まったり、呼び出し元へ結果を返せなくなるため、完了まで終了しない
-    // snapperdへ転送した変更も同じ理由で、完了 (結果が分からない場合はsnapperdの終了) まで終了しない
-    if (m_pendingAuthorizations.total() > 0 || m_timerOperation || m_timerQueryOperation || m_snapperdOperation) {
+    return m_pendingAuthorizations.total() > 0 || m_timerOperation
+        || m_timerQueryOperation || m_snapperdOperation || !m_restoreExecutions.isEmpty();
+}
+
+/**
+ * @brief 実行状態の変化をアイドルタイマへ反映する
+ * @note 完了した1件で他の処理のbusy状態を打ち消さないよう、全ての状態を毎回見る
+ */
+void SnapshotOperations::reevaluateIdleState()
+{
+    if (isBusy()) {
         m_idleTimer.stop();
+    }
+    else if (!m_idleTimer.isActive()) {
+        m_idleTimer.start(IdleTimeoutMs);
+    }
+}
+
+/**
+ * @brief 呼び出し後に全期間を確保し、busyなら待機を停止する
+ * @note QEvent::MetaCallは内部callbackも含むため、通信とみなさず明示的な入口で呼ぶ
+ */
+void SnapshotOperations::recordCallActivity()
+{
+    m_idleTimer.stop();
+    reevaluateIdleState();
+}
+
+/**
+ * @brief 操作の開始と破棄を同じbusy再評価へ結び付ける
+ * @param operation 実行中のQPointerに設定済みの操作
+ * @note タイマを接続contextにして、サービスのメンバ破棄後に子QObjectが通知しても呼ばせない
+ */
+void SnapshotOperations::observeOperationLifetime(QObject *operation)
+{
+    connect(operation, &QObject::destroyed, &m_idleTimer,
+            [this]() { reevaluateIdleState(); });
+    reevaluateIdleState();
+}
+
+/**
+ * @brief 期限の到来時にもbusyを確認してから終了する
+ * @note テストは同じ判定を通し、終了だけを通知に置き換える
+ */
+void SnapshotOperations::handleIdleTimeout()
+{
+    if (isBusy()) {
         return;
     }
-    m_idleTimer.start();
+#ifdef QSNAPPER_ENABLE_TEST_HOOKS
+    emit idleTimeoutForTesting();
+#else
+    qInfo() << "Idle timeout reached, shutting down...";
+    QCoreApplication::quit();
+#endif
 }
 
 /**
@@ -402,6 +443,7 @@ void SnapshotOperations::cleanupRestoreExecution(const QString &manifestId)
     const RestoreExecution context = execution.value();
     unmountRestoreExecution(context);
     m_restoreExecutions.erase(execution);
+    reevaluateIdleState();
 }
 
 /**
@@ -479,6 +521,7 @@ bool SnapshotOperations::finalizeRestoreExecution(const QString &manifestId)
     }
     unmountRestoreExecution(execution.value());
     m_restoreExecutions.erase(execution);
+    reevaluateIdleState();
     return rootLeftReadOnly;
 }
 
@@ -513,6 +556,36 @@ bool SnapshotOperations::sendRestorePlanSignalToOwner(const QString &owner,
         qWarning() << "Failed to send restore plan signal" << member << "to" << owner;
     }
     return true;
+}
+
+/**
+ * @brief 認可が確定したことを呼び出し元だけへ通知する
+ *
+ * GUIは認証待ちの表示を処理中の文言へ切り替えるために使う
+ * システムバスへブロードキャストすると他の利用者が特権操作の開始を観測できるため、呼び出し元のunique name宛てにだけ送る
+ * 単体テストの直接呼び出しには宛先のunique nameが無いため何もしない (全体へのemitで代用しない)
+ *
+ * @param reply 認可要求の応答コンテキスト (宛先と送信接続を兼ねる)
+ * @note 表示専用の通知であり、認可や処理の成否の判断に使ってはならない
+ */
+void SnapshotOperations::notifyAuthorizationGranted(const CallReply &reply)
+{
+    if (!reply.fromDBus || reply.message.service().isEmpty()) {
+        return;
+    }
+
+    QDBusMessage signal = QDBusMessage::createTargetedSignal(
+        reply.message.service(),
+        QStringLiteral("/com/presire/qsnapper/Operations"),
+        QStringLiteral("com.presire.qsnapper.Operations"),
+        QStringLiteral("authorizationGranted"));
+    signal.setArguments({reply.message.member()});
+    if (!reply.connection.send(signal)) {
+        // 送信に失敗しても、全体へのブロードキャストには切り替えない
+        // 呼び出し元へ通知が届かないことより、他の利用者に特権操作の開始が漏れることを避ける
+        qWarning() << "Failed to send authorizationGranted signal to"
+                   << reply.message.service();
+    }
 }
 
 /**
@@ -557,7 +630,6 @@ void SnapshotOperations::finishRestorePlan(
         emit restorePlanFinished(manifestId, terminalState, signalMessage);
     }
 
-    m_restoreExecutions.remove(manifestId);
     m_restoreRegistry.remove(manifestId);
     m_restorePlanOwners.remove(manifestId);
     removeUnusedRestoreOwnerWatches();

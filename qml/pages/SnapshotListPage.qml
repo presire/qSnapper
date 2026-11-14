@@ -233,6 +233,25 @@ Page {
                         root.clearSelection()
                         snapshotListModel.refresh()
                     }
+
+                    // SnapperService::operationAuthorizedを受け取り、表示中の待機ダイアログを認証待ちから処理中の文言へ切り替える
+                    // SnapperServiceを対象とするConnectionsを本画面で1つにまとめるため、設定切替用のConnectionsで受け取る
+                    // 通知は表示専用であり、待機ダイアログを閉じる契機は従来どおり最終的な応答のシグナルだけとする
+                    /**
+                     * @brief 認可された操作に対応する待機ダイアログの表示を処理中へ切り替える
+                     * @param method 認可されたD-Busメソッド名
+                     * @note 表示中の待機ダイアログのauthorizedを変更する
+                     *       通知はメソッド名しか持たないため、過去に応答待ちの期限が切れた同名の要求の通知が遅れて届くと、表示だけが早く切り替わる場合がある
+                     */
+                    function onOperationAuthorized(method) {
+                        if (deletingBusyDialog.visible && (method === "DeleteSnapshot" || method === "DeleteSnapshots")) {
+                            deletingBusyDialog.authorized = true
+                        }
+
+                        if (modifyingBusyDialog.visible && method === "ModifySnapshot") {
+                            modifyingBusyDialog.authorized = true
+                        }
+                    }
                 }
 
                 // 設定切替時: SnapperService.currentConfig (C++) を更新する
@@ -797,6 +816,9 @@ Page {
     // 削除処理中のウェイト表示ダイアログ
     BorderedDialog {
         id: deletingBusyDialog
+
+        property bool authorized: false  // 認証後の表示へ切り替えたかどうか
+
         title: qsTr("Please wait")
         anchors.centerIn: Overlay.overlay
         modal: true
@@ -808,6 +830,12 @@ Page {
             return Math.min(Math.max(calculated, 400), 600)
         }
 
+        // 前回の操作で切り替えた表示を持ち越さないよう、開くたびに認証待ちの表示へ戻す
+        // 本ダイアログは要求を送る前に開くため、認証が不要で即座に届く認可通知もここで消さない
+        onAboutToShow: {
+            authorized = false
+        }
+
         ColumnLayout {
             width: parent.width
             spacing: 15
@@ -817,8 +845,9 @@ Page {
                 Layout.alignment: Qt.AlignHCenter
             }
 
+            // 認証画面が他のウィンドウの裏に隠れても待機の理由が分かるよう、認可の通知を受けるまでは認証待ちと表示する
             Label {
-                text: qsTr("Deleting snapshots, please wait...")
+                text: deletingBusyDialog.authorized ? qsTr("Deleting snapshots, please wait...") : qsTr("Waiting for authentication...")
                 font.pixelSize: 14
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
@@ -833,6 +862,8 @@ Page {
     BorderedDialog {
         id: modifyingBusyDialog  // 待機ダイアログの参照名
 
+        property bool authorized: false  // 認証後の表示へ切り替えたかどうか
+
         title: qsTr("Please wait")                    // ダイアログのタイトル
         standardButtons: Dialog.NoButton              // 閉じる操作を与えないためボタンを置かない
         anchors.centerIn: Overlay.overlay             // ウィンドウ全体の中央に表示する
@@ -844,6 +875,12 @@ Page {
         }
         modal: true                                   // 実行中に背後の画面を操作させない
         closePolicy: Popup.NoAutoClose                // [Esc]キーや外側のクリックで閉じさせない
+
+        // 前回の操作で切り替えた表示を持ち越さないよう、開くたびに認証待ちの表示へ戻す
+        // 本ダイアログは要求を送る前に開くため、認証が不要で即座に届く認可通知もここで消さない
+        onAboutToShow: {
+            authorized = false
+        }
 
         // 進行状況の表示領域
         ColumnLayout {
@@ -857,12 +894,14 @@ Page {
             }
 
             // 待機中であることを利用者に伝える文言
+            // 認証画面が他のウィンドウの裏に隠れても待機の理由が分かるよう、認可の通知を受けるまでは認証待ちと表示する
             Label {
-                text: qsTr("Applying changes to the snapshot, please wait...")  // 待機中の案内文
-                font.pixelSize: 14                                              // 文字の大きさ
-                horizontalAlignment: Text.AlignHCenter                          // 水平方向の中央に揃える
-                wrapMode: Text.WordWrap                                         // 幅に収まるよう折り返す
-                Layout.fillWidth: true                                          // 折り返しの基準となる幅を確保する
+                // 待機中の案内文 (認可の通知を受けた後は処理中の文言へ切り替える)
+                text: modifyingBusyDialog.authorized ? qsTr("Applying changes to the snapshot, please wait...") : qsTr("Waiting for authentication...")
+                font.pixelSize: 14                      // 文字の大きさ
+                horizontalAlignment: Text.AlignHCenter  // 水平方向の中央に揃える
+                wrapMode: Text.WordWrap                 // 幅に収まるよう折り返す
+                Layout.fillWidth: true                  // 折り返しの基準となる幅を確保する
             }
         }
     }

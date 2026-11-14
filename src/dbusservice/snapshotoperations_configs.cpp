@@ -374,7 +374,7 @@ void SnapshotOperations::startSnapperdOperation(
         },
         this);
     m_snapperdOperation = operation;
-    resetIdleTimer();
+    observeOperationLifetime(operation);
 
     operation->start(
         replyDeadlineMs,
@@ -392,7 +392,7 @@ void SnapshotOperations::startSnapperdOperation(
             m_snapper.reset();
             m_currentConfig.clear();
             verify(outcome, *stoppedByRestore, reply, *replied);
-            resetIdleTimer();
+            reevaluateIdleState();
         });
 }
 
